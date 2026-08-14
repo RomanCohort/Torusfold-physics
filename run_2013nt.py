@@ -122,6 +122,16 @@ def main():
     print(f"  能量: {result.energy_cg:.0f}")
     print(f"  PDB: output_2013nt/isrnaclong_final.pdb")
 
+    # 每残基置信度统计
+    if result.per_res_confidence is not None:
+        import numpy as np
+        conf = result.per_res_confidence
+        print(f"\n  每残基置信度:")
+        print(f"    均值: {conf.mean():.3f}")
+        print(f"    中位: {np.median(conf):.3f}")
+        print(f"    低置信 (<0.3): {(conf < 0.3).sum()} 残基 ({(conf < 0.3).mean():.1%})")
+        print(f"    高置信 (>0.7): {(conf > 0.7).sum()} 残基 ({(conf > 0.7).mean():.1%})")
+
 
 if __name__ == "__main__":
     main()
