@@ -197,39 +197,14 @@ Features:
 - Energy convergence visualization
 - PDB download
 
-## Supplementary Material
-
-### Pipeline Architecture
-
-![Pipeline Architecture](docs/images/2e1596c7817ba44039e3459f7d8bb67e.png)
-
-### Results Overview
-
-![Results Overview](docs/images/212a3757e8f07658bcc31051fdc0a086.png)
-
-### Structure Visualization
-
-![Structure Visualization](docs/images/142e3b5c9e0197695f6726a1c949fa11.png)
-
-### Energy Convergence
-
-![Energy Convergence](docs/images/ad10e18fdab5ea6c6b2d4560e8e9929d.png)
-
-### Force Field Analysis
-
-![Force Field Analysis](docs/images/d2de8bb6cc6dea09ccbf37b4cb1fe18d.png)
-
-### Pair Satisfaction
-
-![Pair Satisfaction](docs/images/ff6b9df29dc9b89dd213071b2b7ab96b.png)
-
-### BSJ Closure
-
-![BSJ Closure](docs/images/5888b73b319b083e45846af151c3a86f.png)
-
-### Ablation Study
-
-![Ablation Study](docs/images/e3ef557a0d8db20579f2f6dcf2ebebc6.png)
+![Supplementary](docs/images/2e1596c7817ba44039e3459f7d8bb67e.png)
+![Supplementary](docs/images/212a3757e8f07658bcc31051fdc0a086.png)
+![Supplementary](docs/images/142e3b5c9e0197695f6726a1c949fa11.png)
+![Supplementary](docs/images/ad10e18fdab5ea6c6b2d4560e8e9929d.png)
+![Supplementary](docs/images/d2de8bb6cc6dea09ccbf37b4cb1fe18d.png)
+![Supplementary](docs/images/ff6b9df29dc9b89dd213071b2b7ab96b.png)
+![Supplementary](docs/images/5888b73b319b083e45846af151c3a86f.png)
+![Supplementary](docs/images/e3ef557a0d8db20579f2f6dcf2ebebc6.png)
 
 ## License
 
