@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TorusFold — circRNA 3D Structure Prediction</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9EC;</text></svg>">
+<link rel="stylesheet" href="/web/molstar.css">
+<link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+<!-- Floating particles -->
+<div class="particles"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+
+<header>
+  <div class="brand">
+    <div class="logo">&#x1F9EC;</div>
+    <h1>TorusFold</h1>
+    <span class="tag">circRNA 3D Structure Prediction</span>
+  </div>
+  <div class="sub" id="server-status">connecting...</div>
+</header>
+
+<!-- ============================================================
+     HERO SECTION
+     ============================================================ -->
+<section class="hero" id="hero-section">
+  <div class="hero-inner">
+    <h2 class="hero-title">From Sequence to 3D Structure <span class="hero-highlight">in 7 Hours</span></h2>
+    <p class="hero-subtitle">
+      End-to-end prediction pipeline for circular RNA: secondary structure, coarse-grained 3D folding,
+      coarse-grained refinement, and all-atom polishing — powered by physics-informed deep learning.
+    </p>
+  </div>
+
+  <!-- Pipeline visualization -->
+  <div class="pipeline-row" id="hero-pipeline">
+    <div class="pipe-step" data-level="0">
+      <div class="pipe-icon">0</div>
+      <div class="pipe-label">Secondary<br>Structure</div>
+    </div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-step" data-level="1">
+      <div class="pipe-icon">1</div>
+      <div class="pipe-label">3D Structure<br>Prediction</div>
+    </div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-step" data-level="2">
+      <div class="pipe-icon">2</div>
+      <div class="pipe-label">CG<br>Refinement</div>
+    </div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-step" data-level="3">
+      <div class="pipe-icon">3</div>
+      <div class="pipe-label">All-Atom<br>Placement</div>
+    </div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-step" data-level="4">
+      <div class="pipe-icon">4</div>
+      <div class="pipe-label">All-Atom<br>Refinement</div>
+    </div>
+    <div class="pipe-arrow">&rarr;</div>
+    <div class="pipe-step" data-level="5">
+      <div class="pipe-icon">5</div>
+      <div class="pipe-label">All-Atom<br>Minimization</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     MAIN WORKSPACE
+     ============================================================ -->
+<div id="main">
+  <button class="panel-toggle left-toggle" id="left-toggle" title="Collapse/expand left panel">&#9664;</button>
+
+  <section class="left" id="left-panel">
+
+    <!-- ── Sequence input card ── -->
+    <div class="card">
+      <h2>Sequence</h2>
+      <textarea id="sequence"
+        placeholder="Paste circRNA sequence (ACGU/T/N)&#10;or FASTA format (lines starting with > are ignored)&#10;or drag & drop .fa / .fasta / .txt here"
+        rows="7"></textarea>
+      <div class="row">
+        <span class="counter" id="seq-counter">0 nt</span>
+        <span class="error" id="seq-error"></span>
+      </div>
+      <div class="row" style="margin-top:8px;gap:6px">
+        <button id="load-example-btn" class="secondary" style="flex:1">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          Load Example
+        </button>
+        <button id="clear-seq-btn" class="secondary" style="flex:0.6">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          Clear
+        </button>
+      </div>
+      <div class="row" style="color:var(--t3);font-size:10px;margin-top:6px">
+        <span>Drag &amp; drop .pdb / .fa / .fasta files onto this panel</span>
+      </div>
+      <button id="predict-btn" class="primary" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Predict Structure
+      </button>
+      <div class="row" style="margin-top:10px">
+        <input type="file" id="pdb-upload" accept=".pdb" style="display:none">
+        <button id="load-pdb-btn" class="secondary" onclick="document.getElementById('pdb-upload').click()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Load Local PDB
+        </button>
+      </div>
+    </div>
+
+    <!-- ── Parameters card ── -->
+    <div class="card" id="params-card">
+      <h2>Parameters</h2>
+      <label class="ctrl-label">Max segment length
+        <input type="number" id="param-seglen" value="200" min="50" max="500" step="10">
+      </label>
+      <label class="ctrl-label">Overlap
+        <input type="number" id="param-overlap" value="20" min="0" max="50" step="5">
+      </label>
+      <label class="ctrl-label">REMD rounds
+        <input type="number" id="param-rounds" value="1" min="0" max="5" step="1">
+      </label>
+      <label class="ctrl-label">REST2 replicas
+        <input type="number" id="param-replicas" value="4" min="2" max="16" step="1">
+      </label>
+      <label class="ctrl-label">REST2 steps
+        <input type="number" id="param-rest2steps" value="50000" min="10000" max="500000" step="10000">
+      </label>
+      <label class="ctrl-label"><input type="checkbox" id="param-rl" checked> RL-MCTS</label>
+      <label class="ctrl-label"><input type="checkbox" id="param-rhofold" checked> RhoFold+ (vs Vfold3D)</label>
+    </div>
+
+    <!-- ── Pipeline Progress card ── -->
+    <div class="card" id="progress-card" style="display:none">
+      <h2>Pipeline Progress</h2>
+      <div class="progress-steps" id="progress-steps">
+        <div class="progress-step" data-step="0">
+          <div class="step-indicator pending"><span class="step-num">0</span></div>
+          <div class="step-info">
+            <span class="step-name">Secondary Structure Prediction</span>
+            <span class="step-status pending-text">Pending</span>
+          </div>
+        </div>
+        <div class="progress-step" data-step="1">
+          <div class="step-indicator pending"><span class="step-num">1</span></div>
+          <div class="step-info">
+            <span class="step-name">3D Structure Prediction</span>
+            <span class="step-status pending-text">Pending</span>
+          </div>
+        </div>
+        <div class="progress-step" data-step="2">
+          <div class="step-indicator pending"><span class="step-num">2</span></div>
+          <div class="step-info">
+            <span class="step-name">CG Refinement</span>
+            <span class="step-status pending-text">Pending</span>
+          </div>
+        </div>
+        <div class="progress-step" data-step="3">
+          <div class="step-indicator pending"><span class="step-num">3</span></div>
+          <div class="step-info">
+            <span class="step-name">All-Atom Placement</span>
+            <span class="step-status pending-text">Pending</span>
+          </div>
+        </div>
+        <div class="progress-step" data-step="4">
+          <div class="step-indicator pending"><span class="step-num">4</span></div>
+          <div class="step-info">
+            <span class="step-name">All-Atom Refinement</span>
+            <span class="step-status pending-text">Pending</span>
+          </div>
+        </div>
+        <div class="progress-step" data-step="5">
+          <div class="step-indicator pending"><span class="step-num">5</span></div>
+          <div class="step-info">
+            <span class="step-name">All-Atom Minimization</span>
+            <span class="step-status pending-text">Pending</span>
+          </div>
+        </div>
+      </div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar-fill" id="progress-bar-fill" style="width:0%"></div>
+      </div>
+      <div class="progress-time" id="progress-time"></div>
+    </div>
+
+    <!-- ── Downloads card ── -->
+    <div class="card" id="result-card" style="display:none">
+      <h2>Downloads</h2>
+      <div class="download-row">
+        <button id="dl-pdb" class="secondary" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          .pdb
+        </button>
+        <button id="dl-json" class="secondary" disabled>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          .json
+        </button>
+      </div>
+      <div class="meta" id="meta-summary"></div>
+    </div>
+
+    <!-- ── Results panel ── -->
+    <div class="card" id="results-card" style="display:none">
+      <h2>Results</h2>
+
+      <!-- Scoring summary -->
+      <div class="scoring-grid" id="scoring-grid">
+        <div class="score-item" id="score-rsrnasp">
+          <span class="score-label">rsRNASP1</span>
+          <span class="score-value" id="score-rsrnasp-val">--</span>
+          <span class="score-badge pending-badge">Pending</span>
+        </div>
+        <div class="score-item" id="score-dfire">
+          <span class="score-label">DFIRE</span>
+          <span class="score-value" id="score-dfire-val">--</span>
+          <span class="score-badge pending-badge">Pending</span>
+        </div>
+        <div class="score-item" id="score-3drnascore">
+          <span class="score-label">3dRNAscore</span>
+          <span class="score-value" id="score-3drnascore-val">--</span>
+          <span class="score-badge pending-badge">Pending</span>
+        </div>
+      </div>
+
+      <!-- Structure quality metrics -->
+      <div class="quality-metrics" id="quality-metrics">
+        <h3>Structure Quality</h3>
+        <div class="metric-row" id="qm-closure">
+          <span class="metric-label">BSJ Closure</span>
+          <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-closure-bar"></div></div>
+          <span class="metric-val" id="qm-closure-val">--</span>
+        </div>
+        <div class="metric-row" id="qm-bond">
+          <span class="metric-label">Bond RMSD</span>
+          <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-bond-bar"></div></div>
+          <span class="metric-val" id="qm-bond-val">--</span>
+        </div>
+        <div class="metric-row" id="qm-pair">
+          <span class="metric-label">Pair Satisfaction</span>
+          <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-pair-bar"></div></div>
+          <span class="metric-val" id="qm-pair-val">--</span>
+        </div>
+        <div class="metric-row" id="qm-clash">
+          <span class="metric-label">Clash Count</span>
+          <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-clash-bar"></div></div>
+          <span class="metric-val" id="qm-clash-val">--</span>
+        </div>
+      </div>
+
+      <!-- Energy convergence chart -->
+      <div class="chart-section">
+        <h3>Energy Convergence</h3>
+        <canvas id="energy-chart" width="320" height="160"></canvas>
+      </div>
+    </div>
+
+    <!-- ── Sequence display card ── -->
+    <div class="card" id="sequence-card" style="display:none">
+      <h2>Sequence</h2>
+      <div class="seq-box" id="seq-box"></div>
+    </div>
+  </section>
+
+  <section class="right">
+    <div id="viewer-wrap">
+      <div id="viewer"></div>
+      <div id="viewer-placeholder">
+        <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="rgba(77,141,255,0.3)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 12l2-6 2 4 2-2 2 4"/></svg>
+        <span>3D structure will appear here after prediction</span>
+      </div>
+      <div id="repr-controls" style="position:absolute;bottom:14px;left:14px;z-index:15;display:flex;gap:10px;align-items:center;background:rgba(8,12,24,0.85);padding:8px 14px;border-radius:12px;border:1px solid rgba(56,89,160,0.2);backdrop-filter:blur(12px);font-size:11px;color:var(--t2)">
+        <select id="repr-select" style="width:auto;padding:5px 10px;font-size:11px;background:rgba(4,6,14,0.6);color:var(--t1);border:1px solid var(--border);border-radius:6px">
+          <option value="surface">Surface</option>
+          <option value="cartoon">Cartoon</option>
+          <option value="ball-stick">Ball &amp; Stick</option>
+          <option value="spacefill">Spacefill</option>
+        </select>
+        <span style="color:var(--t3)">|</span>
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          Opacity
+          <input type="range" id="opacity-slider" min="0.05" max="1" step="0.05" value="0.35" style="width:80px;accent-color:var(--accent)">
+          <span id="opacity-val" style="font-family:'JetBrains Mono',monospace;color:var(--accent);min-width:32px">0.35</span>
+        </label>
+      </div>
+    </div>
+    <aside id="fp-panel">
+      <div class="panel" id="physical-panel" style="display:none">
+        <h2>Physical Signals</h2>
+        <div class="gauge-row" id="gauges-row"></div>
+        <div id="physical-extra"></div>
+      </div>
+      <div class="panel" id="immune-panel" style="display:none">
+        <h2>Immune Pathway</h2>
+        <div id="immune-bars"></div>
+        <div id="motif-section"></div>
+      </div>
+      <div class="panel" id="circdesign-panel" style="display:none">
+        <h2>circDesign</h2>
+        <div id="circdesign-cards"></div>
+      </div>
+      <div class="panel">
+        <h2>Prediction Info</h2>
+        <div id="scalar-cards"><div class="legend">Predictions will populate this panel</div></div>
+      </div>
+      <div class="panel">
+        <h2>Coloring</h2>
+        <select id="scheme-select" disabled></select>
+        <div class="legend" id="scheme-legend"></div>
+        <div class="gradient-bar" id="gradient-bar"></div>
+      </div>
+      <div class="panel">
+        <h2>Structure Stats</h2>
+        <div id="stats-cards"><div class="legend">Awaiting prediction...</div></div>
+      </div>
+    </aside>
+  </section>
+
+  <button class="panel-toggle aside-toggle" id="aside-toggle" title="Collapse/expand right panel">&#9654;</button>
+</div>
+
+<footer>
+  <span>method: <code id="method-foot">--</code></span>
+  <span>closure: <code id="closure-foot">--</code></span>
+  <span>elapsed: <code id="elapsed-foot">--</code></span>
+</footer>
+
+<script src="/web/molstar.js"></script>
+<script src="/web/circrna_viewer.js?v=20260814"></script>
+<script src="/web/app.js?v=20260814"></script>
+</body>
+</html>
