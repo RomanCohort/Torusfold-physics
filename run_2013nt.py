@@ -31,37 +31,14 @@ _patch_openmm_no_opencl()
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-SEQUENCE = (  # 注: 含T和小写, 管线入口自动 .upper().replace("T","U")
-    "CTACCGTTTAATATTGCGTCATATtcggcgaccatttgtgtggtaaaaaaaaaaaaccaaaaaaaaaaaac"
-    "aaaaaaaaaaaataattgactaaGATATCTTAAAACAGCGGATGGGTACCCCACCATCCGACCCACTGGG"
-    "TGTAGTACTCTGGTACTTCGTACCTTTGTACGCCTGTTCTTCCCATTGTACCCTTCCTGAACTTCCAACC"
-    "CAAGTAACGTTAGAAGCTCAACATTTAGTACAACAGGAAGCACCACATCCAGTGGTGTTTAGTACAAGCA"
-    "CTTCTGTTTCCCCGGAGCGAGGTATAGGCTGTACCCACTGCCAAAAACCTTTAACCGTTATCCGCCAACC"
-    "AACTACGTAAAAGCTAGTAGTATTATGTTTTTAACTAGGCGTTCGATCAGGTGGATTTCCCCTCCACTAG"
-    "TTTGGTCGATGAGGCTAGGAATTCCCCACGGGTGACCGTGTCCTAGCCTGCGTGGCGGCCAACCCAGCCC"
-    "ACTCACTATTTGTTTTCGCGCCCAGTTGCAAAAAGTGTCGGGGCTGGGACGCCTTTTTATAGACATGGTGT"
-    "GAAGACTCGCATGTGCTTGGTTGTGATTCCTCCGGCCCCTGAATGCGGCTAACCTTAACCCTGGAGCCTT"
-    "GTGTCACAAACCAGTGATGATAAGGTCGTAATGAGCAATTCCGGGACGGGACCGACTACTTTGGGTGTCCG"
-    "TGTTTCTTATTTTTCTTATTATTGTCTTATGGTCACAGCATATATATAACATATACTGTGATCATGgctag"
-    "cGCCACCATGgatgcaatgaagagagggctctgctgtgtgctgctgctgtgtggagcagtcttcgtttcgcc"
-    "cagccaggaaatccatgcccgattcagaagaGGATCCAGTGTGTGTTGGTGCGTTAACTCAGTTGGCAGCG"
-    "GCGGAAGTAGATTGTTCCGCGAGAGATATCGGCTGGGCAGCGGTGGCAGTTGGCTGAAAGAGGGTGTGCTC"
-    "GGACTCGGTAGTGGTGGTAGCGCCGTGTTTGCCGACCAGGTGATCGTGGGAAGTGGAGGTAGCTTTCAGGC"
-    "GAGGCTTCGCTTGCGCGTACTCGTTCCACCCCTGGGATCTGGCGGCTCTGCTGTGACTTCCGAGTTCCACC"
-    "TGGTTGGCAGCGGTGGCAGCGGTGTGGCCACTCTTGCCTGGATGGTGGGCTCCGGCGGCAGTGGCCTCCAT"
-    "AACTTCTCAGACGGTCTGGGCAGCGGAGGCAGCCTCGAGaagtttctgaacacagccaaagatcggaaccg"
-    "ctgggaggagcctgaccagcagctctacaacgtagaggccacatcctacgccctcctgGGCTCCGGCGGTA"
-    "GCaagtttctgaacacagccaaagatcggaaccgctgggaggagcctgaccagcagctctacaacgtagagg"
-    "ccacatcctacgccctcctgGGCGGAGGTGGCAGCGGCaagtttctgaacacagccaaagatcggaaccgc"
-    "tgggaggagcctgaccagcagctctacaacgtagaggccacatcctacgccctcctgGGCTCCGGCGGTAG"
-    "Caagtttctgaacacagccaaagatcggaaccgctgggaggagcctgaccagcagctctacaacgtagaggc"
-    "cacatcctacgccctcctgGGATCTGGCGGCAGCatcgtgggcattgttgctggcctggctgtcctagcag"
-    "ttgtggtcatcggagctgtggtcgctactgtgatgtgtaggaggaagagctcaggtggaaaaggagggagcta"
-    "ctctcaggctgcgtccagcgacagtgcccagggctctgatgtgtctctcacagctGGTGGCTCCGATTATAA"
-    "GGATGATGACGACAAGTGAatcgatGCTGGAGCCTCGGTGGCCATGCTTCTTGCCCCTTGGGCCTCCCCC"
-    "CAGCCCCTCCTCCCCTTCCTGCACCCGTACCCCCGTGGTCTTTGAATAAAGTCTGAaccacacaaatggtc"
-    "gccgaCTCAGTAGATGTTTTCTTGGGT"
-)
+# 序列从文件读取 (不硬编码, 保护知识产权)
+_seq_file = ROOT / "sequence.txt"
+if _seq_file.exists():
+    SEQUENCE = _seq_file.read_text().strip().replace("\n", "")
+else:
+    print(f"错误: 未找到序列文件 {_seq_file}")
+    print("请创建 sequence.txt, 将 RNA 序列写入 (支持 T→U 自动转换)")
+    sys.exit(1)
 
 
 def main():
