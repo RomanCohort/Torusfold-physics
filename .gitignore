@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+develop-eggs/
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Large output data
+output_*/
+output_2013nt/
+
+# Benchmark results
+benchmark_2oiu/
+
+# Model weights (too large for git)
+pretrained/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Data files
+*.npz
+*.pkl
+*.h5
+*.hdf5
+
+# Compiled
+*.o
+*.exe
+*.dll
+
+# OpenMM
+openmmtools/
