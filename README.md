@@ -174,7 +174,7 @@ Inspired by structRFM, the pipeline uses multi-task heads for simultaneous predi
 ```
 @misc{yan2026torusfold,
   title={TorusFold: End-to-End 3D Structure Prediction for Circular RNA},
-  author={Ziyi Yan and Tang Class of Computer Science, Jilin University},
+  author={颜子壹, 吉林大学计算机科学与技术学院},
   year={2026},
   howpublished={https://github.com/RomanCohort/TorusFold-circRNA}
 }
