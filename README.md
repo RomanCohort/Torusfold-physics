@@ -8,9 +8,11 @@ An end-to-end computational pipeline for **circular RNA 3D structure prediction*
 
 Circular RNAs (circRNAs) are covalently closed-loop RNA molecules with unique topological properties. Their 3D structures remain largely unknown -- only one experimental structure exists (PDB: 2OIU). This pipeline predicts circRNA tertiary structures through a multi-stage approach combining coarse-grained modeling, physics-based refinement, and reinforcement learning.
 
-**Key results:**
+**Key results (after Level 4.9 PPR):**
 - Produces physically validated structures in ~7 hours on a single CPU (2013-nt circRNA)
-- rsRNASP: -57,171 | DFIRE: -319,915 | 3dRNAscore: 27.59 (>20 threshold)
+- Pair satisfaction: **100.0%** (657/657 pairs < 15 Å)
+- BSJ closure: **5.898 Å** (ideal: 5.9 Å) | Bond RMSD: **0.0082 Å**
+- rsRNASP: -37,890 | DFIRE: -231,878 | 3dRNAscore: 27.44 (>20 threshold)
 - Validated against 2OIU crystal structure (167-nt C. elegans circRNA)
 
 ## Pipeline Architecture
@@ -31,7 +33,10 @@ Sequence
 [4] All-Atom Reconstruction
   |  A-form template + backbone rebuild
   v
-[5] Amber OL3 All-Atom Refinement
+[4.9] Post-hoc Pair Repair (PPR)
+  |  Harmonic pair springs + backbone bonds + BSJ bond; vacuum minimization
+  v
+[5] Amber OL3 All-Atom Refinement (optional)
   |  Fine-grained molecular dynamics
   v
 Validated 3D Structure
@@ -44,6 +49,7 @@ Validated 3D Structure
 3. **Reinforcement Learning MCTS** -- Optimizes far-range pairing weights using policy gradient methods
 4. **Multi-Source Secondary Structure Consensus (MUSES)** -- Combines ViennaRNA, NUPACK, and data-driven predictions
 5. **Physical Refinement Pipeline** -- CG refinement -> all-atom reconstruction -> Amber OL3 fine-tuning
+6. **Post-hoc Pair Repair (PPR, Level 4.9)** -- Iterative harmonic spring repair of unsatisfied base pairs with backbone bond constraints; raises pair satisfaction to 100% while preserving BSJ closure and backbone geometry (~10 min, CPU-only)
 
 ## Installation
 
@@ -116,6 +122,7 @@ TorusFold-circRNA/
 │   └── __init__.py
 ├── scripts/                  # Analysis and benchmarking scripts
 │   ├── benchmark_2oiu.py     # 2OIU crystal structure benchmark
+│   ├── ppr_repair_v3.py      # Level 4.9 Post-hoc Pair Repair (PPR)
 │   ├── plot_energy_convergence.py
 │   ├── plot_pair_heatmap_v2.py
 │   ├── plot_real_covariation.py
