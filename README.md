@@ -1,4 +1,4 @@
-# Team TeamName Software
+# Team JLU-FBH 2026 Software
 
 If your team competes in the [**Software & AI** village](https://villages.igem.org) or wants to
 apply for the [**Best Software** award](https://competition.igem.org/judging/awards/special), you **MUST** host all the
