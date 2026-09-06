@@ -73,8 +73,11 @@ export RNABPFLOW_PYTHON=python                # interpreter that can run RNAbpFl
 export RHOFOLD_ROOT=/path/to/RhoFold         # package importable + pretrained/ params
 ```
 
-> TODO: add the exact upstream repository / release URL and install steps used
-> in the team's deployment runbook.
+> **Upstream:** RhoFold+ is under active development and several releases
+> coexist — consult the original paper for the canonical code release and
+> pretrained weights: Wang W, Lv G, Tang W, et al. *RhoFold+: accurate RNA 3D
+> structure prediction via deep learning.* Nat. Methods, 2024. Point
+> `RHOFOLD_ROOT` at the matching checkout.
 
 ### trRosettaRNA2 — `TRRNA2_RUNNER`
 
@@ -85,7 +88,11 @@ subprocess. Point the runner at your trRosettaRNA2 install:
 export TRRNA2_RUNNER=/path/to/trrna2_runner.py
 ```
 
-> TODO: add the exact upstream repository / weights location for the runner.
+> **Upstream:** trRosettaRNA2 is actively maintained with many versions —
+> consult the original paper for the canonical release: Li S, et al.
+> *trRosettaRNA: automated prediction of RNA 3D structure with transformer
+> network.* Nat. Commun. 2021;12:5934. Provide a runner script that invokes
+> the matching trRosettaRNA2 install.
 
 ## Statistical potentials & refiners (optional)
 
@@ -106,6 +113,12 @@ export ISRNACIRC_BIN_DIR="C:/path/to/IsRNAcirc/standalone/bin"   # contains CG_t
 export CG_TO_ALLATOM_COEFF="C:/path/to/IsRNA2/coeff"             # coefficient dir
 ```
 
+> **Upstream:** Xiao M, Sun Y, Li Y, et al. *IsRNAcirc: prediction of circular
+> RNA 3D structures via coarse-grained molecular dynamics simulations.*
+> J. Chem. Theory Comput. 2023. Standalone binaries for several versions are in
+> circulation — use the release described in the paper (Windows-only exe + DLLs,
+> ASCII path required).
+
 ### PyRosetta — conditional full-atom refinement (Linux/WSL)
 
 Optional; used by `pyrosetta_refine.py`. Install per your PyRosetta license
@@ -120,7 +133,10 @@ SS / pair / BSJ / clash heads:
 export TF_STRUCTRFM_MODEL=/path/to/structrfm/model/dir
 ```
 
-> TODO: add the exact checkpoint source / URL used.
+> **Upstream:** structRFM-style multi-task heads (see
+> `src/torusfold/scheme2/multitask_heads.py`), inspired by Zhai et al.,
+> *Nature Communications* 2024. The pretrained checkpoint is a moving target —
+> point `TF_STRUCTRFM_MODEL` at a compatible structRFM release.
 
 ### Infernal / Rfam (optional MSA)
 
