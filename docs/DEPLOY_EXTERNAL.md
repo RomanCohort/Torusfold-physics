@@ -1,0 +1,148 @@
+# Deploying external tools
+
+TorusFold-Hybrid is an *orchestrator*: the physics/refinement core lives in
+this repository, but the sequence predictors and statistical potentials it
+calls are separate projects. This page documents how to obtain and configure
+each one. No machine-specific path is hard-coded anywhere — everything is set
+through environment variables (also listed in the [README](../README.md)).
+
+Quick map:
+
+| Tool | Role in pipeline | Needed by | Required? |
+|---|---|---|---|
+| ViennaRNA | secondary-structure folding (`RNA` module) | Level 0 `multisource_ss` / fallback | **yes** (demo) |
+| OpenMM | MD relaxation, REMD, MetaD, PPR | Level 2+ physics core | **yes** |
+| PyTorch | RL MCTS, GPU CG MD (`torch_cgsim`) | RL close / GPU path | yes (GPU) |
+| RhoFold+ | per-chunk 3D predictor | `rhofold_wrapper` (Level 1) | for ensemble |
+| trRosettaRNA2 | per-chunk 3D predictor | `trrna2_wrapper` (Level 1) | for ensemble |
+| RNAbpFlow | 3D flow predictor (distance/BSJ evidence) | `ensemble_predictor` (Level 1) | for ensemble |
+| isRNAcirc | CG→all-atom + force-field binaries (Windows) | `isrnacirc_wrapper` | optional |
+| TriRNASP | three-body statistical potential | `trirnasp_*` energy terms | optional (off by default) |
+| PyRosetta | conditional full-atom refinement (Linux/WSL) | `pyrosetta_refine` | optional |
+| structRFM | multi-task DL heads checkpoint | `multitask_heads` | optional |
+| Infernal/cmsearch | Rfam MSA for chunk prediction | pseudo-MSA/real-MSA | optional |
+
+## Core Python dependencies
+
+```bash
+# OpenMM >= 8.0  (MD / replica-exchange engine)
+conda install -c conda-forge openmm        # or: pip install openmm
+
+# ViennaRNA >= 2.6  (provides the `RNA` module)
+conda install -c conda-forge viennarna     # or: pip install ".[ss]"
+
+# PyTorch >= 2.0  (RL + GPU CG path)
+pip install torch                           # or: pip install ".[gpu]"
+```
+
+Install the package itself:
+
+```bash
+pip install -e .
+```
+
+## Ensemble predictors (Level 1)
+
+These are invoked as subprocesses by
+`src/torusfold/scheme2/{ensemble_predictor,rhofold_wrapper,trrna2_wrapper}.py`.
+Point each wrapper at your checkout with the environment variable shown.
+
+### RNAbpFlow — `RNABPFLOW_ROOT`
+
+- Source: <https://github.com/Bhattacharya-Lab/RNAbpFlow>
+  (development checkout pinned at `e8b1c07`).
+- The wrapper expects the model weights at
+  `<RNABPFLOW_ROOT>/checkpoint/RNA3DB.ckpt` and runs
+  `<RNABPFLOW_ROOT>/inference_rocm.py` (`RNABPFLOW_ROOT` unset → clear error).
+- Input/output directory layout under a temp dir is handled by
+  `ensemble_predictor.py` (FASTA + map + distance maps → `Predictions/seq/Sample_0.pdb`).
+
+```bash
+export RNABPFLOW_ROOT=/path/to/RNAbpFlow      # checkout with checkpoint/RNA3DB.ckpt
+export RNABPFLOW_PYTHON=python                # interpreter that can run RNAbpFlow
+```
+
+> TODO(iGEM): archive `RNA3DB.ckpt` on Zenodo and link it here (DOI).
+
+### RhoFold+ — `RHOFOLD_ROOT`
+
+`rhofold_wrapper.py` loads the `rhofold` package and the pretrained checkpoint
+`<RHOFOLD_ROOT>/pretrained/rhofold_pretrained_params.pt`.
+
+```bash
+export RHOFOLD_ROOT=/path/to/RhoFold         # package importable + pretrained/ params
+```
+
+> TODO: add the exact upstream repository / release URL and install steps used
+> in the team's deployment runbook.
+
+### trRosettaRNA2 — `TRRNA2_RUNNER`
+
+`trrna2_wrapper.py` runs a small *runner script* (in a CPU-only environment) via
+subprocess. Point the runner at your trRosettaRNA2 install:
+
+```bash
+export TRRNA2_RUNNER=/path/to/trrna2_runner.py
+```
+
+> TODO: add the exact upstream repository / weights location for the runner.
+
+## Statistical potentials & refiners (optional)
+
+### TriRNASP — three-body potential
+
+- Source: <https://github.com/Tan-group/TriRNASP>
+  (development checkout pinned at `69e999a`).
+- Wrappers in this repo: `trirnasp_openmm.py`, `trirnasp_torch.py`,
+  `trirnasp_wrapper.py`. Off by default (`use_trirnasp=False`).
+
+### isRNAcirc — CG→all-atom binaries (Windows)
+
+`isrnacirc_wrapper.py` shells out to `CG_to_allatom.exe` (ASCII path only —
+the exe cannot load DLLs from a path containing non-ASCII characters):
+
+```bash
+export ISRNACIRC_BIN_DIR="C:/path/to/IsRNAcirc/standalone/bin"   # contains CG_to_allatom.exe
+export CG_TO_ALLATOM_COEFF="C:/path/to/IsRNA2/coeff"             # coefficient dir
+```
+
+### PyRosetta — conditional full-atom refinement (Linux/WSL)
+
+Optional; used by `pyrosetta_refine.py`. Install per your PyRosetta license
+(<https://www.pyrosetta.org>).
+
+### structRFM — multi-task DL heads
+
+`multitask_heads.py` loads a pretrained structRFM checkpoint for the
+SS / pair / BSJ / clash heads:
+
+```bash
+export TF_STRUCTRFM_MODEL=/path/to/structrfm/model/dir
+```
+
+> TODO: add the exact checkpoint source / URL used.
+
+### Infernal / Rfam (optional MSA)
+
+`run_2013nt.py` accepts `RFAM_CM` for cmsearch-based covariance models:
+
+```bash
+export RFAM_CM=/path/to/Rfam.cm
+```
+
+## Verifying a deployment
+
+```bash
+# environment sanity (imports resolve)
+python -c "import RNA, openmm; print('fold+MD OK')"
+
+# wrappers fail loudly when a tool is not configured (clear FileNotFoundError):
+python -c "from torusfold.scheme2 import rhofold_wrapper, ensemble_predictor, trrna2_wrapper, isrnacirc_wrapper"
+```
+
+Then run the end-to-end demo (see [README](../README.md)):
+
+```bash
+# put the sequence in sequence.txt, then:
+python run_2013nt.py
+```

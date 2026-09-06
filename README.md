@@ -83,6 +83,10 @@ refinement; Linux/WSL).
 > checkouts via the environment variables below. Two legacy aggregator modules
 > referenced by `predict_3d_allatom` (`cg_forcefield`, `modification_aware`)
 > are not yet published and are under active development.
+>
+> Full install/deploy instructions for every external tool (ViennaRNA, OpenMM,
+> the three predictors, isRNAcirc, TriRNASP, PyRosetta, structRFM, Rfam):
+> see [docs/DEPLOY_EXTERNAL.md](docs/DEPLOY_EXTERNAL.md).
 
 ## Usage
 
