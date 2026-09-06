@@ -108,7 +108,8 @@ python serve.py            # default port 8877
 # open http://127.0.0.1:8877  (SSE log stream + Predict API + Mol* 3D viewer)
 ```
 
-A dependency-free standalone viewer is at `docs/viewer_standalone.html`.
+Standalone viewers: `docs/circrna_3d_viewer.html` (pre-built 2013 nt demo) and
+`docs/viewer_standalone.html` (load any PDB).
 
 **External predictors & runtime paths** are configured through environment
 variables (no hard-coded machine paths in this repository):
@@ -167,9 +168,11 @@ Jilin University.
 
 You do **not** need to run the full pipeline to evaluate this tool:
 
-1. **See a predicted structure** — open
-   [`docs/viewer_standalone.html`](docs/viewer_standalone.html) in any browser
-   and load a PDB; it renders circRNA models (rotate / inspect residues).
+1. **See a real predicted structure in seconds** — open
+   [`docs/circrna_3d_viewer.html`](docs/circrna_3d_viewer.html) in any browser:
+   it loads the pre-built 2013 nt prediction with no install (hover, rotate,
+   recolor). To load your own PDB instead, open
+   [`docs/viewer_standalone.html`](docs/viewer_standalone.html).
 2. **Try the web UI** — `python serve.py` serves the Mol* viewer with live
    logs and a Predict API at `http://127.0.0.1:8877`.
 3. **Reproduce the headline result** — install (below), put the 2013 nt
