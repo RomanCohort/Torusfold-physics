@@ -2,6 +2,20 @@
 
 _Team JLU-FBH · iGEM 2026 Software & AI_
 
+> *"We choose to go to the Moon in this decade, not because it is easy, but
+> because it is hard."* — J. F. Kennedy, 1962
+>
+> We chose to predict the 3D structure of long circular RNA for the same
+> reason — because it is hard. To our knowledge, no one has yet produced an
+> end-to-end all-atom fold of a circRNA beyond ~2,000 nt. At iGEM meetups, few
+> teams reach for circRNA as a drug vehicle — not because circRNA is a poor
+> idea, but because, without a structure-prediction tool, the design feels out
+> of control. circRNA drug design (immunogenicity control, dsRNA/ssRNA exposure
+> ratio, IRES translation efficiency) is evaluated through 3D coordinates:
+> IRES-element accessibility and solvent-accessible surface area (SASA) do not
+> exist without a structure. TorusFold exists so a future team can choose
+> circRNA confidently — without wondering whether the job is even doable.
+
 Physics-based **circRNA 3D structure prediction**. A multi-predictor ensemble
 (RhoFold+ · trRosettaRNA2 · RNAbpFlow) feeds an RL-guided coarse-grained folding
 engine that is relaxed with OpenMM molecular dynamics, replica-exchange and
