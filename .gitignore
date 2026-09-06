@@ -1,0 +1,58 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+develop-eggs/
+
+# ── Virtual envs ────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── IDE / OS ────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Model weights (too large for git) ───────────────────
+pretrained/
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.pkl
+*.h5
+*.hdf5
+
+# ── External predictors (installed separately) ──────────
+RNAbpFlow/
+external/
+rhofold/     # RhoFold+ checkout
+msa_work/
+
+# ── Run outputs (generated, large) ──────────────────────
+output_*/
+benchmark_*/
+CIF_PDB_PSM/
+_final_*.pdb
+_final_out/
+*.log
+
+# ── Local config / private sequence ─────────────────────
+sequence.txt
+test_*_ss.txt
+# .claude/ is ignored except the iGEM AI-use notice
+.claude/*
+!.claude/RESPONSIBLE_AI_USE.md
+torusfold-paper/

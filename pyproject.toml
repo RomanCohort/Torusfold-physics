@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torusfold-physics"
+version = "0.1.0"
+description = "TorusFold-physics: physics-based circRNA 3D structure prediction (isRNAcircLong pipeline)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Ziyi Yan", email = "yanzy8225@mails.jlu.edu.cn" }]
+keywords = ["circRNA", "RNA", "3D-structure", "molecular-dynamics", "OpenMM", "RL"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+    "numpy",
+    "scipy",
+    "openmm",
+]
+
+[project.optional-dependencies]
+# Secondary-structure folding (ViennaRNA provides the `RNA` module)
+ss = ["ViennaRNA"]
+# GPU coarse-grained MD / torch path
+gpu = ["torch"]
+# ML multi-task heads / library import
+ml = ["transformers", "scikit-learn", "joblib", "gemmi"]
+# Analysis / plotting scripts
+plot = ["matplotlib"]
+# Optional full-atom refinement (WSL / Linux only)
+pyrosetta = ["pyrosetta"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,60 +1,165 @@
-# Team JLU-FBH 2026 Software
+# TorusFold-Hybrid
 
-If your team competes in the [**Software & AI** village](https://villages.igem.org) or wants to
-apply for the [**Best Software** award](https://competition.igem.org/judging/awards/special), you **MUST** host all the
-source code of your team's software tool in this repository, `main` branch. By the **Wiki Freeze**, a
-[release](https://docs.gitlab.com/ee/user/project/releases/) will be automatically created as the judging artifact of
-this software tool. You will be able to keep working on your software after the Grand Jamboree.
+_Team JLU-FBH · iGEM 2026 Software & AI_
 
-See the [Software Project](https://teams.igem.org/go/deliverables/software) page for the full requirements (including the
-open-source license requirement; note that **Software & AI** village teams are not eligible for the Best Software award).
+Physics-based **circRNA 3D structure prediction**. A multi-predictor ensemble
+(RhoFold+ · trRosettaRNA2 · RNAbpFlow) feeds an RL-guided coarse-grained folding
+engine that is relaxed with OpenMM molecular dynamics, replica-exchange and
+metadynamics, then reconstructed to all atoms and refined under the Amber14-OL3
+force field — producing experimentally plausible models for long (1000+ nt)
+circular RNA.
 
-> If your team does not have any software tool, you can totally ignore this repository. If left unchanged, this
-repository will be automatically deleted by the end of the season.
-
-> **Using an AI assistant (e.g. Claude Code)?** Please read [.claude/RESPONSIBLE_AI_USE.md](.claude/RESPONSIBLE_AI_USE.md) first. You remain fully responsible for everything you commit: don't misrepresent what your tool does, never commit secrets, and review every change.
+> This repository is the official software deliverable of Team JLU-FBH
+> (iGEM 2026, Software & AI village). All source code lives on `main`; a
+> release is created automatically at Wiki Freeze as the judging artifact.
+> If you use an AI assistant here, please read
+> [.claude/RESPONSIBLE_AI_USE.md](.claude/RESPONSIBLE_AI_USE.md) first.
 
 ## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might
-be unfamiliar with (for example your team wiki). A list of Features or a Background subsection can also be added here.
-If there are alternatives to your project, this is a good place to list differentiating factors.
+
+circRNA back-splicing creates covalently closed circular RNA molecules whose
+three-dimensional folds are almost entirely uncharacterized — only one circRNA
+has an experimentally resolved structure to date (PDB: 2OIU). We predict full
+all-atom 3D models for long circRNA sequences (e.g. the 2013 nt TNBC-targeting
+construct in `run_2013nt.py`) without requiring any experimental restraints.
+
+**How it works**
+
+```
+sequence
+  └─ Level 0   MUSES multi-source secondary-structure consensus
+               (multisource_ss / ViennaRNA fallback)
+               PF base-pair-probability fusion
+               + NCM non-canonical pair detection
+  └─ Level 1   segmented 3D prediction, ≤200 nt per chunk
+               ensemble_predict: RhoFold+ · trRosettaRNA2 · RNAbpFlow
+               region-adaptive weights (stem / BSJ / loop),
+               Kabsch stitching, NCM distance back-inference
+  └─ Level 2   RL-guided coarse-grained close (RL MCTS + steering forces)
+               iterative relaxation, REST2 × T-REMD replica exchange,
+               well-tempered metadynamics,
+               PyRosetta conditional refinement
+  └─ Level 5.5 PPR base-pair hydrogen-bond repair
+  └─ all-atom  1EHZ-crystal-template reconstruction (aform_from_template)
+               Amber14-OL3 constrained minimization (amber_refine)
+  └─ output    PDB + per-residue confidence + immune/structure fingerprints
+```
+
+The main entry point is `isrnaclong_pipeline()` in
+[`src/torusfold/scheme2/isrnaclong.py`](src/torusfold/scheme2/isrnaclong.py);
+segmented prediction is in `segmented_vfold3d.py`; the physics/refinement core
+in `openmm_gpu_refiner.py`, `rest2_remd_2d.py`, `metadynamics_sampler.py`,
+`torch_cgsim.py` and `torch_gpu_refine.py`.
+
+**Features**
+
+- Three-predictor ensemble with region-adaptive weights
+- NCM (non-canonical pairing) detection as fourth evidence source
+- RL MCTS guiding long-range (far) pair closure
+- REST2 × T-REMD and well-tempered metadynamics enhanced sampling
+- 1EHZ-crystal-template all-atom reconstruction + Amber14-OL3 refinement
+- Atomic checkpoint resume, per-level success guards
+- Web UI with SSE log streaming and Mol* 3D viewer
+- Per-residue confidence + immune/structure fingerprints
 
 ## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew.
-However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing
-specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a
-specific context like a particular programming language version or operating system or has dependencies that have to be
-installed manually, also add a Requirements subsection.
+
+```bash
+git clone <this-repo>
+cd torusfold-hybrid
+pip install -e .
+
+# Secondary-structure folding needs ViennaRNA (provides the `RNA` module):
+conda install -c conda-forge viennarna      # or: pip install ".[ss]"
+```
+
+Optional extras: `[gpu]` (PyTorch CG path), `[ml]` (multi-task heads /
+circRNA library), `[plot]` (analysis scripts), `[pyrosetta]` (full-atom
+refinement; Linux/WSL).
+
+> **Scope note.** This repository ships the physics/refinement core plus the
+> web frontend. The three sequence predictors (RhoFold+, trRosettaRNA2,
+> RNAbpFlow) are *external* tools invoked as subprocesses — point to your own
+> checkouts via the environment variables below. Two legacy aggregator modules
+> referenced by `predict_3d_allatom` (`cg_forcefield`, `modification_aware`)
+> are not yet published and are under active development.
 
 ## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of
-usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably
-include in the README.
+
+**End-to-end demo — 2013 nt circRNA.** Put the target sequence (plain text,
+`T`→`U` handled) in `sequence.txt`, then:
+
+```bash
+python run_2013nt.py
+# → output_2013nt/isrnaclong_final.pdb
+```
+
+Run flags (RL close, REST2 replicas, REMD rounds, PyRosetta, PPR repair,
+pseudo-MSA fallback) are configured at the top of `run_2013nt.py`.
+
+**Web server.**
+
+```bash
+python serve.py            # default port 8877
+# open http://127.0.0.1:8877  (SSE log stream + Predict API + Mol* 3D viewer)
+```
+
+A dependency-free standalone viewer is at `docs/viewer_standalone.html`.
+
+**External predictors & runtime paths** are configured through environment
+variables (no hard-coded machine paths in this repository):
+
+| Variable | Purpose |
+|---|---|
+| `RNABPFLOW_ROOT` | RNAbpFlow checkout dir (`checkpoint/RNA3DB.ckpt`, `inference_rocm.py`) |
+| `RNABPFLOW_PYTHON` | Python used to launch RNAbpFlow (default: current interpreter) |
+| `TRRNA2_RUNNER` | path to the trRosettaRNA2 runner script |
+| `RHOFOLD_ROOT` | RhoFold+ checkout dir (`pretrained/rhofold_pretrained_params.pt`) |
+| `ISRNACIRC_BIN_DIR` | dir containing `CG_to_allatom.exe` + DLLs (Windows, ASCII path) |
+| `CG_TO_ALLATOM_COEFF` | isRNAcirc CG→all-atom coefficient dir |
+| `TF_STRUCTRFM_MODEL` | pretrained structRFM checkpoint for the multi-task heads |
+| `TF_SCHEME2_SRC` | optional extra source dir injected into the server `sys.path` |
+| `PPR_INPUT_PDB` / `PPR_OUT_PDB` | input / output PDB for the PPR repair script |
+| `RFAM_CM` | `Rfam.cm` path for cmsearch-based MSA (optional) |
+
+**Repository layout**
+
+```
+├── run_2013nt.py          end-to-end 2013 nt demo
+├── serve.py               SSE + Predict API + web viewer
+├── src/torusfold/
+│   ├── scheme2/           pipeline core (47 modules): folding, RL, REMD/MetaD,
+│   │                      NCM detection, ensemble predictor wrappers, Amber refine
+│   ├── circrna_library/   CIF/PDB ingest + circular QC (gemmi)
+│   └── web/               browser frontend (Mol*, live logs, prediction panel)
+├── scripts/               curated analysis & diagnostics
+└── docs/                  architecture, viewer, library notes
+```
 
 ## Data and large files
-Keep this repository for **source code**. For datasets, machine-learning model weights, large media, and other heavy
-artifacts, use [Zenodo](https://teams.igem.org/go/deliverables/software/zenodo) — it gives each upload a citable DOI and
-is the recommended long-term archive for iGEM teams. Reference your Zenodo records from this README so judges and future
-teams can find them.
+
+This repository holds **source code only**. Model weights, datasets and heavy
+predictor checkouts are *not* committed:
+
+- RNAbpFlow (~1.3 GB checkpoints) and the TriRNASP statistical potential are
+  third-party tools installed separately.
+- Prediction outputs (`output_*`), model weights and caches are git-ignored.
+- Datasets and trained models used for the iGEM season will be archived on
+  Zenodo and linked here (DOI added at Wiki Freeze).
 
 ## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started.
-Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps
-explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce
-the likelihood that the changes inadvertently break something. Having instructions for running tests is especially
-helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+Issues and merge requests are welcome. This is an active research codebase;
+please keep changes focused and add tests under the project conventions when
+possible. Every contributor remains responsible for the accuracy of their
+commits — see [.claude/RESPONSIBLE_AI_USE.md](.claude/RESPONSIBLE_AI_USE.md).
 
 ## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+
+Team JLU-FBH (iGEM 2026). Primary developer: Ziyi Yan. Built in the Dry Lab at
+Jilin University.
 
 ## License
-This repository is licensed under the [Apache License 2.0](LICENSE) — a permissive
-open-source license recommended for software (Creative Commons licenses are *not*
-intended for source code). You are free to use, modify, and distribute this software,
-provided you keep the license and attribution notices. If you prefer different terms
-for your own tool, you may replace this license, but it must remain an
-[OSI-approved open-source license](https://opensource.org/licenses).
+
+[Apache-2.0](LICENSE). External components retain their own licenses
+(RNAbpFlow, TriRNASP, ViennaRNA, Mol*, RhoFold+, trRosettaRNA2, OpenMM).

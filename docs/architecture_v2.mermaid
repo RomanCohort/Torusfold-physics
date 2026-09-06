@@ -1,0 +1,186 @@
+---
+title: "isRNAcircLong — circRNA 3D Structure Prediction Pipeline"
+---
+flowchart TB
+    subgraph Input["Input"]
+        SEQ["sequence.txt<br/>+ optional SS cache"]
+        SS_PRE["MUSES multi-source consensus<br/>multisource_ss.py<br/>fallback → ViennaRNA circ=1"]
+        SEQ --> SS_PRE
+    end
+
+    %% ===== Level 0 =====
+    subgraph L0["Level 0 — PF BPP + Triple Consensus + NCM"]
+        direction TB
+        PF["ViennaRNA PF (circ=1)<br/>plist_from_probs(0.01)<br/>bpp_high P>0.9 / bpp_mid 0.5-0.9 / bpp_low"]
+        MFE["ViennaRNA MFE<br/>vienna_pair_probs"]
+        DIV["DivideFold subprocess<br/>--max-frag 200<br/>GPU disabled for ROCm compat"]
+        VOTE["Vote consensus<br/>>=2 methods agree = hard constraint<br/>soft: MFE 0.8 / PF-mid p / DivideFold 0.6"]
+        NCM["NCM detection<br/>detect_ncms_from_bpp<br/>reuses BPP matrix"]
+        PG["pair_graph<br/>build_full_pair_graph<br/>long-range pairs + stem_blocks"]
+        PF --> VOTE
+        MFE --> VOTE
+        DIV --> VOTE
+        VOTE --> NCM --> PG
+    end
+
+    %% ===== Level 1 =====
+    subgraph L1["Level 1 — Segmented Vfold3D + Ensemble + Kabsch Assembly"]
+        direction TB
+        SPLIT["split_sequence<br/>max_seg=200, overlap=30<br/>MSA-aware chunking"]
+        BC["boundary_constraints<br/>build_boundary_pairs<br/>cross-segment pair extraction"]
+        subgraph CHUNKS["Parallel _predict_chunk (ThreadPoolExecutor, <=8 workers)"]
+            direction TB
+            ENS["ensemble_predict<br/>RhoFold+ / trRNA2 / RNAbpFlow"]
+            REGION["Region-adaptive weights<br/>stem: .50/.20/.30<br/>bsj: RF 1.00 coords + RNAbpFlow dist<br/>loop: .30/.40/.30"]
+            ENS --- REGION
+        end
+        CTX["Bidirectional context refinement<br/>_refine_with_context<br/>alpha=0.3, +/-50 residue linear decay"]
+        KABSCH["confidence_weighted_assemble<br/>Kabsch SVD alignment, 30nt overlap<br/>confidence-weighted fusion"]
+        SMOOTH["spline_smooth_dihedral<br/>spline smoothing at boundaries"]
+        RELAX1["relax_structure<br/>bond/angle constraints"]
+
+        SPLIT --> BC --> CHUNKS --> CTX --> KABSCH --> SMOOTH --> RELAX1
+    end
+
+    %% ===== Level 1.5 =====
+    subgraph L15["Level 1.5 — CG Global Constrained Relaxation (torch GPU)"]
+        direction TB
+        SANITIZE["_sanitize_p_coords + _generate_compact_coords<br/>P-P distance anomaly detection"]
+        PH1["Phase 1: Selective geometric bond correction<br/>only bonds with >0.05nm deviation<br/>preserves 3D structure<br/>50 Jacobi iterations + BSJ closure"]
+        PH2["Phase 2: Full force field gradient descent<br/>K_BB=5000 K_ANGLE=200 K_DIH=200<br/>K_PAIR=500xlambda K_CLASH=5000<br/>lr=5e-6, 500 steps"]
+        PH3["Phase 3: Soft-sphere repulsion<br/>CLASH_R=0.4nm, 100 iterations<br/>push apart clashing atoms + selective bond recalibration"]
+        SANITIZE --> PH1 --> PH2 --> PH3
+    end
+
+    %% ===== Level 2 =====
+    subgraph L2["Level 2 — RL-scheduled REMD + torch GPU"]
+        direction TB
+        SCHED["RuleScheduler + SimulationState<br/>multifidelity_scheduler"]
+        RLRL["RelaxationRL<br/>rl_policy_b0.pth / bootstrap<br/>decide() -> nstep, pair_weights<br/>L>1000: steps x 0.25 length scaling"]
+        MERGE_AA["_segmented_cg_to_allatom<br/>parallel CG->allatom<br/>_merge_allatom_pdbs assembly"]
+        TORCH2["torch_gpu_refine<br/>BatchedREMD2D 16 replicas<br/>use_trirnasp=True use_trirnasp_force=True<br/>trirnasp_scale=0.1<br/>async CPU force injection (multiprocessing)<br/>spatial hash neighbor list O(N) clash"]
+        MULTI_TASK["structRFM multi-task head (opt-in)<br/>clash_scores fused into pair_weights"]
+        SCHED --- RLRL
+        RLRL -.->|"scheduling params"| TORCH2
+        MERGE_AA -.->|"merged_aa.pdb"| TORCH2
+        RLRL -.->|"pair_weights"| MULTI_TASK
+    end
+
+    %% ===== Level 2.3 =====
+    subgraph L23["Level 2.3 — 5-bead CG Refinement"]
+        SKIP23["Quick gate: clash=0 && pair>0.8 -> skip<br/>NaN/Inf protection"]
+        FB["fivebead_folding.refine_5bead<br/>n_anneal=3000<br/>DL constraints: PF high -> d=10A"]
+        SKIP23 --> FB
+    end
+
+    %% ===== Level 2.5/2.6 =====
+    subgraph L25["Level 2.5 + 2.6 — All-Atom Conversion + PyRosetta"]
+        CGAA["cg_to_allatom -> final_allatom.pdb"]
+        PR["pyrosetta_refine<br/>RNA.naeref2015 WSL subprocess<br/>conditional, failure non-blocking"]
+        CGAA --> PR
+    end
+
+    %% ===== Level 3 =====
+    subgraph L3["Level 3 — RL Fine-tuning (Continuous PPO)"]
+        DIM_GUARD["Dimension guard: len(best_coords)!=len(seq) -> skip<br/>(when IsRNAcirc outputs all-atom)"]
+        RL3["rl_optimizer.optimize_far_pairs<br/>Continuous PPO<br/>rl_n_simulations=50 epochs<br/>far_pairs + stem_blocks"]
+        DIM_GUARD --> RL3
+    end
+
+    %% ===== Level 3.5 =====
+    subgraph L35["Level 3.5 — Metadynamics (2 replicas)"]
+        direction TB
+        META_SAMPLER["MetaDynamicsSampler<br/>well-tempered bias_factor=5.0<br/>hill_height=1.0 hill_freq=100<br/>max_hills=5000"]
+        META_CV["CVs: BSJ_dist(2nm) / nc(0.1nm) / Rg(1nm)"]
+        META_GPU["_compute_bias_forces_gpu (torch)<br/>hill accumulation + CV gradient vectorized<br/>ROCm/CUDA auto-detect"]
+        META_CPU["_add_bias_numpy (fallback)<br/>pure numpy CPU path"]
+        META_SELECT["2 replicas, pick lowest energy<br/>perturbation noise sigma=0.5A avoids duplicates"]
+        META_SAMPLER --> META_CV
+        META_CV --> META_GPU
+        META_CV -.->|"torch unavailable"| META_CPU
+        META_GPU --> META_SELECT
+        META_CPU --> META_SELECT
+    end
+
+    %% ===== Level 4 =====
+    subgraph L4["Level 4 — REST2 Refinement (2D REMD)"]
+        direction TB
+        REMD2D["rest2_remd_2d.REMD2DSampler<br/>8T x 4lambda = 32 replicas<br/>T: 300->550K geometric<br/>lambda: 1.0/0.82/0.67/0.55"]
+        TRI["TriRNASP statistical potential<br/>sigmoid(T) x lambda coupling<br/>energy_dir=external/TriRNASP"]
+        EXCHANGE["2-axis Metropolis exchange<br/>T-axis: beta_i * deltaU<br/>lambda-axis: beta * deltaLambda * U_solute<br/>exchange_interval=1000"]
+        CLUSTER["_cluster_and_select<br/>RMSD threshold 5A clustering"]
+        REMD2D --> TRI --> EXCHANGE --> CLUSTER
+    end
+
+    %% ===== Level 5 =====
+    subgraph L5["Level 5 — AMBER RNA.OL3 All-Atom Refinement"]
+        direction TB
+        RECONSTRUCT["aform_from_template.reconstruct_all_atom<br/>1EHZ crystal template CG->all-atom"]
+        AMBER["amber_refine (primary)<br/>C1'-C1' pair restraints K=100<br/>A-form torsion restraints<br/>max_iterations=3000"]
+        AMBER_FB["openmm_amber_refine (fallback)<br/>md_steps=15000 restraints_k=50"]
+        ENERGY_GATE["Energy gate: amber_e < best_energy -> replace<br/>otherwise keep current result"]
+        RECONSTRUCT --> AMBER
+        AMBER -.->|"primary fails"| AMBER_FB
+        AMBER --> ENERGY_GATE
+        AMBER_FB --> ENERGY_GATE
+    end
+
+    %% ===== Level 5.5 =====
+    subgraph L55["Level 5.5 — PPR H-bond Repair"]
+        PPR["ppr_repair max_rounds=ppr_max_rounds<br/>detect_hb_pairs(3.6A cutoff)<br/>local pull-together repair<br/>adopt only if before/after valid"]
+    end
+
+    %% ===== Output =====
+    OUT["isrnaclong_final.pdb<br/>+ pipeline_summary.json<br/>H-bond rate / pair_rate<br/>+ immune_fingerprints<br/>+ IRES accessibility/SASA"]
+    EXPORT["data_exporter<br/>export_final_summary<br/>per-Level JSON export"]
+
+    %% ===== Connections =====
+    SS_PRE --> L0
+    L0 -->|"pairs + far_pairs + stem_blocks + bpp"| L1
+    L1 -->|"coords_vfold + per_res_conf + ncm_ens_pairs"| L15
+    L15 -->|"coords_relaxed"| L2
+    L2 -->|"best_coords + best_energy"| L23
+    L23 --> L25
+    L25 --> L3
+    L3 -->|"coords_rl"| L35
+    L35 -->|"coords_metad"| L4
+    L4 -->|"coords_rest2"| L5
+    L5 -->|"level5_amber.pdb"| L55
+    L55 --> OUT
+    OUT --> EXPORT
+
+    %% ===== Infrastructure =====
+    INFRA["Infrastructure<br/>_checkpoint.json resumption L0->5.5<br/>(L2/L5 resume: force re-run disabled)<br/>data_exporter.py per-Level JSON<br/>pdb_analyzer.py real-time scoring<br/>opt-in: structRFM multi-task head"]
+    INFRA -.-> L0
+    INFRA -.-> L1
+    INFRA -.-> L2
+    INFRA -.-> L4
+    INFRA -.-> L5
+
+    %% ===== AMD ROCm =====
+    subgraph ROCM["AMD ROCm GPU Modules"]
+        direction TB
+        TORCH_CG["torch_cgsim.py<br/>BatchedREMD (B,N,3) tensor<br/>BatchedREMD2D 32-replica single tensor<br/>autograd forces / HIP-safe factories<br/>~10x faster than CPU OpenMM"]
+        TORCH_MD["torch_md.py<br/>LangevinCG GPU Langevin<br/>LBFGS minimization + thermal bath"]
+    end
+    ROCM -.- L2
+    ROCM -.- L4
+
+    %% ===== Styling =====
+    classDef input fill:#eceff1,stroke:#455a64
+    classDef level0 fill:#e1f5fe,stroke:#0288d1
+    classDef level1 fill:#f3e5f5,stroke:#7b1fa2
+    classDef physics fill:#fff3e0,stroke:#f57c00
+    classDef ml fill:#e8f5e9,stroke:#388e3c
+    classDef post fill:#fce4ec,stroke:#c62828
+    classDef infra fill:#fffde7,stroke:#f9a825
+    classDef rocm fill:#e0f2f1,stroke:#00695c,stroke-dasharray:5 5
+
+    class Input input
+    class L0 level0
+    class L1 level1
+    class L15,L23,L25 physics
+    class L3,L35,L4,L5 ml
+    class L55,OUT,EXPORT post
+    class INFRA infra
+    class ROCM,TORCH_CG,TORCH_MD rocm
