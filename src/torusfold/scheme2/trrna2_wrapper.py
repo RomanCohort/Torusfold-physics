@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """trrna2_wrapper.py — trRosettaRNA2 inference via subprocess.
 
-trRNA2 需要特殊 Python 环境 (CPU-only, 避免 ROCm MIOpen 崩溃),
-通过子进程调用 _trrna2_runner.py.
+trRNA2 needs a dedicated Python environment (CPU-only, to avoid ROCm MIOpen
+crashes); it is invoked through the _trrna2_runner.py subprocess.
 """
 import os
 import subprocess
@@ -13,7 +13,7 @@ from typing import Optional
 
 
 _RUNNER = os.environ.get("TRRNA2_RUNNER", "")
-_TRRNA2_PYTHON = sys.executable  # 使用当前解释器; runner 内部强制 CPU
+_TRRNA2_PYTHON = sys.executable  # use the current interpreter; the runner forces CPU internally
 
 
 @dataclass
@@ -46,8 +46,9 @@ def trrna2_predict_chunk(
         raise FileNotFoundError(f"trRNA2 runner not found: {_RUNNER}")
 
     # Create temp MSA file (single sequence = pseudo MSA)
-    # 唯一后缀: 多 chunk 并行时同名 tmp_msa 会被互相截断 → parse_a3m 读到
-    # 半行/空文件崩溃. 用 uuid 保证每个进程独享.
+    # Unique suffix: when several chunks run in parallel, a shared tmp_msa name
+    # would be truncated by other processes, so parse_a3m crashes on a half-written
+    # or empty file. A uuid keeps the file private to each process.
     import uuid
     _uniq = f"{uuid.uuid4().hex[:8]}"
     tmp_msa = os.path.join(

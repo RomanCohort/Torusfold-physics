@@ -1,7 +1,8 @@
 """
 rhofold_wrapper.py — RhoFold+ RNA 3D structure prediction wrapper.
 
-模型全局缓存: 第一次调用时加载, 后续复用 (11 chunks 只加载1次).
+Global model cache: the model is loaded on the first call and reused afterwards
+(the 11 chunks load it only once).
 """
 import os
 import numpy as np
@@ -11,13 +12,13 @@ from pathlib import Path
 _RHOFOLD_ROOT = os.environ.get("RHOFOLD_ROOT", "")
 _RHOFOLD_CKPT = os.path.join(_RHOFOLD_ROOT, "pretrained", "rhofold_pretrained_params.pt")
 
-# ── 全局模型缓存 ──
+# ── Global model cache ──
 _cached_model = None
 _cached_device = None
 
 
 def _get_model(device: str = "auto"):
-    """加载并缓存 RhoFold+ 模型 (只加载一次)."""
+    """Load and cache the RhoFold+ model (loaded only once)."""
     global _cached_model, _cached_device
     import torch
     import sys
@@ -66,8 +67,9 @@ def rhofold_predict_chunk(
         msa_path: MSA file path (optional)
         verbose: print details
         device: device string ("auto", "cuda", "cpu")
-        boundary_pairs: Level 1 边界约束对列表 [(global_i, global_j, edge_type)].
-            提供时在 RhoFold 预测后用 OpenMM 施加距离约束弛豫.
+        boundary_pairs: list of Level 1 boundary-constraint pairs
+            [(global_i, global_j, edge_type)]. When provided, distance-constraint
+            relaxation is applied with OpenMM after the RhoFold prediction.
 
     Returns: (coords, confidence) tuple.
         coords: (L, 3) C1' coordinates in Angstroms
@@ -132,7 +134,7 @@ def rhofold_predict_chunk(
     else:
         confidence = 0.5
 
-    # Level 1 边界约束弛豫
+    # Level 1 boundary-constraint relaxation
     if boundary_pairs:
         try:
             from .boundary_constraints import apply_boundary_constraints_to_coords

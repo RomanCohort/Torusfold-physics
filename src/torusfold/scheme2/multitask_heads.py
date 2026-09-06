@@ -1,13 +1,13 @@
 """
-multitask_heads.py — circRNA 多任务预测头 (structRFM 启发)
+multitask_heads.py — circRNA multi-task prediction heads (inspired by structRFM).
 
-四个预测头共享编码器:
-  1. Per-position SS head: 每碱基独立分类器 (A/U/G/C/N → paired/unpaired)
-  2. Pair prediction head: i 是否与 j 配对
-  3. BSJ closure head: 环化是否有效
-  4. Clash prediction head: 每位置碰撞概率
+Four prediction heads share one encoder:
+  1. Per-position SS head: an independent per-base classifier (A/U/G/C/N -> paired/unpaired)
+  2. Pair prediction head: whether i is base-paired with j
+  3. BSJ closure head: whether circularization is productive
+  4. Clash prediction head: per-position clash probability
 
-灵感来源: structRFM (Zhai et al. 2024, Nature Communications)
+Inspiration: structRFM (Zhai et al. 2024, Nature Communications)
   - per-nucleotide independent classifiers
   - structural condition input (embedding_struct)
   - multi-task loss (MLM + SS + NSP)
@@ -25,16 +25,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ── 核苷酸编码 ──
+# ── Nucleotide encoding ──
 BASE_TO_IDX = {"A": 0, "U": 1, "G": 2, "C": 3, "N": 4}
 BASE_TYPES = ["A", "U", "G", "C", "N"]
 
 
 class StructRFMEncoder(nn.Module):
-    """structRFM 预训练编码器包装.
+    """Wrapper around a pretrained structRFM encoder.
 
-    输出 768 维 per-nucleotide 特征.
-    max_length=514, 长序列自动分块.
+    Returns 768-dim per-nucleotide features.
+    max_length=514; long sequences are chunked automatically.
     """
 
     def __init__(self, model_path: str = None):
@@ -43,7 +43,7 @@ class StructRFMEncoder(nn.Module):
         self._model = None
         self._tokenizer = None
         self.feature_dim = 768
-        self.max_length = 512  # structRFM 限制
+        self.max_length = 512  # structRFM length cap
 
     def _load(self):
         if self._model is not None:
@@ -62,9 +62,9 @@ class StructRFMEncoder(nn.Module):
 
     @torch.no_grad()
     def forward(self, sequence: str) -> torch.Tensor:
-        """编码序列 → (L, 768) per-nucleotide 特征.
+        """Encode a sequence -> (L, 768) per-nucleotide features.
 
-        长序列分块处理, 每块 max_length-2 tokens.
+        Long sequences are chunked, max_length-2 tokens per chunk.
         """
         self._load()
         L = len(sequence)
@@ -81,15 +81,15 @@ class StructRFMEncoder(nn.Module):
 
 
 class StructConditionEncoder(nn.Module):
-    """将已知结构信息编码为条件向量.
+    """Encode known structural information into a conditioning vector.
 
-    类似 structRFM 的 embedding_struct:
+    Mirrors structRFM's embedding_struct:
       struct_input = self.embedding_struct(struct.unsqueeze(-1))
       final_input = torch.cat([mapping_final_input, struct_input], dim=-1)
 
-    输入: per-residue 结构信号 (3维):
+    Input: per-residue structure signals (3-dim):
       [is_paired, distance_to_partner/100, local_clash_density]
-    输出: (L, hidden_dim) 条件张量
+    Output: (L, hidden_dim) conditioning tensor
     """
 
     def __init__(self, input_dim: int = 3, hidden_dim: int = 32):
@@ -112,16 +112,17 @@ class StructConditionEncoder(nn.Module):
 
 
 class CircRNAPredictionHeads(nn.Module):
-    """circRNA 多任务预测头.
+    """circRNA multi-task prediction heads.
 
-    四个任务:
-      1. SS: 每位置 paired/unpaired (per-base-type classifiers)
-      2. Pair: i-j 配对概率
-      3. BSJ: 环化闭合概率
-      4. Clash: 每位置碰撞概率
+    Four tasks:
+      1. SS: per-position paired/unpaired (per-base-type classifiers)
+      2. Pair: i-j base-pair probability
+      3. BSJ: back-splice closure probability
+      4. Clash: per-position clash probability
 
-    所有头通过 enable_* 标志控制, 默认全部启用.
-    向后兼容: 不影响现有管线 (use_multi_task_heads=False 时).
+    Each head is controlled by an enable_* flag; all enabled by default.
+    Backward compatible: does not affect the existing pipeline (when
+    use_multi_task_heads=False).
     """
 
     def __init__(
@@ -146,13 +147,13 @@ class CircRNAPredictionHeads(nn.Module):
         self.enable_clash_head = enable_clash_head
         self.use_structrfm = use_structrfm
 
-        # ── structRFM 编码器 (可选, 冻结) ──
+        # ── structRFM encoder (optional, frozen) ──
         self.rfm_encoder = None
         if use_structrfm:
             self.rfm_encoder = StructRFMEncoder(model_path=rfm_model_path)
-            feature_dim = 768  # structRFM 输出维度
+            feature_dim = 768  # structRFM output dim
 
-        # ── 共享编码器: feature_dim + struct_cond_dim → hidden_dim ──
+        # ── Shared encoder: feature_dim + struct_cond_dim -> hidden_dim ──
         input_dim = feature_dim + struct_cond_dim
         self.shared_encoder = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -164,19 +165,19 @@ class CircRNAPredictionHeads(nn.Module):
             nn.GELU(),
         )
 
-        # ── 结构条件编码器 ──
+        # ── Structure-condition encoder ──
         self.struct_encoder = StructConditionEncoder(
             input_dim=3, hidden_dim=struct_cond_dim
         )
 
-        # ── SS Head: per-base-type classifiers (structRFM 核心模式) ──
+        # ── SS head: per-base-type classifiers (structRFM core pattern) ──
         if enable_ss_head:
             self.ss_classifiers = nn.ModuleDict({
                 base: nn.Linear(hidden_dim, 2)  # paired / unpaired
                 for base in BASE_TYPES
             })
 
-        # ── Pair Head: 二分类 (i, j) 是否配对 ──
+        # ── Pair head: binary classification of whether (i, j) pair ──
         if enable_pair_head:
             self.pair_head = nn.Sequential(
                 nn.Linear(2 * hidden_dim, hidden_dim),
@@ -185,7 +186,7 @@ class CircRNAPredictionHeads(nn.Module):
                 nn.Linear(hidden_dim, 1),
             )
 
-        # ── BSJ Head: 环化闭合概率 ──
+        # ── BSJ head: back-splice closure probability ──
         if enable_bsj_head:
             self.bsj_head = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim // 2),
@@ -193,7 +194,7 @@ class CircRNAPredictionHeads(nn.Module):
                 nn.Linear(hidden_dim // 2, 1),
             )
 
-        # ── Clash Head: 每位置碰撞概率 ──
+        # ── Clash head: per-position clash probability ──
         if enable_clash_head:
             self.clash_head = nn.Sequential(
                 nn.Linear(hidden_dim, hidden_dim // 2),
@@ -207,28 +208,28 @@ class CircRNAPredictionHeads(nn.Module):
         bpp_matrix: Optional[torch.Tensor] = None,
         struct_condition: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """编码序列 + 结构条件 → 共享表示.
+        """Encode a sequence + structure condition -> shared representation.
 
-        两种模式:
-          use_structrfm=True:  structRFM 768维特征
-          use_structrfm=False: 自有特征 (one-hot + bpp + 距离统计)
+        Two modes:
+          use_structrfm=True:  768-dim structRFM features
+          use_structrfm=False: built-in features (one-hot + bpp + distance stats)
 
         Args:
-            sequence: RNA 序列
-            bpp_matrix: (L, L) 可选, ViennaRNA bpp 矩阵
-            struct_condition: (L, struct_cond_dim) 结构条件, None 则用零
+            sequence: RNA sequence
+            bpp_matrix: (L, L) optional ViennaRNA base-pair probability matrix
+            struct_condition: (L, struct_cond_dim) structure condition; zeros when None
 
         Returns:
-            (L, hidden_dim) 共享编码
+            (L, hidden_dim) shared encoding
         """
         L = len(sequence)
         device = struct_condition.device if struct_condition is not None else torch.device("cpu")
 
         if self.use_structrfm and self.rfm_encoder is not None:
-            # structRFM 模式: 768维预训练特征
+            # structRFM mode: 768-dim pretrained features
             feat = self.rfm_encoder(sequence)  # (L, 768)
         else:
-            # 自有特征模式: one-hot(5) + pair_context(8) + ss_signal(4) + local(3) = 20维
+            # built-in feature mode: one-hot(5) + pair_context(8) + ss_signal(4) + local(3) = 20 dims
             feat = self._build_own_features(sequence, bpp_matrix, device)
 
         if struct_condition is None:
@@ -244,9 +245,9 @@ class CircRNAPredictionHeads(nn.Module):
         bpp_matrix: Optional[torch.Tensor],
         device: torch.device,
     ) -> torch.Tensor:
-        """构建自有特征 (20维 per nucleotide).
+        """Build the built-in features (20 dims per nucleotide).
 
-        特征组成:
+        Feature layout:
           [0:5]   one-hot encoding (A/U/G/C/N)
           [5:13]  pair context: max_bpp, n_partners, mean_dist, ...
           [13:17] ss_signal: is_stem, is_loop, is_hairpin, is_junction
@@ -263,7 +264,7 @@ class CircRNAPredictionHeads(nn.Module):
             else:
                 feat[i, 4] = 1.0
 
-        # pair context (需要 bpp_matrix)
+        # pair context (requires bpp_matrix)
         if bpp_matrix is not None and bpp_matrix.shape == (L, L):
             for i in range(L):
                 row = bpp_matrix[i]
@@ -274,28 +275,28 @@ class CircRNAPredictionHeads(nn.Module):
                     dists = (partners.float() - i).abs()
                     feat[i, 7] = float(dists.mean()) / L   # mean_dist (normalized)
                     feat[i, 8] = float(dists.min()) / L    # min_dist
-                # bpp 熵
+                # bpp entropy
                 p = row[row > 0.01]
                 if len(p) > 0:
                     p = p / p.sum()
                     feat[i, 9] = float(-(p * torch.log(p + 1e-8)).sum())
-                # 茎区信号: 左右各5位是否都有配对
+                # stem-region signal: paired on both flanks (5 positions each side)
                 for offset in range(1, 6):
                     if i - offset >= 0 and i + offset < L:
                         if row[i - offset] > 0.1 or bpp_matrix[i - offset, i] > 0.1:
                             feat[i, 9 + min(offset, 4)] = 1.0
 
-        # ss_signal (从 bpp 推断)
+        # ss_signal (inferred from bpp)
         if bpp_matrix is not None:
             for i in range(L):
                 paired = bpp_matrix[i].max() > 0.3
                 feat[i, 13] = 1.0 if paired else 0.0          # is_stem
                 feat[i, 14] = 1.0 if not paired else 0.0      # is_loop
-                # hairpin: 两侧都有配对但自身不配对
+                # hairpin: paired on both flanks but not itself
                 left_paired = any(bpp_matrix[i, j] > 0.1 for j in range(max(0, i-5), i))
                 right_paired = any(bpp_matrix[i, j] > 0.1 for j in range(i+1, min(L, i+6)))
                 feat[i, 15] = 1.0 if (not paired and left_paired and right_paired) else 0.0
-                # junction: 配对密度突变
+                # junction: abrupt change in pairing density
                 local_density = bpp_matrix[max(0,i-3):i+4, :].mean()
                 feat[i, 16] = float(local_density)
 
@@ -315,11 +316,11 @@ class CircRNAPredictionHeads(nn.Module):
         encoded: torch.Tensor,
         sequence: str,
     ) -> torch.Tensor:
-        """SS 预测: 每个位置用对应碱基的分类器.
+        """SS prediction: classify each position with its base's classifier.
 
         Args:
-            encoded: (L, hidden_dim) 共享编码
-            sequence: RNA 序列
+            encoded: (L, hidden_dim) shared encoding
+            sequence: RNA sequence
 
         Returns:
             (L, 2) SS logits (paired/unpaired)
@@ -338,14 +339,14 @@ class CircRNAPredictionHeads(nn.Module):
         encoded: torch.Tensor,
         pair_indices: torch.Tensor,
     ) -> torch.Tensor:
-        """配对预测: (i, j) 是否形成碱基对.
+        """Pair prediction: whether (i, j) forms a base pair.
 
         Args:
-            encoded: (L, hidden_dim) 共享编码
-            pair_indices: (N, 2) 候选配对位置
+            encoded: (L, hidden_dim) shared encoding
+            pair_indices: (N, 2) candidate pair positions
 
         Returns:
-            (N,) 配对概率
+            (N,) base-pair probabilities
         """
         if len(pair_indices) == 0:
             return torch.tensor([], device=encoded.device)
@@ -359,15 +360,15 @@ class CircRNAPredictionHeads(nn.Module):
         self,
         encoded: torch.Tensor,
     ) -> torch.Tensor:
-        """BSJ 闭合预测.
+        """BSJ closure prediction.
 
         Args:
-            encoded: (L, hidden_dim) 共享编码
+            encoded: (L, hidden_dim) shared encoding
 
         Returns:
-            () scalar, BSJ 闭合概率
+            () scalar, BSJ closure probability
         """
-        # 用首尾位置的平均表示
+        # Mean representation of the first and last positions
         pooled = (encoded[0] + encoded[-1]) / 2  # (hidden_dim,)
         return self.bsj_head(pooled.unsqueeze(0)).squeeze()
 
@@ -375,13 +376,13 @@ class CircRNAPredictionHeads(nn.Module):
         self,
         encoded: torch.Tensor,
     ) -> torch.Tensor:
-        """每位置碰撞预测.
+        """Per-position clash prediction.
 
         Args:
-            encoded: (L, hidden_dim) 共享编码
+            encoded: (L, hidden_dim) shared encoding
 
         Returns:
-            (L,) 每位置碰撞概率
+            (L,) per-position clash probabilities
         """
         return self.clash_head(encoded).squeeze(-1)
 
@@ -392,13 +393,13 @@ class CircRNAPredictionHeads(nn.Module):
         pair_indices: Optional[torch.Tensor] = None,
         bpp_matrix: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """前向传播.
+        """Forward pass.
 
         Args:
-            sequence: RNA 序列
-            struct_condition: (L, 3) 结构信号 [is_paired, dist/100, clash_density]
-            pair_indices: (N, 2) 候选配对
-            bpp_matrix: (L, L) ViennaRNA bpp 矩阵 (自有特征模式需要)
+            sequence: RNA sequence
+            struct_condition: (L, 3) structure signals [is_paired, dist/100, clash_density]
+            pair_indices: (N, 2) candidate pairs
+            bpp_matrix: (L, L) ViennaRNA bpp matrix (required for built-in feature mode)
 
         Returns:
             dict with keys:
@@ -407,12 +408,12 @@ class CircRNAPredictionHeads(nn.Module):
               bsj_logit: scalar
               clash_scores: (L,)
         """
-        # 结构条件编码
+        # Encode the structure condition
         struct_cond = None
         if struct_condition is not None:
             struct_cond = self.struct_encoder(struct_condition)
 
-        # 共享编码 (自有20维特征 or structRFM 768维 + struct_cond)
+        # Shared encoding (built-in 20-dim features or structRFM 768-dim + struct_cond)
         encoded = self.encode_sequence(sequence, bpp_matrix, struct_cond)
 
         result = {"encoded": encoded}
@@ -436,19 +437,19 @@ class CircRNAPredictionHeads(nn.Module):
         return result
 
 
-# ── 便捷函数 ──
+# ── Convenience functions ──
 
 def build_struct_condition_from_coords(
     coords: np.ndarray,
     pairs: List[Tuple[int, int]],
     L: int,
 ) -> np.ndarray:
-    """从坐标构建结构条件 (3维 per residue).
+    """Build a structure condition from coordinates (3 dims per residue).
 
     Args:
-        coords: (L, 3) P 坐标
-        pairs: [(i, j), ...] 已知配对
-        L: 序列长度
+        coords: (L, 3) P coordinates
+        pairs: [(i, j), ...] known base pairs
+        L: sequence length
 
     Returns:
         (L, 3) [is_paired, dist_to_partner/100, local_clash_density]
@@ -476,7 +477,7 @@ def build_struct_condition_from_coords(
             condition[i, 1] = d / 100.0
             condition[j, 1] = d / 100.0
 
-    # local_clash_density (P-P < 3A 的邻居数 / 10)
+    # local_clash_density (number of P-P neighbors < 3A / 10)
     for i in range(L):
         dists = np.linalg.norm(coords - coords[i], axis=1)
         n_clash = np.sum((dists < 3.0) & (np.arange(L) != i))
@@ -491,16 +492,16 @@ def build_overlap_weight_mask(
     decay: str = "linear",
     min_weight: float = 0.3,
 ) -> np.ndarray:
-    """构建 chunk 重叠区域的加权 mask.
+    """Build a weighting mask for chunk overlap regions.
 
     structRFM pattern: weight_mask = torch.where(input_ids == pad, 0.0, 1.0)
-    这里更精细: 重叠区域线性/余弦衰减
+    Refined here: linear/cosine decay over the overlap region.
 
     Args:
-        segments: [{start, end}, ...] chunk 边界
-        full_length: 序列总长
+        segments: [{start, end}, ...] chunk boundaries
+        full_length: total sequence length
         decay: "linear" or "cosine"
-        min_weight: 重叠区域最小权重
+        min_weight: minimum weight inside overlap regions
 
     Returns:
         (full_length,) float weight mask

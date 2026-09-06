@@ -1,0 +1,18 @@
+# GitLab CI — smoke checks on every push.
+# Keeps `main` green with a zero-heavy-dependency gate: syntax-compile the whole
+# package, then import the scheme2 package if only numpy is available.
+
+image: python:3.11-slim
+
+stages:
+  - test
+
+smoke:
+  stage: test
+  script:
+    - pip install --quiet numpy
+    - pip install --quiet -e . --no-deps
+    - python -m compileall -q src serve.py run_2013nt.py
+    - python -m pytest -q tests -x
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'

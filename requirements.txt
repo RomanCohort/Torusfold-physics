@@ -1,0 +1,19 @@
+# Core runtime requirements for TorusFold-Hybrid.
+#
+# NOTE: replace the lower-bound lines below with an exact `pip freeze > lock`
+# from the reference environment before Wiki Freeze, so the project installs
+# exactly as tested. Lower bounds reflect the environment used during
+# development (Python 3.10, OpenMM 8.0+, ViennaRNA 2.7+).
+numpy>=1.23
+scipy>=1.11
+openmm>=8.0
+
+# Optional feature groups (see pyproject.toml [project.optional-dependencies]):
+#   [ss]   ViennaRNA        (secondary-structure folding; `RNA` module)
+#   [gpu]  torch            (RL / GPU CG path)
+#   [ml]   transformers, scikit-learn, joblib, gemmi
+#   [plot] matplotlib
+#   [pyrosetta] pyrosetta   (full-atom refinement; Linux/WSL)
+#
+# External sequence predictors (RhoFold+, trRosettaRNA2, RNAbpFlow) and model
+# checkpoints are NOT installed here — see docs/DEPLOY_EXTERNAL.md.

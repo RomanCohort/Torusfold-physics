@@ -1,17 +1,17 @@
 """
-TriRNASP Python scorer — 三体统计势打分.
+TriRNASP Python scorer — three-body statistical potential scoring.
 
- reimplements TriRNASP (Tan-group, Wuhan University) scoring in pure Python/numpy.
- Reference: Tongwei Yuan et al. Biophysical Journal 125(11), 2526-2540 (2026).
+Reimplements TriRNASP (Tan-group, Wuhan University) scoring in pure Python/numpy.
+Reference: Tongwei Yuan et al. Biophysical Journal 125(11), 2526-2540 (2026).
 
-两种模式:
-  1. full_scoring(): O(n³) 完整三体打分, 用于 post-hoc 分析
-  2. window_scoring(): O(n × w²) 滑窗近似, 用于 MC 采样 (w=窗口大小)
+Two modes:
+  1. full_scoring(): O(n³) full three-body scoring, for post-hoc analysis
+  2. window_scoring(): O(n × w²) sliding-window approximation, for MC sampling (w = window size)
 
-用法:
+Usage:
     scorer = TriRNASPScorer("Energy/")
     energy = scorer.full_scoring(sequence, coords_3bead)
-    # coords_3bead: (N, 3, 3) — 每个nt的P/C4'/N坐标 (Å)
+    # coords_3bead: (N, 3, 3) — per-nucleotide P/C4'/N coordinates (Å)
 """
 import os
 import numpy as np
@@ -20,14 +20,14 @@ from typing import Optional, Tuple
 from itertools import combinations
 
 
-# ── 常量 (与 TriRNASP.c 一致) ──
-R0 = 8.0           # 距离截断 (Å)
+# ── Constants (matching TriRNASP.c) ──
+R0 = 8.0           # Distance cutoff (Å)
 BIN_WIDTH = 2.0    # Rough bin width
 BIN_WIDTH1 = 0.6   # Fine bin width
 INTERVALS = 4      # Rough bins: floor(8.0 / 2.0)
 INTERVALS1 = 13    # Fine bins: floor(8.0 / 0.6)
 
-# Bead type codes (与 compute_code() 一致)
+# Bead type codes (consistent with compute_code())
 # C4': A=0, U=1, C=2, G=3
 # N:   A=4, U=5, C=6, G=7  (purine→N9, pyrimidine→N1)
 # P:   A=8, U=9, C=10, G=11
@@ -187,183 +187,9 @@ class TriRNASPScorer:
             types[i, 2] = _compute_type_code(base, 'P')
         return types
 
-    def score_from_pdb(self, pdb_path: str) -> float:
-        """Score a PDB file (3-bead format).
-
-        Args:
-            pdb_path: path to PDB file with P/C4'/N atoms
-
-        Returns:
-            energy in kBT
-        """
-        atoms = []
-        res_ids = []
-        with open(pdb_path) as f:
-            for line in f:
-                if not line.startswith("ATOM"):
-                    continue
-                atom_name = line[12:16].strip()
-                res_id = int(line[22:26].strip()) - 1  # 0-indexed
-                x = float(line[30:38])
-                y = float(line[38:46])
-                z = float(line[46:54])
-
-                if atom_name == "P":
-                    tc = _compute_type_code('A', 'P')  # placeholder base
-                elif atom_name == "C4'":
-                    tc = _compute_type_code('A', 'C4')
-                elif atom_name in ("N9", "N1"):
-                    tc = _compute_type_code('A', 'N')
-                else:
-                    continue
-
-                atoms.append((tc, res_id, x, y, z))
-
-        if not atoms:
-            return 0.0
-
-        n = len(atoms)
-        total_energy = 0.0
-
-        R0_sq = (R0 - 0.3) ** 2
-        inv_bw = 1.0 / BIN_WIDTH
-        inv_bw1 = 1.0 / BIN_WIDTH1
-
-        for i in range(n):
-            ti, ri, xi, yi, zi = atoms[i]
-            for j in range(i + 1, n):
-                tj, rj, xj, yj, zj = atoms[j]
-                d12_sq = (xi-xj)**2 + (yi-yj)**2 + (zi-zj)**2
-                if d12_sq >= R0_sq:
-                    continue
-
-                for k in range(j + 1, n):
-                    tk, rk, xk, yk, zk = atoms[k]
-                    d13_sq = (xi-xk)**2 + (yi-yk)**2 + (zi-zk)**2
-                    if d13_sq >= R0_sq:
-                        continue
-                    d23_sq = (xj-xk)**2 + (yj-yk)**2 + (zj-zk)**2
-
-                    # Clash/contact penalties
-                    if d12_sq <= 1.21 or d13_sq <= 1.21 or d23_sq <= 1.21:
-                        total_energy += 0.5
-                        continue
-                    if ((d12_sq <= 2.89 and d12_sq > 1.21 and abs(ri - rj) > 1) or
-                        (d13_sq <= 2.89 and d13_sq > 1.21 and abs(ri - rk) > 1) or
-                        (d23_sq <= 2.89 and d23_sq > 1.21 and abs(rj - rk) > 1)):
-                        total_energy += 0.5
-                        continue
-                    if ((d12_sq > 2.89 and d12_sq <= 4.0) or
-                        (d13_sq > 2.89 and d13_sq <= 4.0) or
-                        (d23_sq > 2.89 and d23_sq <= 4.0)):
-                        total_energy += 0.2
-                        continue
-
-                    # Bin distances
-                    d12 = np.sqrt(d12_sq)
-                    d13 = np.sqrt(d13_sq)
-                    d23 = np.sqrt(d23_sq)
-
-                    b12 = int(d12 * inv_bw)
-                    b13 = int(d13 * inv_bw)
-                    b23 = int(d23 * inv_bw)
-
-                    D12 = int(d12 * inv_bw1)
-                    D13 = int(d13 * inv_bw1)
-                    D23 = int(d23 * inv_bw1)
-
-                    if b12 > INTERVALS - 1 or b13 > INTERVALS - 1 or b23 > 2 * INTERVALS - 1:
-                        continue
-
-                    if ti >= 0 and tj >= 0 and tk >= 0:
-                        # Rough
-                        total_energy += self.rough[ti, tj, tk, b12, b13, b23]
-                        # Fine
-                        if (D12 < INTERVALS1 and D13 < INTERVALS1 and D23 < 2 * INTERVALS1):
-                            total_energy += self.fine[ti, tj, tk, D12, D13, D23]
-
-        n_nt = len(res_ids) // 3
-        mu = sum(1 for t in atom_types if 0 <= t <= 3) / max(1, n_nt)
-
-        if verbose:
-            print(f"    [TriRNASP] {n_nt} nt, {n_atoms} atoms, "
-                  f"R0={R0:.1f}Å, μ={mu:.2f}")
-
-        R0_sq = (R0 - 0.3) ** 2  # 与C代码一致的截断
-        inv_bw = 1.0 / BIN_WIDTH
-        inv_bw1 = 1.0 / BIN_WIDTH1
-
-        total_energy = 0.0
-
-        # O(n³) triplet enumeration with distance cutoff
-        for i in range(n_atoms):
-            ti = atom_types[i]
-            ri = res_ids[i]
-            xi, yi, zi = atom_coords[i]
-            for j in range(i + 1, n_atoms):
-                dx = xi - atom_coords[j, 0]
-                dy = yi - atom_coords[j, 1]
-                dz = zi - atom_coords[j, 2]
-                d12_sq = dx*dx + dy*dy + dz*dz
-                if d12_sq >= R0_sq:
-                    continue
-
-                tj = atom_types[j]
-                rj = res_ids[j]
-
-                for k in range(j + 1, n_atoms):
-                    dx2 = xi - atom_coords[k, 0]
-                    dy2 = yi - atom_coords[k, 1]
-                    dz2 = zi - atom_coords[k, 2]
-                    d13_sq = dx2*dx2 + dy2*dy2 + dz2*dz2
-                    if d13_sq >= R0_sq:
-                        continue
-
-                    dx3 = atom_coords[j, 0] - atom_coords[k, 0]
-                    dy3 = atom_coords[j, 1] - atom_coords[k, 1]
-                    dz3 = atom_coords[j, 2] - atom_coords[k, 2]
-                    d23_sq = dx3*dx3 + dy3*dy3 + dz3*dz3
-
-                    tk = atom_types[k]
-                    rk = res_ids[k]
-
-                    # 惩罚规则 (与 C 代码一致)
-                    if d12_sq <= 1.21 or d13_sq <= 1.21 or d23_sq <= 1.21:
-                        total_energy += 0.5
-                        continue
-                    if ((d12_sq <= 2.89 and d12_sq > 1.21 and abs(ri - rj) > 1) or
-                        (d13_sq <= 2.89 and d13_sq > 1.21 and abs(ri - rk) > 1) or
-                        (d23_sq <= 2.89 and d23_sq > 1.21 and abs(rj - rk) > 1)):
-                        total_energy += 0.5
-                        continue
-                    if ((d12_sq > 2.89 and d12_sq <= 4.0) or
-                        (d13_sq > 2.89 and d13_sq <= 4.0) or
-                        (d23_sq > 2.89 and d23_sq <= 4.0)):
-                        total_energy += 0.2
-                        continue
-
-                    d12 = np.sqrt(d12_sq)
-                    d13 = np.sqrt(d13_sq)
-                    d23 = np.sqrt(d23_sq)
-
-                    b12 = min(int(d12 * inv_bw), INTERVALS - 1)
-                    b13 = min(int(d13 * inv_bw), INTERVALS - 1)
-                    b23 = min(int(d23 * inv_bw), 2 * INTERVALS - 1)
-
-                    D12 = min(int(d12 * inv_bw1), INTERVALS1 - 1)
-                    D13 = min(int(d13 * inv_bw1), INTERVALS1 - 1)
-                    D23 = min(int(d23 * inv_bw1), 2 * INTERVALS1 - 1)
-
-                    if ti >= 0 and tj >= 0 and tk >= 0:
-                        total_energy += self.rough[ti, tj, tk, b12, b13, b23]
-                        total_energy += self.fine[ti, tj, tk, D12, D13, D23]
-
-        elapsed = time.time() - t0
-        if verbose:
-            print(f"    [TriRNASP] E={total_energy:.3f} kBT, {elapsed:.1f}s")
-
-        return total_energy
-
+    def score_from_pdb(self, pdb_path: str, verbose: bool = False) -> float:
+        """Score a PDB file (3-bead format). Alias of score_pdb()."""
+        return self.score_pdb(pdb_path, verbose=verbose)
     def window_scoring(self, sequence: str, coords_3bead: np.ndarray,
                        window: int = 30, verbose: bool = False) -> float:
         """Fast O(n × w²) approximate scoring using sequence window.
@@ -419,7 +245,7 @@ class TriRNASPScorer:
                                     continue
                                 d23_sq = (xj-xk)**2 + (yj-yk)**2 + (zj-zk)**2
 
-                                # 惩罚规则
+                                # Penalty rules
                                 if d12_sq <= 1.21 or d13_sq <= 1.21 or d23_sq <= 1.21:
                                     total_energy += 0.5
                                     continue
@@ -479,7 +305,7 @@ class TriRNASPScorer:
                 y = float(line[38:46])
                 z = float(line[46:54])
 
-                # 确定 bead type
+                # Determine the bead type
                 if atom_name == "P":
                     tc = _compute_type_code(res_name[0] if res_name else 'A', 'P')
                 elif atom_name in ("C4'", "C4"):
@@ -496,12 +322,12 @@ class TriRNASPScorer:
         if n < 3:
             return 0.0
 
-        # 提取为数组
+        # Extract into arrays
         atom_types = np.array([a[0] for a in atoms], dtype=np.int32)
         res_ids = np.array([a[1] for a in atoms], dtype=np.int32)
         coords = np.array([[a[2], a[3], a[4]] for a in atoms], dtype=np.float64)
 
-        # 用 full_scoring 的核心逻辑
+        # Reuse the core logic of full_scoring
         R0_sq = (R0 - 0.3) ** 2
         inv_bw = 1.0 / BIN_WIDTH
         inv_bw1 = 1.0 / BIN_WIDTH1

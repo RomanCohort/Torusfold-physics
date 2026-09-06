@@ -1,7 +1,7 @@
-"""plot_real_covariation.py — 用真 MSA 数据计算 co-variation 矩阵
+"""plot_real_covariation.py — compute the co-variation matrix from real MSA data
 
-从 Rfam Stockholm MSA 提取序列, 计算互信息 (MI),
-识别高共变信号对, 绘制 co-variation 热图.
+Extracts sequences from an Rfam Stockholm MSA, computes mutual information (MI),
+identifies high-co-variation signal pairs, and plots a co-variation heatmap.
 """
 import re
 import numpy as np
@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def parse_stockholm(filepath):
-    """解析 Stockholm 格式 MSA, 返回 [seq_name, aligned_seq] 列表."""
+    """Parse a Stockholm-format MSA and return the aligned sequences."""
     seqs = {}
     with open(filepath) as f:
         for line in f:
@@ -35,7 +35,7 @@ def parse_stockholm(filepath):
 
 
 def parse_a3m(filepath):
-    """解析 A3M 格式 MSA."""
+    """Parse an A3M-format MSA."""
     seqs = []
     current = ""
     with open(filepath) as f:
@@ -53,16 +53,16 @@ def parse_a3m(filepath):
 
 
 def remove_gaps(aligned_seqs, min_gap_fraction=0.5):
-    """移除 gap 过多的列, 返回去掉 gap 的序列列表."""
+    """Drop gap-rich columns and return the gap-filtered sequences."""
     N = len(aligned_seqs)
     L = len(aligned_seqs[0])
-    # 找出 gap 比例 < min_gap_fraction 的列
+    # Columns whose gap fraction is < min_gap_fraction
     keep_cols = []
     for j in range(L):
         gap_count = sum(1 for s in aligned_seqs if s[j] in ("-", ".", "_"))
         if gap_count / N < min_gap_fraction:
             keep_cols.append(j)
-    # 过滤
+    # Filter
     cleaned = []
     for s in aligned_seqs:
         cleaned.append("".join(s[j] for j in keep_cols))
@@ -70,19 +70,19 @@ def remove_gaps(aligned_seqs, min_gap_fraction=0.5):
 
 
 def compute_mi_matrix(msa_seqs):
-    """计算 MI 矩阵 (逐对)."""
+    """Compute the pairwise MI matrix."""
     N = len(msa_seqs)
     L = len(msa_seqs[0])
     base_idx = {"A": 0, "U": 1, "G": 2, "C": 3}
 
-    # 编码
+    # Encode
     enc = np.full((N, L), -1, dtype=np.int8)
     for k, seq in enumerate(msa_seqs):
         for i, ch in enumerate(seq):
             if ch in base_idx:
                 enc[k, i] = base_idx[ch]
 
-    # 单位点频率
+    # Single-site frequencies
     freq = np.zeros((L, 4))
     for k in range(N):
         for i in range(L):
@@ -91,7 +91,7 @@ def compute_mi_matrix(msa_seqs):
                 freq[i, bi] += 1
     freq /= N
 
-    # MI 矩阵
+    # MI matrix
     mi = np.zeros((L, L))
     for i in range(L):
         for j in range(i + 1, L):
@@ -115,7 +115,7 @@ def compute_mi_matrix(msa_seqs):
 
 
 def main():
-    # ── 加载真 MSA ──
+    # ── Load the real MSAs ──
     # CRE: RF00386 (77 sequences)
     cre_path = ROOT / "msa_work" / "Entero_5_CRE_RF00386.sto"
     # IRES: RF00229 (92 sequences)
@@ -140,24 +140,24 @@ def main():
         print("No MSA data found!")
         return
 
-    # ── 选最大的 MSA 做 co-variation ──
+    # ── Pick the largest MSA for the co-variation analysis ──
     best_name = max(results, key=lambda k: results[k]["N"])
     best = results[best_name]
     print(f"\nUsing {best_name} for co-variation analysis ({best['N']} seqs, {best['L']} cols)")
 
-    # ── 计算 MI ──
+    # ── Compute MI ──
     print("Computing MI matrix...")
     mi = compute_mi_matrix(best["seqs"])
     L = mi.shape[0]
     print(f"MI matrix: {L}x{L}")
 
-    # ── 统计 ──
-    # 找 top 共变对
+    # ── Statistics ──
+    # Find the top co-varying pairs
     all_pairs = [(i, j, mi[i, j]) for i in range(L) for j in range(i + 1, L)]
     all_pairs.sort(key=lambda x: -x[2])
     top50 = all_pairs[:50]
 
-    # 距离分布
+    # Distance distribution
     dist_mi = {}
     for i, j, m in all_pairs:
         d = abs(j - i)
@@ -165,7 +165,7 @@ def main():
             dist_mi[d] = []
         dist_mi[d].append(m)
 
-    # 背景 MI (远离对角线的)
+    # Background MI (far from the diagonal)
     bg_mi = [m for i, j, m in all_pairs if abs(j - i) > 50]
     signal_mi = [m for i, j, m in all_pairs if abs(j - i) <= 10]
 
@@ -174,16 +174,16 @@ def main():
     print(f"Background MI (d>50): avg {np.mean(bg_mi):.3f}")
     print(f"SNR (signal/bg): {np.mean(signal_mi) / (np.mean(bg_mi) + 1e-6):.1f}x")
 
-    # ── 画图 ──
+    # ── Plot ──
     fig = plt.figure(figsize=(20, 12), facecolor="white")
     gs = GridSpec(2, 3, figure=fig, hspace=0.35, wspace=0.3)
 
-    # 1) MI 矩阵
+    # 1) MI matrix
     ax1 = fig.add_subplot(gs[0, :2])
     mimax = np.percentile(mi[mi > 0], 95) if np.any(mi > 0) else 1
     im1 = ax1.imshow(mi, cmap="YlOrRd", vmin=0, vmax=mimax, aspect="auto",
                      interpolation="nearest")
-    # 标 top50
+    # Mark the top-50
     for i, j, m in top50[:15]:
         ax1.plot(j, i, "c*", ms=5, alpha=0.8)
         ax1.plot(i, j, "c*", ms=5, alpha=0.8)

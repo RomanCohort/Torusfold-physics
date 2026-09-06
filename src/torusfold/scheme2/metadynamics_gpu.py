@@ -76,7 +76,7 @@ class BatchedMetadynamics:
         n_replicas: int = 8,
         sequence: str = "",
         device: str = "cuda",
-        # 弛豫参数 (与 OpenMM rest2_remd_2d 对齐)
+        # Relaxation parameters (aligned with OpenMM rest2_remd_2d)
         relax_bond_k: float = 500.0,
         relax_angle_k: float = 200.0,
         relax_pair_k: float = 500.0,
@@ -87,7 +87,7 @@ class BatchedMetadynamics:
         self.L = len(sequence)
         self.sequence = sequence
         self.device = device if torch.cuda.is_available() else "cpu"
-        # 弛豫参数
+        # Relaxation parameters
         self.relax_bond_k = relax_bond_k
         self.relax_angle_k = relax_angle_k
         self.relax_pair_k = relax_pair_k

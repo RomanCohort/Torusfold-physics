@@ -5,15 +5,15 @@
 // (<script> block lines ~121-506). The five Mol* 5.10.1 compatibility fixes
 // are preserved:
 //
-//   坑1: color theme name is 'uncertainty' (not 'b-factor') — reads
+//   Pitfall 1: color theme name is 'uncertainty' (not 'b-factor') — reads
 //        B_iso_or_equiv column, default domain [0,100], red-white-blue scale.
-//   坑2: components via mgr.currentStructures → s.components (NOT
+//   Pitfall 2: components via mgr.currentStructures → s.components (NOT
 //        mgr.components / mgr.currentComponents — those don't exist in 5.x).
-//   坑3: themeParams = { color: 'uniform', colorParams: { value: colorInt } }
+//   Pitfall 3: themeParams = { color: 'uniform', colorParams: { value: colorInt } }
 //        — 'color' is a theme NAME STRING, not a nested {name} object.
-//   坑4: loadStructureFromData 3rd arg only accepts { dataLabel } — passing
+//   Pitfall 4: loadStructureFromData 3rd arg only accepts { dataLabel } — passing
 //        colorTheme triggers "Cannot read properties of undefined".
-//   坑5: remove existing structures BEFORE reloading — otherwise structures
+//   Pitfall 5: remove existing structures BEFORE reloading — otherwise structures
 //        accumulate (3 → 8) and old colors mask new ones.
 //
 // The data contract matches the backend /api/result response:
@@ -186,10 +186,10 @@
         return true;
       });
       if (entries.length === 0) {
-        this.scalarCards.innerHTML = '<div class="legend">无参数数据</div>';
+        this.scalarCards.innerHTML = '<div class="legend">No scalar data</div>';
         return;
       }
-      // 友好名称映射
+      // Friendly label mapping
       const labels = {
         energy_cg: 'CG Energy (kJ/mol)',
         energy_aa: 'All-Atom Energy',
@@ -247,7 +247,7 @@
       if (!this.statsCards) return;
       this.statsCards.innerHTML = '';
       if (!this.fp) {
-        this.statsCards.innerHTML = '<div class="legend">等待预测...</div>';
+        this.statsCards.innerHTML = '<div class="legend">Waiting for prediction...</div>';
         return;
       }
       const stats = [
@@ -291,7 +291,7 @@
 
       if (scheme.type === 'scalar') {
         if (this.schemeLegend)
-          this.schemeLegend.textContent = '整分子标量 → 结构整体单色（数值见上方卡片）';
+          this.schemeLegend.textContent = 'Whole-molecule scalar → uniform structure color (values in the cards above)';
         if (this.gradientBar) this.gradientBar.style.background = '#6ab7ff';
         await this.setColorUniform([0.42, 0.72, 1.0]);
         return;
@@ -300,7 +300,7 @@
       if (scheme.type === 'categorical') {
         const vals = (this.fp.per_residue || {})[schemeKey];
         if (!vals) {
-          if (this.schemeLegend) this.schemeLegend.textContent = '该 scheme 无数据';
+          if (this.schemeLegend) this.schemeLegend.textContent = 'No data for this scheme';
           return;
         }
         await this.setColorCategorical(schemeKey, vals);
@@ -309,12 +309,12 @@
 
       const vals = (this.fp.per_residue || {})[schemeKey];
       if (!vals) {
-        if (this.schemeLegend) this.schemeLegend.textContent = '该 scheme 无数据';
+        if (this.schemeLegend) this.schemeLegend.textContent = 'No data for this scheme';
         return;
       }
       const norm = normalize(vals);
       if (this.schemeLegend)
-        this.schemeLegend.textContent = `${scheme.label}（已归一化: 0 → 1）`;
+        this.schemeLegend.textContent = `${scheme.label} (normalized: 0 → 1)`;
       if (this.gradientBar)
         this.gradientBar.style.background =
           'linear-gradient(90deg, #2b66d6, #ffdd57, #ff1243)';
@@ -335,7 +335,7 @@
         `rewrite: normLen=${normVals.length} | atoms=${newLines.length} | bfact[0,mid,last]=${samples.join(',')}`
       );
       const ok = await this._tryApplyColorTheme('uncertainty', { pdb: newPdb });
-      if (!ok) this.setStatus('per-residue coloring: uncertainty 主题未生效');
+      if (!ok) this.setStatus('per-residue coloring: uncertainty theme not applied');
     }
 
     async setColorUniform(rgb) {
@@ -344,64 +344,67 @@
         pdb: newPdb,
         color: { r: rgb[0], g: rgb[1], b: rgb[2] },
       });
-      if (!ok) this.setStatus('uniform coloring: 当前 Mol* 版本不支持，已回退');
+      if (!ok) this.setStatus('uniform coloring: not supported by this Mol* version, fell back');
     }
 
-    // --- categorical 离散着色 (base_type / secondary_structure) ---
-    // 调色板: 碱基 A/U/G/C 用 4 色, stem/loop 用 2 色
+    // --- categorical discrete coloring (base_type / secondary_structure) ---
+    // Palette: bases A/U/G/C use 4 colors, stem/loop use 2 colors
     static CATEGORICAL_PALETTES = {
       base_type: [
-        [0.20, 0.60, 0.85],  // A 蓝
-        [0.95, 0.75, 0.30],  // U 黄
-        [0.55, 0.80, 0.45],  // G 绿
-        [0.90, 0.45, 0.45],  // C 红
+        [0.20, 0.60, 0.85],  // A blue
+        [0.95, 0.75, 0.30],  // U yellow
+        [0.55, 0.80, 0.45],  // G green
+        [0.90, 0.45, 0.45],  // C red
       ],
       secondary_structure: [
-        [0.70, 0.70, 0.72],  // loop 灰
-        [0.25, 0.55, 0.92],  // stem 蓝
+        [0.70, 0.70, 0.72],  // loop gray
+        [0.25, 0.55, 0.92],  // stem blue
       ],
     };
 
     async setColorCategorical(schemeKey, categoryArray) {
-      // 把 category index 映射到不同 B-factor 区间 (每个类别一个固定值),
-      // 再用 uniform 主题分段刷新不行 — Mol* uncertainty 是连续 scale。
-      // 改用按残基重写残基名? 太重。最稳: 直接按 category 分组, 每组单独
-      // 构造一个 B-factor=类别值 的 PDB, 但只渲染一次。
-      // 实际可行做法: 用 uniform 单色 (取第一个类别色), 配 legend 说明。
-      // 更好: 重写 B-factor 为类别值 (0/1/2/3 * 25), uncertainty theme 会
-      // 产生梯度色, 接近离散但非完美。配合 legend 标注类别。
+      // Mapping the category index onto distinct B-factor ranges (one fixed
+      // value per category) and refreshing in uniform-theme segments won't
+      // work — Mol* uncertainty is a continuous scale.
+      // Rewriting residue names per residue is too heavy. The most robust way:
+      // group by category, assign each group one B-factor = category value, and
+      // render only once.
+      // Practical approach: uniform single color (first category color) plus a
+      // legend note. Even better: rewrite B-factor to category values
+      // (0/1/2/3 * 25) — the uncertainty theme yields gradient colors, close to
+      // discrete but not perfect. Label categories with the legend.
       const palette = CircRNAViewer.CATEGORICAL_PALETTES[schemeKey] ||
         CircRNAViewer.CATEGORICAL_PALETTES.base_type;
       const nCats = palette.length;
-      // B-factor 写成 category * (100/nCats), uncertainty 主题会给每个类别
-      // 一个梯度位置, 颜色不同。
+      // B-factor is set to category * (100/nCats); the uncertainty theme gives
+      // each category its own gradient position, so colors differ.
       const normForBfac = categoryArray.map((c) => c / Math.max(1, nCats - 1));
       const newPdb = rewriteBFactors(this.pdb, normForBfac);
       const ok = await this._tryApplyColorTheme('uncertainty', { pdb: newPdb });
       if (this.schemeLegend)
         this.schemeLegend.textContent =
           schemeKey === 'base_type'
-            ? '碱基类型: A(蓝) U(黄) G(绿) C(红)'
-            : '二级结构: stem(蓝) loop(灰)';
+            ? 'Base type: A(blue) U(yellow) G(green) C(red)'
+            : 'Secondary structure: stem(blue) loop(gray)';
       if (this.gradientBar)
         this.gradientBar.style.background =
           'linear-gradient(90deg,' +
           palette.map((c) =>
             `rgb(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)})`
           ).join(',') + ')';
-      if (!ok) this.setStatus('categorical coloring: uncertainty 主题未生效');
+      if (!ok) this.setStatus('categorical coloring: uncertainty theme not applied');
     }
 
-    // --- Representation 切换 (cartoon / ball-stick / spacefill / surface) ---
+    // --- Representation switching (cartoon / ball-stick / spacefill / surface) ---
     async setRepresentation(kind) {
       if (!this.plugin || !this.plugin.managers.structure) return;
       const mgr = this.plugin.managers.structure.component;
       const components = this._getComponents(mgr);
       if (components.length === 0) {
-        this.setStatus('setRepresentation: 无 components');
+        this.setStatus('setRepresentation: no components');
         return;
       }
-      // 先清除现有 representation, 再按 kind 重建
+      // Clear existing representations first, then rebuild by kind
       try {
         for (const c of components) {
           await this._clearReprs(mgr, c);
@@ -416,7 +419,7 @@
         this._currentRepr = kind;
         this.setStatus(`representation: ${kind}`);
       } catch (e) {
-        this.setStatus('setRepresentation 失败: ' + (e?.message || e));
+        this.setStatus('setRepresentation failed: ' + (e?.message || e));
       }
     }
 
@@ -438,7 +441,7 @@
             colorParams: {},
           };
         case 'surface+cartoon':
-          // surface 半透明 + cartoon 实心叠加
+          // translucent surface + solid cartoon overlay
           return { type: 'molecular-surface',
                    typeParams: { opacity, alpha: opacity }, colorParams: {} };
         default:
@@ -456,7 +459,7 @@
 
     async setSurfaceOpacity(v) {
       this._surfaceOpacity = v;
-      // 若当前是 surface 类, 重建 representation 应用新 opacity
+      // If the current representation is a surface type, rebuild it to apply the new opacity
       if (this._currentRepr && this._currentRepr.startsWith('surface')) {
         await this.setRepresentation(this._currentRepr);
       }
@@ -474,9 +477,9 @@
     }
 
     async _tryApplyColorTheme(themeName, opts) {
-      // 直接用 component theme, 不重载结构（避免 state transaction 错误）
+      // Apply the theme directly to components without reloading the structure (avoids state-transaction errors)
       const ok = this._applyColorViaComponent(themeName, opts);
-      if (!ok) this.setStatus(themeName + ' 主题未生效');
+      if (!ok) this.setStatus(themeName + ' theme not applied');
       return ok;
     }
 
@@ -487,7 +490,7 @@
       }
       const mgr = this.plugin.managers.structure.component;
 
-      // 坑2: components come from mgr.currentStructures → s.components
+      // Pitfall 2: components come from mgr.currentStructures → s.components
       // (NOT mgr.components / mgr.currentComponents — undefined in 5.x).
       let components = [];
       try {
@@ -496,7 +499,7 @@
           if (s && s.components) components = components.concat(toArr(s.components));
         }
       } catch (e) {
-        console.warn('currentStructures 取 components 失败:', e);
+        console.warn('failed to get components from currentStructures:', e);
       }
 
       if (components.length === 0) {
@@ -517,12 +520,12 @@
       }
 
       if (components.length === 0) {
-        this.setStatus('取不到 structure components，着色未生效');
+        this.setStatus('could not get structure components; coloring not applied');
         return false;
       }
 
       try {
-        // 坑3: color is a theme NAME STRING, colorParams carries the value.
+        // Pitfall 3: color is a theme NAME STRING, colorParams carries the value.
         // uncertainty reads B_iso_or_equiv (we wrote per-residue vals there);
         // uniform needs colorParams: { value: ColorInt } where ColorInt is
         // (r<<16|g<<8|b).
@@ -544,13 +547,13 @@
         );
         if (isPromise) {
           ret.catch((e) =>
-            this.setStatus('updateRepresentationsTheme 失败: ' + (e?.message || e))
+            this.setStatus('updateRepresentationsTheme failed: ' + (e?.message || e))
           );
         }
         return true;
       } catch (e) {
         console.warn('updateRepresentationsTheme failed:', e);
-        this.setStatus('coloring 失败: ' + (e?.message || e));
+        this.setStatus('coloring failed: ' + (e?.message || e));
         return false;
       }
     }

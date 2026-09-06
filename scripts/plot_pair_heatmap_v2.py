@@ -1,7 +1,7 @@
 """
-plot_pair_heatmap_v2.py — 351对碱基配对热力图（从checkpoint数据）
+plot_pair_heatmap_v2.py — base-pairing heatmap for the 351 pairs (from checkpoint data)
 
-不需要ViennaRNA，直接从checkpoint.json的pairs数据生成热力图
+No ViennaRNA needed: the heatmap is built directly from the pairs stored in checkpoint.json
 """
 import json
 import numpy as np
@@ -26,7 +26,7 @@ def main():
     ROOT = Path(__file__).resolve().parent.parent
     output_dir = ROOT / "output_2013nt"
 
-    # ── 加载 checkpoint ──
+    # ── Load the checkpoint ──
     ckpt_path = output_dir / "_checkpoint.json"
     with open(ckpt_path, 'r', encoding='utf-8') as f:
         ckpt = json.load(f)
@@ -39,26 +39,26 @@ def main():
     print(f"Total pairs: {len(all_pairs)}")
     print(f"Far pairs: {len(far_pairs)}")
 
-    # ── 构建 bpp 矩阵 ──
+    # ── Build the bpp matrix ──
     bpp_matrix = np.zeros((L, L), dtype=np.float32)
     for (i, j, bpp_val) in all_pairs:
         bpp_matrix[i, j] = bpp_val
         bpp_matrix[j, i] = bpp_val
 
-    # 分类
+    # Categorize into near vs far pairs
     near_pairs = [(i, j, b) for (i, j, b) in all_pairs if abs(i - j) < 100]
     far_pairs_data = [(i, j, b) for (i, j, b) in all_pairs if abs(i - j) >= 100]
 
     print(f"Near pairs (<100nt): {len(near_pairs)}")
     print(f"Far pairs (>=100nt): {len(far_pairs_data)}")
 
-    # ── 画图 ──
+    # ── Plot ──
     fig = plt.figure(figsize=(20, 16))
     gs = gridspec.GridSpec(2, 3, height_ratios=[1.2, 1], hspace=0.3, wspace=0.35,
                            left=0.06, right=0.96, top=0.93, bottom=0.06)
 
     # ════════════════════════════════════════
-    # Panel A: 全局 bpp 矩阵热力图
+    # Panel A: full bpp matrix heatmap
     # ════════════════════════════════════════
     ax_a = fig.add_subplot(gs[0, :2])
     im = ax_a.imshow(bpp_matrix, cmap='hot', vmin=0, vmax=1,
@@ -69,7 +69,7 @@ def main():
     ax_a.set_ylabel('Nucleotide Position')
     cbar = plt.colorbar(im, ax=ax_a, shrink=0.8, label='Base Pair Probability (bpp)')
 
-    # 标记 top 配对
+    # Mark the top pairs
     top_n = min(20, len(all_pairs))
     top_pairs = sorted(all_pairs, key=lambda x: -x[2])[:top_n]
     for (i, j, bpp_val) in top_pairs:
@@ -78,7 +78,7 @@ def main():
             ax_a.plot(i, j, 'c*', markersize=5, alpha=0.7)
 
     # ════════════════════════════════════════
-    # Panel B: 351对配对区域放大
+    # Panel B: zoomed view of the paired regions
     # ════════════════════════════════════════
     ax_b = fig.add_subplot(gs[0, 2])
     pair_positions = set()
@@ -98,7 +98,7 @@ def main():
         plt.colorbar(im_b, ax=ax_b, shrink=0.8, label='bpp')
 
     # ════════════════════════════════════════
-    # Panel C: BPP 分布
+    # Panel C: BPP distribution
     # ════════════════════════════════════════
     ax_c = fig.add_subplot(gs[1, 0])
     bpp_vals = [b for (_, _, b) in all_pairs]
@@ -113,7 +113,7 @@ def main():
     ax_c.spines['right'].set_visible(False)
 
     # ════════════════════════════════════════
-    # Panel D: 配对距离分布
+    # Panel D: pair-distance distribution
     # ════════════════════════════════════════
     ax_d = fig.add_subplot(gs[1, 1])
     near_dists = [abs(j - i) for (i, j, _) in near_pairs]
@@ -132,7 +132,7 @@ def main():
     ax_d.spines['right'].set_visible(False)
 
     # ════════════════════════════════════════
-    # Panel E: 统计信息
+    # Panel E: statistics
     # ════════════════════════════════════════
     ax_e = fig.add_subplot(gs[1, 2])
     ax_e.axis('off')
@@ -157,7 +157,7 @@ def main():
               bbox=dict(boxstyle='round', facecolor='#21262d', edgecolor='#30363d'))
     ax_e.set_title('E. Statistics', fontweight='bold', pad=12)
 
-    # ── 总标题 ──
+    # ── Figure title ──
     fig.suptitle(f'CircRNA 2013-nt Pairing Heatmap\n'
                  f'{L} nucleotides | {len(all_pairs)} pairs | '
                  f'{len(far_pairs_data)} far-end pairs',

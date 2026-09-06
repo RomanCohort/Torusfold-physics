@@ -1,10 +1,10 @@
 """
-plot_pseudo_msa.py — 伪MSA机制可视化
+plot_pseudo_msa.py — visualization of the pseudo-MSA mechanism
 
-展示:
-1. 协同突变保持互补性的算法
-2. 三条MSA路径的优先级
-3. MI信号对比（伪 vs 真 vs 无MSA）
+Shows:
+1. The coordinated-mutation algorithm that keeps complementarity
+2. The priority order of the three MSA sources
+3. MI signal comparison (pseudo vs real vs no MSA)
 """
 import os
 import numpy as np
@@ -13,7 +13,7 @@ import matplotlib.gridspec as gridspec
 from matplotlib.patches import FancyArrowPatch
 import matplotlib.patches as mpatches
 
-# ── 全局样式 ──
+# ── Global style ──
 plt.rcParams.update({
     'font.size': 10,
     'axes.titlesize': 13,
@@ -33,22 +33,22 @@ gs = gridspec.GridSpec(2, 3, height_ratios=[1.3, 1], hspace=0.35, wspace=0.3,
                        left=0.06, right=0.96, top=0.92, bottom=0.08)
 
 # ══════════════════════════════════════════════
-# Panel A: 协同突变算法演示
+# Panel A: coordinated-mutation algorithm demo
 # ══════════════════════════════════════════════
 ax_a = fig.add_subplot(gs[0, 0])
 ax_a.set_title('A. Coordinated Mutation Algorithm', fontweight='bold', pad=12)
 ax_a.axis('off')
 
-# 原始序列和配对
+# Reference sequence and its paired positions
 seq = "A U G G C C U A G A C U"
-pairs = [(3, 4), (5, 6), (9, 10)]  # 配对位置
+pairs = [(3, 4), (5, 6), (9, 10)]  # paired positions
 bracket = "  . ( ( ( ( . . . ( ( ."
 colors = {'A': '#ff6b6b', 'U': '#4ecdc4', 'G': '#45b7d1', 'C': '#f7dc6f'}
 
 y_start = 0.85
 x_pos = np.linspace(0.08, 0.92, len(seq))
 
-# 标签
+# Row labels
 ax_a.text(0.01, y_start + 0.06, 'Original:', fontsize=9, fontweight='bold',
           color='#58a6ff', transform=ax_a.transAxes)
 ax_a.text(0.01, y_start, 'Structure:', fontsize=9, fontweight='bold',
@@ -60,23 +60,23 @@ ax_a.text(0.01, y_start - 0.36, 'Variant 2:', fontsize=9, fontweight='bold',
 ax_a.text(0.01, y_start - 0.54, 'Variant 3:', fontsize=9, fontweight='bold',
           color='#ff9f43', transform=ax_a.transAxes)
 
-# 原始序列
+# Reference sequence
 for i, (x, nt) in enumerate(zip(x_pos, seq)):
     color = colors.get(nt, '#8b949e')
     ax_a.text(x, y_start, nt, fontsize=13, fontweight='bold', color=color,
               ha='center', va='center', transform=ax_a.transAxes)
 
-# 配对括号
+# Pairing brackets
 for i, (x, ch) in enumerate(zip(x_pos, bracket.strip())):
     if ch in '()':
         ax_a.text(x, y_start - 0.08, ch, fontsize=14, fontweight='bold',
                   color='#f7dc6f', ha='center', va='center', transform=ax_a.transAxes)
 
-# 配对连接线
+# Pair-connection arcs
 for pi, (i, j) in enumerate(pairs):
     x1, x2 = x_pos[i], x_pos[j]
     y = y_start - 0.13
-    # 画弧线连接
+    # Draw a connecting arc
     theta = np.linspace(0, np.pi, 30)
     r = abs(x2 - x1) / 2
     cx = (x1 + x2) / 2
@@ -85,11 +85,11 @@ for pi, (i, j) in enumerate(pairs):
     ax_a.plot(arc_x, arc_y, '-', color='#f7dc6f', alpha=0.6, linewidth=1.2,
               transform=ax_a.transAxes)
 
-# 变体序列
+# Variant sequences
 variants = [
     ("A U G A U U C A G A C U", [(3, 4), (5, 6)]),   # G-C→A-U, C-G→A-U
     ("A U G G C C U A A U C U", [(9, 10)]),             # G-C→A-U
-    ("A U G U C G U A G A C U", [(3, 4), (5, 6), (9, 10)]),  # 多处突变
+    ("A U G U C G U A G A C U", [(3, 4), (5, 6), (9, 10)]),  # several positions mutated
 ]
 mutation_pairs_list = [
     [(3, 4), (5, 6)],
@@ -103,36 +103,36 @@ for vi, (var_seq, mut_pairs) in enumerate(zip([v[0] for v in variants], mutation
     mut_set = set(mut_pairs)
     for i, (x, nt_orig, nt_var) in enumerate(zip(x_pos, seq, var_seq.split())):
         is_mutated = any(i in p or i in [pp for pp in mut_set] for p in mut_set)
-        # 检查是否是突变位置
+        # Check whether this is a mutated position
         mutated = False
         for (pi, pj) in mut_set:
             if i == pi or i == pj:
                 mutated = True
                 break
         if mutated:
-            color = '#ff9f43'  # 突变碱基用橙色
+            color = '#ff9f43'  # mutated bases are drawn in orange
             ax_a.plot([x, x], [y_v + 0.04, y_v + 0.07], '-', color='#ff9f43',
-                      linewidth=2, transform=ax_a.transAxes)  # 小竖线标记
+                      linewidth=2, transform=ax_a.transAxes)  # small tick marking the mutation
         else:
             color = colors.get(nt_var, '#8b949e')
         ax_a.text(x, y_v, nt_var, fontsize=11, fontweight='bold' if mutated else 'normal',
                   color=color, ha='center', va='center', transform=ax_a.transAxes)
 
-# 图例
+# Legend
 ax_a.text(0.08, 0.08, '■ Paired    ■ Mutated    ■ Unpaired', fontsize=8,
           color='#8b949e', transform=ax_a.transAxes,
           bbox=dict(boxstyle='round,pad=0.3', facecolor='#21262d', edgecolor='#30363d'))
 
 # ══════════════════════════════════════════════
-# Panel B: MSA 来源优先级
+# Panel B: MSA source priority
 # ══════════════════════════════════════════════
 ax_b = fig.add_subplot(gs[0, 1])
 ax_b.set_title('B. MSA Resolution Priority', fontweight='bold', pad=12)
 ax_b.axis('off')
 
-# 三级优先级框
+# Three-tier priority boxes
 priorities = [
-    (0.82, 'Priority 1: Chunk自带MSA', '#34d399', 'From segmented_vfold3d\n(chunk.msa_path)',
+    (0.82, 'Priority 1: Chunk-embedded MSA', '#34d399', 'From segmented_vfold3d\n(chunk.msa_path)',
      'cmsearch hits on\nthe 1000-nt window'),
     (0.52, 'Priority 2: cmsearch Rfam', '#58a6ff', 'cmsearch --tblout\nRF00386.cm ...\nsequence_chunk.fa',
      'Known families: CRE, IRES,\nRNAcentral patterns'),
@@ -141,23 +141,23 @@ priorities = [
 ]
 
 for y, title, color, detail, note in priorities:
-    # 主框
+    # Main box
     rect = mpatches.FancyBboxPatch((0.08, y - 0.08), 0.84, 0.22,
                                     boxstyle='round,pad=0.01',
                                     facecolor=color + '15', edgecolor=color,
                                     linewidth=1.5, transform=ax_b.transAxes)
     ax_b.add_patch(rect)
-    # 标题
+    # Title
     ax_b.text(0.12, y + 0.1, title, fontsize=10, fontweight='bold', color=color,
               transform=ax_b.transAxes)
-    # 细节
+    # Detail
     ax_b.text(0.12, y - 0.01, detail, fontsize=7.5, color='#8b949e',
               fontfamily='monospace', transform=ax_b.transAxes)
-    # 注释
+    # Note
     ax_b.text(0.75, y - 0.01, note, fontsize=7, color='#6e7681',
               ha='right', transform=ax_b.transAxes, style='italic')
 
-# 箭头
+# Arrows
 for y1, y2 in [(0.72, 0.62), (0.42, 0.32)]:
     ax_b.annotate('', xy=(0.5, y2 + 0.14), xytext=(0.5, y1 - 0.02),
                   xycoords='axes fraction', textcoords='axes fraction',
@@ -168,12 +168,12 @@ ax_b.text(0.5, 0.04, 'Each chunk tries Priority 1 → falls back → Priority 3'
           style='italic')
 
 # ══════════════════════════════════════════════
-# Panel C: MI 信号对比
+# Panel C: MI signal comparison
 # ══════════════════════════════════════════════
 ax_c = fig.add_subplot(gs[0, 2])
 ax_c.set_title('C. MI Signal Comparison', fontweight='bold', pad=12)
 
-# 数据（来自之前的真实分析）
+# Data from an earlier real analysis
 methods = ['Pseudo\nMSA', 'Real MSA\n(CRE)', 'No MSA\n(single seq)']
 top_mi = [0.08, 0.961, 0.02]
 bg_mi = [0.005, 0.019, 0.0003]
@@ -187,7 +187,7 @@ bars1 = ax_c.bar(x - w/2, top_mi, w, label='Top MI (bits)', color='#ff9f43', alp
 # Background MI
 bars2 = ax_c.bar(x + w/2, bg_mi, w, label='Background MI', color='#58a6ff', alpha=0.85)
 
-# SNR 标注
+# SNR labels
 for i, s in enumerate(snr_vals):
     ax_c.text(i, max(top_mi[i], bg_mi[i]) + 0.05, f'SNR={s:.1f}x',
               ha='center', fontsize=8, color='#c9d1d9', fontweight='bold')
@@ -201,13 +201,13 @@ ax_c.spines['top'].set_visible(False)
 ax_c.spines['right'].set_visible(False)
 
 # ══════════════════════════════════════════════
-# Panel D: 序列一致性矩阵 (展示16条序列)
+# Panel D: sequence-identity matrix (shows the 16 sequences)
 # ══════════════════════════════════════════════
 ax_d = fig.add_subplot(gs[1, 0:2])
 ax_d.set_title('D. Pseudo MSA Consistency Matrix (16 sequences × 12 positions)',
                fontweight='bold', pad=12)
 
-# 生成伪MSA（与代码逻辑一致）
+# Generate a pseudo MSA (mirrors the pipeline logic)
 np.random.seed(42)
 seq_upper = ['A', 'U', 'G', 'G', 'C', 'C', 'U', 'A', 'G', 'A', 'C', 'U']
 pairs_idx = [(3, 4), (5, 6), (9, 10)]
@@ -226,21 +226,21 @@ for _ in range(15):
                 s[i], s[j] = choices[0]
     msa.append(s[:])
 
-# 编码为数值
+# Encode nucleotides as integers
 nt_to_int = {'A': 0, 'U': 1, 'G': 2, 'C': 3, 'N': 4}
 msa_num = np.array([[nt_to_int.get(c, 4) for c in row] for row in msa])
 
-# 一致性得分
+# Conservation score per position
 conservation = np.zeros(12)
 for pos in range(12):
     counts = np.bincount(msa_num[:, pos], minlength=5)
     conservation[pos] = counts.max() / 16
 
-# 画热力图
+# Draw the heatmap
 cmap = plt.cm.colors.ListedColormap(['#ff6b6b', '#4ecdc4', '#45b7d1', '#f7dc6f', '#8b949e'])
 im = ax_d.imshow(msa_num, cmap=cmap, aspect='auto', vmin=0, vmax=4)
 
-# 位置标签
+# Position labels
 ax_d.set_xticks(range(12))
 ax_d.set_xticklabels([f'{i+1}' for i in range(12)])
 ax_d.set_xlabel('Position')
@@ -248,14 +248,14 @@ ax_d.set_ylabel('Sequence')
 ax_d.set_yticks(range(16))
 ax_d.set_yticklabels(['Ref'] + [f'V{i+1}' for i in range(15)], fontsize=7)
 
-# 配对位置用方框高亮
+# Box-highlight the paired positions
 for (i, j) in pairs_idx:
     for seq_i in range(16):
         for pos in [i, j]:
             ax_d.add_patch(plt.Rectangle((pos - 0.5, seq_i - 0.5), 1, 1,
                                           fill=False, edgecolor='white', linewidth=0.8))
 
-# 保守性条
+# Conservation trace
 ax_d2 = ax_d.twinx()
 ax_d2.plot(range(12), conservation, 'o-', color='#34d399', markersize=4, linewidth=1)
 ax_d2.set_ylabel('Conservation', color='#34d399', fontsize=8)
@@ -264,7 +264,7 @@ ax_d2.tick_params(colors='#34d399')
 ax_d2.set_xticks(range(12))
 ax_d2.set_xticklabels([f'{i+1}' for i in range(12)])
 
-# 标记配对
+# Mark the pairs
 for (i, j) in pairs_idx:
     mid = (i + j) / 2
     ax_d2.annotate(f'pair', xy=(mid, 0.95), fontsize=7, color='white',
@@ -275,23 +275,23 @@ ax_d.set_title('D. Pseudo MSA Consistency (paired positions highlighted)',
                fontweight='bold', pad=12)
 
 # ══════════════════════════════════════════════
-# Panel E: RhoFold+ 单序列塌缩 vs Pseudo MSA
+# Panel E: RhoFold+ single-sequence collapse vs pseudo MSA
 # ══════════════════════════════════════════════
 ax_e = fig.add_subplot(gs[1, 2])
 ax_e.set_title('E. Collapse Prevention', fontweight='bold', pad=12)
 
-# 模拟塌缩
+# Simulated collapse
 np.random.seed(7)
 L = 50
-# 真实螺旋结构
+# True helical structure
 true_x = np.linspace(0, 10, L) + 2 * np.sin(np.linspace(0, 4 * np.pi, L))
 true_y = np.cos(np.linspace(0, 4 * np.pi, L)) * 3
 
-# 无MSA塌缩：所有点挤在一起
+# No-MSA collapse: every point clusters together
 collapse_x = np.linspace(0, 10, L) + 0.1 * np.random.randn(L)
 collapse_y = 0.1 * np.random.randn(L)
 
-# 伪MSA恢复：大致回到真实形状
+# Pseudo-MSA recovery: roughly back to the true shape
 pseudo_x = true_x + 0.5 * np.random.randn(L)
 pseudo_y = true_y + 0.5 * np.random.randn(L)
 
@@ -301,7 +301,7 @@ ax_e.plot(collapse_x, collapse_y, 's-', color='#f87171', markersize=2, alpha=0.7
 ax_e.plot(pseudo_x, pseudo_y, '^-', color='#58a6ff', markersize=2, alpha=0.7,
           label='With pseudo MSA')
 
-# 标注RMSD
+# RMSD annotations
 true_pts = np.column_stack([true_x, true_y])
 collapse_pts = np.column_stack([collapse_x, collapse_y])
 pseudo_pts = np.column_stack([pseudo_x, pseudo_y])
@@ -322,11 +322,11 @@ ax_e.set_aspect('equal')
 ax_e.spines['top'].set_visible(False)
 ax_e.spines['right'].set_visible(False)
 
-# ── 总标题 ──
+# ── Figure title ──
 fig.suptitle('Pseudo MSA: Synthetic Multiple Sequence Alignment for Collapse Prevention',
              fontsize=15, fontweight='bold', color='#58a6ff', y=0.97)
 
-# ── 保存 ──
+# ── Save ──
 out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'output_2013nt', 'pseudo_msa_mechanism.png')
 fig.savefig(out_path, dpi=150, bbox_inches='tight', facecolor=fig.get_facecolor())
 plt.close()

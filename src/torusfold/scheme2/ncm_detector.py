@@ -118,12 +118,12 @@ def _get_ncm_type(b1: str, b2: str) -> Optional[str]:
 
 
 def _build_seq_masks(sequence: str):
-    """构建序列碱基对掩码矩阵 (向量化基础).
+    """Build the sequence base-pair mask matrices (vectorized foundation).
 
     Returns:
         (is_nonwc, ncm_code)
-        is_nonwc: (L,L) bool, True = 非WC非wobble碱基对 (i<j 上三角有效)
-        ncm_code: (L,L) int8, NCM 类型编码 (0=无, 1=HOOGSTEEN, 2=SUGAR, 3=SHEAR, 4=STACK)
+        is_nonwc: (L,L) bool, True = base pair that is neither WC nor wobble (valid on the upper triangle i<j)
+        ncm_code: (L,L) int8, NCM type code (0=none, 1=HOOGSTEEN, 2=SUGAR, 3=SHEAR, 4=STACK)
     """
     seq_arr = np.frombuffer(sequence.encode(), dtype=np.uint8)
     b1 = seq_arr[:, None]
@@ -133,15 +133,17 @@ def _build_seq_masks(sequence: str):
     is_nonwc = np.ones((L, L), dtype=bool)
     for a, b in list(_WC_PAIRS) + list(_GU_WOBBLE):
         is_nonwc &= ~((b1 == ord(a)) & (b2 == ord(b)))
-    # 上三角 j > i (自身和对角线以下无意义); min loop 由各检测器自行约束
-    # (tandem 用 j>i+3? 不 — tandem flank 在两侧, NCM 本身 gap 可小到 2,
-    #  原 Python 版 range(i+4, L) 要求 gap>=4, 这里保持一致用 gap>=2 允许
-    #  miniloop closure 类 tandem; shear/miniloop 各自再过滤)
+    # upper triangle j > i (self and below-diagonal entries are meaningless); each
+    # detector enforces its own min-loop constraint
+    # (tandem uses j>i+3? no - the tandem flanks sit on both sides, so the NCM gap
+    #  itself can be as small as 2; the original Python range(i+4, L) required gap>=4,
+    #  here we stay consistent and allow gap>=2 to permit miniloop-closure-type tandems;
+    #  shear/miniloop apply their own filtering afterwards)
     jj, ii = np.meshgrid(np.arange(L), np.arange(L))
     is_nonwc &= jj > ii
     np.fill_diagonal(is_nonwc, False)
 
-    # NCM 类型码: 取该碱基对的第一个 Leontis-Westhof 类型
+    # NCM type code: take the first Leontis-Westhof type of the base pair
     type_map = {"HOOGSTEEN": 1, "SUGAR": 2, "SHEAR": 3}
     ncm_code = np.zeros((L, L), dtype=np.int8)
     for (a, b), combos in _NCM_TYPES.items():
@@ -150,7 +152,7 @@ def _build_seq_masks(sequence: str):
         if code and etype != "WC":
             mask = (b1 == ord(a)) & (b2 == ord(b))
             cur = ncm_code[mask]
-            # 不覆盖已有更高优先级的类型 (数值大者优先)
+            # do not overwrite a higher-priority type already present (larger value wins)
             ncm_code[mask] = np.maximum(cur, code)
 
     return is_nonwc, ncm_code
@@ -166,28 +168,29 @@ def _detect_tandem_ncms(
 
     Pattern: (i-k, j+k) WC, (i, j) NCM, (i+k, j-k) WC for k in 1..N
 
-    向量化实现: WC 对集 → 掩码矩阵, flank 计数用移位累加.
-    O(L²) numpy vs 原 O(L²×flank) 纯 Python, 2013nt 从分钟级降到秒级.
+    Vectorized implementation: WC pair set -> mask matrix; flank counts are
+    accumulated by shifting. O(L^2) numpy vs. the original O(L^2*flank) pure
+    Python; for 2013nt this drops runtime from minutes to seconds.
     """
     if L < 8 or pp_matrix is None:
         return []
 
     is_nonwc, ncm_code = _build_seq_masks(sequence)
 
-    # WC 掩码矩阵 (对称): wc_mask[i,j] = True 表示 (i,j) 是高置信 WC 对
+    # WC mask matrix (symmetric): wc_mask[i,j] = True means (i,j) is a high-confidence WC pair
     wc_mask = np.zeros((L, L), dtype=bool)
     for (i, j) in wc_pairs:
         wc_mask[i, j] = True
         wc_mask[j, i] = True
 
-    # flank_up[i,j] = 连续满足 (i-k, j+k) 为 WC 的 k 数 (k>=1, 遇断即停)
-    #   即 flank_up[i,j] += wc_mask[i-k, j+k], 移位: new[i,j] = old[i-1, j+1]
-    # flank_dn[i,j] = 连续满足 (i+k, j-k) 为 WC 的 k 数
-    #   即 flank_dn[i,j] += wc_mask[i+k, j-k], 移位: new[i,j] = old[i+1, j-1]
+    # flank_up[i,j] = number of consecutive k (k>=1) for which (i-k, j+k) is WC (stops at the first break)
+    #   i.e. flank_up[i,j] += wc_mask[i-k, j+k]; shift: new[i,j] = old[i-1, j+1]
+    # flank_dn[i,j] = number of consecutive k for which (i+k, j-k) is WC
+    #   i.e. flank_dn[i,j] += wc_mask[i+k, j-k]; shift: new[i,j] = old[i+1, j-1]
     flank_up = np.zeros((L, L), dtype=np.int32)
     flank_dn = np.zeros((L, L), dtype=np.int32)
 
-    max_flank = min(L // 4, 20)  # 超过 20 层置信度已封顶, 无需继续
+    max_flank = min(L // 4, 20)  # beyond 20 layers the confidence is already capped; no need to continue
     for _k in range(1, max_flank + 1):
         # layer_u[i,j] = wc_mask[i-_k, j+_k]
         layer_u = np.zeros((L, L), dtype=bool)
@@ -211,7 +214,8 @@ def _detect_tandem_ncms(
             if not cont_u.any() and not cont_d.any():
                 break
 
-    # 候选 = 非 WC 且有至少一个 flank 且 gap>=3 (tandem 最小间隔, 同原 Python 版 range(i+4,L))
+    # candidates = non-WC with at least one flank and gap>=3 (tandem minimum separation,
+    # same as the original Python range(i+4,L))
     jj, ii = np.meshgrid(np.arange(L), np.arange(L))
     gap_ok = jj > ii + 3
     cand = is_nonwc & gap_ok & ((flank_up + flank_dn) >= _TANDEM_MIN_FLANK) & (ncm_code > 0)
@@ -233,9 +237,10 @@ def _detect_miniloop_ncms(
     wc_pairs: Set[Tuple[int, int]],
     L: int,
 ) -> List[Tuple[int, int, str, float]]:
-    """Detect non-canonical pairs closing miniloops (size1-5).
+    """Detect non-canonical pairs closing miniloops (size 1-5).
 
-    向量化: 小环窗口 j-i ∈ [2,6] 只有 5 条对角线, 直接切片.
+    Vectorized: the small-loop window j-i in [2,6] covers only 5 diagonals,
+    so they are sliced directly.
     """
     if L < 8 or pp_matrix is None:
         return []
@@ -297,9 +302,9 @@ def _detect_shear_ncms(
     pp_matrix: np.ndarray,
     L: int,
 ) -> List[Tuple[int, int, str, float]]:
-    """Detect shear base pairs: A-A or G-G pairs with SHEAR edge type.
+    """Detect shear base pairs: A-A or G-G pairs with the SHEAR edge type.
 
-    向量化: 碱基外积掩码 + 概率阈值一次过滤.
+    Vectorized: outer-product base mask + probability threshold in a single filter.
     """
     if L < 8 or pp_matrix is None:
         return []
@@ -416,21 +421,21 @@ def detect_ncms_from_bpp(
     hard_pairs: list,
     apply_thermo_filter: bool = True,
 ) -> list:
-    """从已有的 BPP 矩阵检测非典型配对, 避免重复计算 ViennaRNA PF.
+    """Detect non-canonical pairs from an existing BPP matrix, avoiding a redundant ViennaRNA partition-function call.
 
     Args:
-        sequence: RNA 序列
-        pp_matrix: Level 0 已算好的 BPP 矩阵 (L×L, 对称)
-        hard_pairs: 已确定的硬约束配对列表 [(i, j, w), ...]
+        sequence: RNA sequence
+        pp_matrix: BPP matrix already computed at Level 0 (L x L, symmetric)
+        hard_pairs: list of already-determined hard-restraint pairs [(i, j, w), ...]
 
     Returns:
-        软约束列表 [(i, j, weight), ...] (非 WC 的非典型配对)
+        soft-restraint list [(i, j, weight), ...] (non-WC non-canonical pairs)
     """
     L = len(sequence)
     if pp_matrix is None or L < 4:
         return []
 
-    # 从 pp_matrix 提取 WC 配对集 (P > wc_hard)
+    # extract the WC pair set from pp_matrix (P > wc_hard)
     wc_pairs: Set[Tuple[int, int]] = set()
     for i in range(L):
         for j in range(i + 1, L):
@@ -441,7 +446,7 @@ def detect_ncms_from_bpp(
             if _is_wc(b1, b2):
                 wc_pairs.add((i, j))
 
-    # 运行 NCM 检测 (复用已有函数, 只需 pp_matrix + wc_pairs)
+    # run NCM detection (reuse the existing functions; only pp_matrix + wc_pairs are needed)
     tandem_ncms = _detect_tandem_ncms(sequence, pp_matrix, wc_pairs, L)
     miniloop_ncms = _detect_miniloop_ncms(sequence, pp_matrix, wc_pairs, L)
     shear_ncms = _detect_shear_ncms(sequence, pp_matrix, L)
@@ -460,9 +465,10 @@ def detect_ncms_from_bpp(
             all_ncms.append((i, j, etype, conf))
             ncm_set.add((i, j))
 
-    # 过滤: 只返回非 WC 且不在硬约束中的
-    # 返回格式: (i, j, weight, type) — type 用于下游区分 HOOGSTEEN/SUGAR/SHEAR/STACK,
-    # 不同类型的几何约束不同 (如 SHEAR 是平移配对, WC 目标距离不适用)
+    # Filter: return only non-WC pairs that are not in the hard restraints
+    # Return format: (i, j, weight, type) - type lets downstream code distinguish
+    # HOOGSTEEN/SUGAR/SHEAR/STACK; different types have different geometric restraints
+    # (e.g. SHEAR is a translated/sheared pair, so the WC target distance does not apply)
     hard_set = set((i, j) for i, j, *_ in hard_pairs)
     result = [(i, j, w, etype) for i, j, etype, w in all_ncms
               if etype != "WC" and (i, j) not in hard_set]

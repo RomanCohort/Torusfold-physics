@@ -1,11 +1,12 @@
 """
-TriRNASP ctypes wrapper — 粗粒度 RNA 统计势.
+TriRNASP ctypes wrapper — coarse-grained RNA statistical potential.
 
-TriRNASP 是 Tan 组开发的 3-bead RNA 统计势 (P/C4'/N).
-原始代码: https://github.com/Tan-group/TriRNASP
-编译: gcc -shared -o TriRNASP.dll TriRNASP.c -O3
+TriRNASP is a 3-bead RNA statistical potential (P/C4'/N) developed by the
+Tan group.
+Original code: https://github.com/Tan-group/TriRNASP
+Compile: gcc -shared -o TriRNASP.dll TriRNASP.c -O3
 
-用法:
+Usage:
     wrapper = TriRNASPWrapper("./TriRNASP.dll")
     energy = wrapper.score_3bead(sequence, coords)  # coords: (N, 3, 3) in Angstrom
 """

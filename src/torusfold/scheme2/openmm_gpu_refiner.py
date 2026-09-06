@@ -1,18 +1,18 @@
 """
-openmm_gpu_refiner.py — OpenMM GPU 加速 CG MD 精修
+openmm_gpu_refiner.py — OpenMM GPU-accelerated CG MD refinement
 
-替代 IsRNAcirc.exe 的 CPU-only CG MD 精修。
-用 OpenMM 3-bead CG 力场 + GPU 平台加速 + 可选 REMD 增强采样。
+Replacement for the CPU-only CG MD refinement in IsRNAcirc.exe.
+Uses an OpenMM 3-bead CG force field + GPU platform acceleration + optional REMD enhanced sampling.
 
-接口兼容 isrnacirc_wrapper.isrnacirc_cg_refine():
+Interface-compatible with isrnacirc_wrapper.isrnacirc_cg_refine():
   openmm_gpu_refine(input_pdb, output_dir, sequence, secondary_structure, ...)
   -> (output_pdb_path, final_energy)
 
-回退链: CUDA -> OpenCL -> CPU
-增强采样: 可选 T-REMD (Replica Exchange)
+Fallback chain: CUDA -> OpenCL -> CPU
+Enhanced sampling: optional T-REMD (replica exchange)
 
-作者: TorusFold Team
-日期: 2026-08-05
+Authors: TorusFold Team
+Date: 2026-08-05
 """
 from __future__ import annotations
 
@@ -37,28 +37,28 @@ except ImportError:
     unit = None
 
 
-# ── 平台检测 ──
+# ── Platform detection ──
 
 def detect_best_platform(preferred: str = "auto") -> str:
-    """检测最佳可用 OpenMM 平台.
+    """Detect the best available OpenMM platform.
 
-    preferred="auto" 时按 CUDA > OpenCL > CPU 顺序探测.
-    preferred="CUDA"/"OpenCL"/"CPU" 时直接尝试该平台, 失败回退.
+    With preferred="auto", probe in the order CUDA > OpenCL > CPU.
+    With preferred="CUDA"/"OpenCL"/"CPU", try that platform directly and fall back on failure.
 
     Args:
-        preferred: 首选平台 ("auto", "CUDA", "OpenCL", "CPU")
+        preferred: preferred platform ("auto", "CUDA", "OpenCL", "CPU")
 
     Returns:
-        可用平台名称
+        name of a usable platform
     """
     if not OPENMM_AVAILABLE:
         return "CPU"
 
     if preferred == "auto":
-        # 跳过 OpenCL (Windows 上 LLVM JIT 可能报 "Can't get available size")
+        # Skip OpenCL (the LLVM JIT on Windows can raise "Can't get available size")
         candidates = ["CUDA", "CPU"]
     elif preferred == "OpenCL":
-        # 显式请求 OpenCL 时才尝试
+        # Only attempt OpenCL when it is explicitly requested
         candidates = ["OpenCL", "CPU"]
     else:
         candidates = [preferred, "CPU"]
@@ -66,7 +66,7 @@ def detect_best_platform(preferred: str = "auto") -> str:
     for name in candidates:
         try:
             Platform.getPlatformByName(name)
-            # 对 OpenCL 做快速测试 (创建空系统), 失败则跳过
+            # Do a quick OpenCL smoke test (create an empty system); skip it on failure
             if name == "OpenCL":
                 try:
                     test_sys = mm.System()
@@ -84,12 +84,13 @@ def detect_best_platform(preferred: str = "auto") -> str:
     return "CPU"
 
 
-# ── PDB 坐标读写 ──
+# ── PDB coordinate I/O ──
 
 def _read_p_coords(pdb_path: str) -> np.ndarray:
-    """从 PDB 读取 P 原子坐标, 返回 (L,3) Å.
+    """Read P-atom coordinates from a PDB, returning (L,3) in Angstroms.
 
-    优先按列解析 (标准 PDB 格式), 列错位时回退 whitespace split.
+    Parse by fixed columns first (standard PDB format); when the columns are
+    misaligned, fall back to a whitespace split.
     """
     coords = []
     with open(pdb_path) as f:
@@ -100,7 +101,7 @@ def _read_p_coords(pdb_path: str) -> np.ndarray:
                     y = float(line[38:46])
                     z = float(line[46:54])
                 except ValueError:
-                    # 列错位 (坐标溢出等), 回退 split
+                    # Misaligned columns (e.g. coordinate overflow); fall back to split
                     parts = line.split()
                     # ATOM serial name resname chain resid x y z ...
                     x, y, z = float(parts[6]), float(parts[7]), float(parts[8])
@@ -114,13 +115,13 @@ def _write_allatom_pdb(
     output_path: str,
     sequence: str = None,
 ):
-    """从 3-bead nm 坐标写骨架 PDB (用于后续 CG_to_allatom).
+    """Write a backbone PDB from the 3-bead nm coordinates (for the later CG_to_allatom).
 
-    CG_to_allatom.exe 要求: LF 行尾, ADE/URA/GUA/CYT 三字母码.
+    CG_to_allatom.exe requires LF line endings and the ADE/URA/GUA/CYT three-letter codes.
     """
     base_map = {"A": "ADE", "U": "URA", "G": "GUA", "C": "CYT"}
-    coords_ang = p_coords_3bead_nm * 10.0  # nm -> Å
-    p_coords = coords_ang[0::3].copy()  # (L,3) Å
+    coords_ang = p_coords_3bead_nm * 10.0  # nm -> Angstroms
+    p_coords = coords_ang[0::3].copy()  # (L,3) Angstroms
 
     if len(p_coords) > 0:
         min_xyz = p_coords.min(axis=0)
@@ -131,7 +132,7 @@ def _write_allatom_pdb(
     for i in range(L):
         x, y, z = p_coords[i]
         resname = base_map.get(sequence[i].upper(), "ADE") if sequence else "ADE"
-        # PDB 格式: 必须精确对齐, 否则 CG_to_allatom.exe 不认
+        # PDB format: columns must align exactly or CG_to_allatom.exe will reject it
         line = f"ATOM  {i+1:5d}  P   {resname} A{i+1:4d}"
         line += f"    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00           P "
         lines.append(line)
@@ -144,29 +145,29 @@ def _write_refined_pdb(
     allatom_pdb_path: str,
     output_path: str,
 ):
-    """复制全原子 PDB 到输出路径."""
+    """Copy the all-atom PDB to the output path."""
     import shutil
     shutil.copy2(allatom_pdb_path, output_path)
 
 
-# ── 力场参数 (与 cg_forcefield.py 对齐) ──
+# ── Force field parameters (aligned with cg_forcefield.py) ──
 
-# 力常数 (kJ/mol/Å², 内部用 nm 需 *100)
-K_BB = 500.0       # 骨架 P-P (↑310→500, 收紧局部骨架)
+# Force constants (kJ/mol/angstrom^2; internal nm units need *100)
+K_BB = 500.0       # backbone P-P (raised 310->500, stiffen the local backbone)
 K_INTRA = 400.0    # P-C4', C4'-N
-K_PAIR = 1500.0    # WC 配对 N-N (↑800→1500, 强配对收敛)
-K_STACK = 500.0    # 碱基堆叠 (↑300→500, 强制螺旋延伸)
-K_ANGLE = 600.0    # 骨架键角 (↑400→600, 减少局部应变)
-K_DIHEDRAL = 800.0  # 骨架二面角 (↑500→800, 强制A-form几何)
-K_CLASH = 300.0    # clash (↑200→300)
-K_BSJ = 800.0      # BSJ 闭合 (↑500→800)
-K_BSJ_GUIDE = 1200.0  # BSJ 引导力 (↑800→1200)
+K_PAIR = 1500.0    # WC base-pair N-N (raised 800->1500, strong pairing for convergence)
+K_STACK = 500.0    # base stacking (raised 300->500, enforce helix extension)
+K_ANGLE = 600.0    # backbone bond angle (raised 400->600, reduce local strain)
+K_DIHEDRAL = 800.0  # backbone dihedral (raised 500->800, enforce A-form geometry)
+K_CLASH = 300.0    # clash (raised 200->300)
+K_BSJ = 800.0      # BSJ closure (raised 500->800)
+K_BSJ_GUIDE = 1200.0  # BSJ guide force (raised 800->1200)
 
-# 几何参数 (Å)
+# Geometric parameters (Angstroms)
 BOND_P_NEXT = 5.90
 BOND_P_C4 = 3.90
 BOND_C4_N = 3.35
-ANGLE_PPP = 2.618   # rad, 150°
+ANGLE_PPP = 2.618   # rad, 150 deg
 DIH_PPPP = 33.0 * np.pi / 180.0  # rad
 STACK_R0 = 5.05
 PAIR_N_N = 10.0
@@ -186,23 +187,26 @@ def _build_3bead_system_gpu(
     ss_predictions: Optional[np.ndarray] = None,
     bsj_prediction: Optional[float] = None,
 ):
-    """构建 3-bead CG OpenMM system (GPU 优化版).
+    """Build the 3-bead CG OpenMM system (GPU-optimized version).
 
-    与 cg_forcefield.build_3bead_system() 力场一致,
-    但简化接口, 去掉统计势 (GPU 路径追求速度).
+    The force field is identical to cg_forcefield.build_3bead_system(), but with a
+    simplified interface and no statistical potential (the GPU path prioritizes speed).
 
     Args:
-        p_coords: (L,3) P 坐标 (Å)
-        pairs: [(i,j,w)] ViennaRNA 配对
-        pair_scale: 配对力缩放 (退火用)
-        bsj_k_scale: BSJ 力缩放 (退火用)
-        pair_guide_k: 配对窗引导力 (kJ/mol). >0 时对远端配对施加
-            渐近吸引力, 把相距 100-3000Å 的配对原子逐步拉近到
-            力场作用范围 (~20Å), 之后普通配对力接管. 解决环状
-            RNA 初始构象配对原子距离过大 (力场够不到) 的问题.
-        bpp_matrix: (L,L) ViennaRNA 配对概率矩阵 (可选).
-            >0 时用 bpp_ij 加权配对力: k_pair = K_PAIR * (bpp_w * bpp_ij + (1-bpp_w) * w) * pair_scale
-        bpp_weight: bpp 加权系数. 1.0=纯bpp, 0.0=纯硬编码w.
+        p_coords: (L,3) P coordinates (Angstroms)
+        pairs: [(i,j,w)] ViennaRNA base pairs
+        pair_scale: scaling of the pairing force (for annealing)
+        bsj_k_scale: scaling of the BSJ force (for annealing)
+        pair_guide_k: pair-window guide force (kJ/mol). When >0, applies a soft
+            long-range attraction to far pairs, gradually pulling paired atoms that
+            are 100-3000 A apart into the force-field range (~20 A), after which the
+            ordinary pairing force takes over. Fixes the problem that paired atoms in
+            the initial circular-RNA conformation are too far apart for the force field
+            to reach.
+        bpp_matrix: (L,L) ViennaRNA base-pair probability matrix (optional).
+            When present, weight the pairing force by bpp_ij:
+            k_pair = K_PAIR * (bpp_w * bpp_ij + (1-bpp_w) * w) * pair_scale
+        bpp_weight: bpp mixing weight. 1.0 = pure bpp, 0.0 = pure hard-coded w.
 
     Returns:
         (system, coords_nm, pair_force, stack_force, bsj_force, bsj_guide)
@@ -210,17 +214,17 @@ def _build_3bead_system_gpu(
     L = len(p_coords)
     N_total = 3 * L
 
-    # 构建 3-bead 坐标: 每个 nt → P, C4', N
+    # Build the 3-bead coordinates: each nt -> P, C4', N
     coords_3bead = np.zeros((N_total, 3), dtype=np.float64)
     rng = np.random.default_rng(42)
     for i in range(L):
         p = p_coords[i]
         coords_3bead[3 * i] = p  # P
-        # C4' 和 N 用扰动估计 (后续 minimize 修正)
+        # Estimate C4' and N with small perturbations (corrected later by minimize)
         coords_3bead[3 * i + 1] = p + rng.normal(0, 0.3, 3)  # C4'
         coords_3bead[3 * i + 2] = p + rng.normal(0, 0.3, 3)  # N
 
-    coords_nm = coords_3bead / 10.0  # Å → nm
+    coords_nm = coords_3bead / 10.0  # Angstroms -> nm
 
     system = mm.System()
     for _ in range(N_total):
@@ -230,15 +234,15 @@ def _build_3bead_system_gpu(
     def C4(i): return 3 * i + 1
     def N(i): return 3 * i + 2
 
-    # 1. 骨架键 P[i]-P[i+1]
+    # 1. Backbone bond P[i]-P[i+1]
     bond_bb = mm.HarmonicBondForce()
-    bb_k = K_BB * 100.0  # Å² → nm²
+    bb_k = K_BB * 100.0  # A^2 -> nm^2
     for i in range(L - 1):
         bond_bb.addBond(P(i), P(i + 1), BOND_P_NEXT / 10.0, bb_k)
     system.addForce(bond_bb)
 
-    # 1b. BSJ 闭合 (首末 P)
-    # structRFM: bsj_prediction 调制 BSJ 力常数
+    # 1b. BSJ closure (first-last P)
+    # structRFM: bsj_prediction modulates the BSJ force constant
     bsj_confidence = float(bsj_prediction) if bsj_prediction is not None else 1.0
     effective_bsj_k = bsj_k_scale * K_BSJ * (0.3 + 0.7 * bsj_confidence)
     bsj_force = mm.CustomBondForce("0.5*k_bsj*(r-r0)^2")
@@ -248,7 +252,7 @@ def _build_3bead_system_gpu(
                       [effective_bsj_k, BOND_P_NEXT / 10.0])
     system.addForce(bsj_force)
 
-    # 1c. BSJ 引导力
+    # 1c. BSJ guide force
     bsj_guide = mm.CustomBondForce("0.5*k_guide*(r-r0)^2")
     bsj_guide.addPerBondParameter("k_guide")
     bsj_guide.addPerBondParameter("r0")
@@ -256,64 +260,64 @@ def _build_3bead_system_gpu(
                       [bsj_k_scale * K_BSJ_GUIDE, BOND_P_NEXT / 10.0])
     system.addForce(bsj_guide)
 
-    # 1d. BSJ 区接触图: 连接处 ±bsj_contact_nt 的核苷酸应空间聚簇
-    # 环状 RNA 的 BSJ 区域 (5'/3' 连接处) 通常有保守结构:
-    #   - 茎区跨越 junction, 或
-    #   - junction 两侧有碱基堆叠
-    # 力: harmonic attractor, r0 = 10Å (略大于 WC 距离, 允许灵活性)
-    # 力常数随距 junction 的距离衰减: k = K_BSJ_CONTACT * (1 - d/max_d)^2
-    bsj_contact_nt = min(8, L // 4)  # 每侧 8nt 或序列 1/4
-    K_BSJ_CONTACT = 200.0  # kJ/mol/Å²
-    r0_bsj_contact = 1.0   # nm = 10Å
+    # 1d. BSJ contact map: nucleotides within +/-bsj_contact_nt of the junction should cluster in space
+    # The BSJ region of a circular RNA (5'/3' junction) usually has conserved structure:
+    #   - a stem spanning the junction, or
+    #   - base stacking on both sides of the junction
+    # Force: harmonic attractor, r0 = 10 A (slightly larger than the WC distance, allowing flexibility)
+    # The force constant decays with distance from the junction: k = K_BSJ_CONTACT * (1 - d/max_d)^2
+    bsj_contact_nt = min(8, L // 4)  # 8 nt per side, or 1/4 of the sequence
+    K_BSJ_CONTACT = 200.0  # kJ/mol/angstrom^2
+    r0_bsj_contact = 1.0   # nm = 10 A
     bsj_contact_force = mm.CustomBondForce(
         "0.5*k_c*(r-r0)^2 * (1 - dist_ratio)^2")
     bsj_contact_force.addPerBondParameter("k_c")
     bsj_contact_force.addPerBondParameter("r0")
-    bsj_contact_force.addGlobalParameter("dist_ratio", 0.0)  # 占位, 实际用 per-bond
+    bsj_contact_force.addGlobalParameter("dist_ratio", 0.0)  # placeholder; actually uses per-bond params
 
-    # 改用简单 harmonic (OpenMM CustomBondForce 不支持全局变量 per-bond)
+    # Use a simple harmonic instead (OpenMM CustomBondForce does not support per-bond global variables)
     bsj_contact_force = mm.CustomBondForce("0.5*k_c*(r-r0)^2")
     bsj_contact_force.addPerBondParameter("k_c")
     bsj_contact_force.addPerBondParameter("r0")
 
     for i in range(-bsj_contact_nt, bsj_contact_nt):
         for j in range(i + 1, bsj_contact_nt + 1):
-            # 循环索引
+            # Cyclic indices
             ii = i % L
             jj = j % L
             if ii == jj:
                 continue
-            # 距 junction 的距离 (min of direct and wrap-around)
-            d_i = min(ii, L - ii)  # 到 position 0 的距离
+            # Distance from the junction (min of direct and wrap-around)
+            d_i = min(ii, L - ii)  # distance to position 0
             d_j = min(jj, L - jj)
-            # 距离衰减: 越靠近 junction 越强
+            # Distance decay: stronger closer to the junction
             max_d = bsj_contact_nt
             decay_i = max(0.0, 1.0 - d_i / max_d)
             decay_j = max(0.0, 1.0 - d_j / max_d)
             k_contact = K_BSJ_CONTACT * decay_i * decay_j * bsj_k_scale
-            if k_contact > 1.0:  # 最小阈值
+            if k_contact > 1.0:  # minimum threshold
                 bsj_contact_force.addBond(P(ii), P(jj), [k_contact, r0_bsj_contact])
 
     if bsj_contact_force.getNumBonds() > 0:
         system.addForce(bsj_contact_force)
 
-    # 1e. bpp 软约束势能 (S10 思想 #4: 先验信息当软引导)
-    #   U_bpp = Σ bpp(i,j) · k_bpp · (d(i,j) - d_native)²
-    #   高 bpp 的残基对被拉向 native 距离, 低 bpp 的自由探索.
-    #   d_native = 10.5Å (WC 配对 C1'-C1' 距离)
+    # 1e. bpp soft-restraint potential (S10 idea #4: prior information as a soft guide)
+    #   U_bpp = sum bpp(i,j) * k_bpp * (d(i,j) - d_native)^2
+    #   Residue pairs with high bpp are pulled toward the native distance; low-bpp pairs explore freely.
+    #   d_native = 10.5 A (WC-paired C1'-C1' distance)
     if bpp_matrix is not None and bpp_matrix.shape[0] == L:
-        K_BPP_SOFT = 100.0  # kJ/mol/Å² (软约束, 比硬配对力弱)
-        d_native_bpp = 1.05  # nm = 10.5Å
+        K_BPP_SOFT = 100.0  # kJ/mol/angstrom^2 (soft restraint, weaker than the hard pairing force)
+        d_native_bpp = 1.05  # nm = 10.5 A
         bpp_soft_force = mm.CustomBondForce("0.5*k_bpp*(r-r0)^2")
         bpp_soft_force.addPerBondParameter("k_bpp")
         bpp_soft_force.addPerBondParameter("r0")
         n_bpp_soft = 0
         for i in range(L):
-            for j in range(i + 5, L):  # 跳过近端 (已有骨架力)
+            for j in range(i + 5, L):  # skip near-range pairs (the backbone force already covers them)
                 bpp_val = float(bpp_matrix[i, j])
-                if bpp_val < 0.05:  # 低概率跳过
+                if bpp_val < 0.05:  # skip low-probability pairs
                     continue
-                # 力常数 = 基础值 × bpp 概率 × bpp_weight
+                # Force constant = base value x bpp probability x bpp_weight
                 k_bpp = K_BPP_SOFT * bpp_val * bpp_weight
                 if k_bpp > 0.5:
                     bpp_soft_force.addBond(P(i), P(j), [k_bpp, d_native_bpp])
@@ -321,7 +325,7 @@ def _build_3bead_system_gpu(
         if n_bpp_soft > 0:
             system.addForce(bpp_soft_force)
 
-    # 2. 残基内键 P-C4', C4'-N
+    # 2. Intra-residue bonds P-C4', C4'-N
     bond_intra = mm.HarmonicBondForce()
     ik = K_INTRA * 100.0
     for i in range(L):
@@ -329,17 +333,17 @@ def _build_3bead_system_gpu(
         bond_intra.addBond(C4(i), N(i), BOND_C4_N / 10.0, ik)
     system.addForce(bond_intra)
 
-    # 3. 骨架键角 P-P-P
+    # 3. Backbone angle P-P-P
     angle_force = mm.HarmonicAngleForce()
     for i in range(L - 2):
         angle_force.addAngle(P(i), P(i + 1), P(i + 2), ANGLE_PPP, K_ANGLE)
-    # 环化角
+    # Cyclization angle
     if L >= 3:
         angle_force.addAngle(P(L - 2), P(L - 1), P(0), ANGLE_PPP, K_ANGLE)
         angle_force.addAngle(P(L - 1), P(0), P(1), ANGLE_PPP, K_ANGLE)
     system.addForce(angle_force)
 
-    # 3.5 骨架二面角
+    # 3.5 Backbone dihedral
     dih_force = mm.CustomTorsionForce("0.5*k_dih*(theta-theta0)^2")
     dih_force.addGlobalParameter("k_dih", K_DIHEDRAL)
     dih_force.addGlobalParameter("theta0", DIH_PPPP)
@@ -351,20 +355,20 @@ def _build_3bead_system_gpu(
         dih_force.addTorsion(P(L - 1), P(0), P(1), P(2))
     system.addForce(dih_force)
 
-    # 4. WC 配对 N-N (bpp 加权: k = K_PAIR * (bpp_w * bpp_ij + (1-bpp_w) * w) * scale)
+    # 4. WC base-pair N-N (bpp-weighted: k = K_PAIR * (bpp_w * bpp_ij + (1-bpp_w) * w) * scale)
     pair_force = mm.CustomBondForce("0.5*k_pair*(r-r0)^2")
     pair_force.addPerBondParameter("k_pair")
     pair_force.addPerBondParameter("r0")
     for (i, j, w) in pairs:
         if (0 <= i < L and 0 <= j < L and abs(i - j) > 1
                 and not (i == 0 and j == L - 1)):
-            # bpp 加权: 如果有 bpp_matrix, 混合 bpp 概率和硬编码权重
+            # bpp weighting: when a bpp_matrix is present, mix the bpp probability with the hard-coded weight
             if bpp_matrix is not None and bpp_weight > 0:
                 bpp_val = float(bpp_matrix[i, j]) if i < bpp_matrix.shape[0] and j < bpp_matrix.shape[1] else 0.0
                 effective_w = bpp_weight * bpp_val + (1.0 - bpp_weight) * w
             else:
                 effective_w = w
-            # structRFM: pair_predictions 调制
+            # structRFM: modulate with pair_predictions
             if pair_predictions is not None:
                 pair_idx = None
                 for pi, (ii, jj) in enumerate(pairs):
@@ -374,7 +378,7 @@ def _build_3bead_system_gpu(
                 if pair_idx is not None and pair_idx < len(pair_predictions):
                     struct_w = 0.5 + 0.5 * float(pair_predictions[pair_idx])
                     effective_w *= struct_w
-            # structRFM: ss_predictions 调制 stacking (paired→强, unpaired→弱)
+            # structRFM: ss_predictions modulate stacking (paired->strong, unpaired->weak)
             if ss_predictions is not None and i < len(ss_predictions) and j < len(ss_predictions):
                 ss_avg = (float(ss_predictions[i]) + float(ss_predictions[j])) / 2.0
                 effective_w *= (0.5 + 0.5 * ss_avg)
@@ -383,20 +387,21 @@ def _build_3bead_system_gpu(
                 [K_PAIR * effective_w * pair_scale, PAIR_N_N / 10.0])
     system.addForce(pair_force)
 
-    # 4b. 配对窗引导力 (远端配对软吸引)
+    # 4b. Pair-window guide force (soft attraction for far pairs)
     # V = -k_g * (1/(1+exp(a*(r-r_cap)))) * step(r-r0_lo)
-    #   - r >> r_cap: V -> 0 (够不到不强拉, 防止撕裂结构)
-    #   - r ~ r_cap: 逻辑斯蒂过渡, 峰值力 ~ k_g*a/4
-    #   - r < r0_lo (已配对): 关闭
-    # a=0.05 (特征长度 20nm), r_cap=40nm 时覆盖 20-60nm (200-600Å)
-    # 的配对, 峰值力温和, 不会像线性窗那样恒定拉力撕裂结构.
+    #   - r >> r_cap: V -> 0 (out of reach; no strong pull, to avoid tearing the structure)
+    #   - r ~ r_cap: logistic transition, peak force ~ k_g*a/4
+    #   - r < r0_lo (already paired): off
+    # With a=0.05 (characteristic length 20nm) and r_cap=40nm, this covers pairs at 20-60nm
+    # (200-600A) with a gentle peak force that, unlike a linear window, never pulls so hard
+    # that it tears the structure.
     if pair_guide_k > 0:
         guide_force = mm.CustomBondForce(
             "-k_g*(1/(1+exp(a*(r-r_cap))))*step(r-r0_lo)")
         guide_force.addPerBondParameter("k_g")
-        guide_force.addGlobalParameter("a", 0.05)     # /nm, 特征长度 ~20nm
-        guide_force.addGlobalParameter("r_cap", 40.0)  # nm = 400Å
-        guide_force.addGlobalParameter("r0_lo", 1.5)   # nm = 15Å, 已配对关闭
+        guide_force.addGlobalParameter("a", 0.05)     # /nm, characteristic length ~20nm
+        guide_force.addGlobalParameter("r_cap", 40.0)  # nm = 400A
+        guide_force.addGlobalParameter("r0_lo", 1.5)   # nm = 15A; disabled once paired
         for (i, j, w) in pairs:
             if (0 <= i < L and 0 <= j < L and abs(i - j) > 1
                     and not (i == 0 and j == L - 1)):
@@ -404,65 +409,68 @@ def _build_3bead_system_gpu(
                     N(i), N(j), [pair_guide_k * w])
         system.addForce(guide_force)
 
-    # 5. 碱基堆叠
+    # 5. Base stacking
     stack_force = mm.CustomBondForce("0.5*k_stack*(r-r0)^2")
     stack_force.addPerBondParameter("k_stack")
     stack_force.addPerBondParameter("r0")
     sk = K_STACK * 100.0
     for i in range(L - 1):
         stack_force.addBond(N(i), N(i + 1), [sk, STACK_R0 / 10.0])
-    # 环化堆叠
+    # Cyclization stacking
     stack_force.addBond(N(L - 1), N(0), [sk, STACK_R0 / 10.0])
     system.addForce(stack_force)
 
-    # 6. 非键: 隐式溶剂 GB/SA + 离子屏蔽 + 短程碰撞
+    # 6. Nonbonded: implicit-solvent GB/SA + ion screening + short-range clash
     #
-    # RNA 折叠的两大驱动力:
-    #   (a) 静电屏蔽: 磷酸骨架带负电, Mg²⁺/Na⁺ 屏蔽后才能折叠
-    #       → GB 模型 + 0.145M 盐浓度等效 ~50mM MgCl₂ (RNA 折叠标准条件)
-    #   (b) 疏水效应: 碱基堆叠面埋入内部, 磷酸骨架暴露
-    #       → SA (溶剂可及面积) 项
+    # The two main driving forces of RNA folding:
+    #   (a) Electrostatic screening: the phosphate backbone is negatively charged and
+    #       must be screened by Mg2+/Na+ before folding
+    #       -> GB model + 0.145M salt, roughly equivalent to ~50mM MgCl2
+    #          (standard conditions for RNA folding)
+    #   (b) Hydrophobic effect: base stacking surfaces are buried inside while the
+    #       phosphate backbone is exposed
+    #       -> SA (solvent-accessible area) term
     #
-    # 同时保留短程碰撞排斥 (GB 不处理 Pauli 排斥)
+    # Short-range clash repulsion is kept as well (GB does not handle Pauli repulsion)
     #
-    # -- A. GB/SA 隐式溶剂 + 离子屏蔽 --
-    # 使用 GBOBC2 (Onufriev-Bashford-Case) + salt screening
+    # -- A. GB/SA implicit solvent + ion screening --
+    # Use GBOBC2 (Onufriev-Bashford-Case) + salt screening
     nonbonded = mm.NonbondedForce()
     nonbonded.setNonbondedMethod(mm.NonbondedForce.NoCutoff)
-    # GBnOBC2 参数 (秦-佩莱绿, 适合核酸)
-    nonbonded.setReactionFieldDielectric(1.0)  # 隐式溶剂不需要反应场
-    nonbonded.setCutoffDistance(999.0)  # 无截断 (隐式溶剂)
+    # GBOBC2 parameters (Onufriev et al.; well suited to nucleic acids)
+    nonbonded.setReactionFieldDielectric(1.0)  # no reaction field needed for implicit solvent
+    nonbonded.setCutoffDistance(999.0)  # no cutoff (implicit solvent)
 
-    # 粒子电荷与 Born 半径
-    # RNA 3-bead: P (磷酸, q≈-0.6e), C4' (糖, q≈0.0), N (碱基, q≈0.0)
-    # Born 半径: P=1.7Å (埋在骨架), C4'=2.2Å, N=1.9Å (碱基部分暴露)
-    _Q_P, _Q_C4, _Q_N = -0.6, 0.0, 0.0       # 部分电荷 (e)
-    _R_P, _R_C4, _R_N = 0.17, 0.22, 0.19     # Born 半径 (nm)
+    # Particle charges and Born radii
+    # RNA 3-bead: P (phosphate, q~-0.6e), C4' (sugar, q~0.0), N (base, q~0.0)
+    # Born radii: P=1.7A (buried in the backbone), C4'=2.2A, N=1.9A (base partially exposed)
+    _Q_P, _Q_C4, _Q_N = -0.6, 0.0, 0.0       # partial charges (e)
+    _R_P, _R_C4, _R_N = 0.17, 0.22, 0.19     # Born radii (nm)
 
     for i in range(L):
         nonbonded.addParticle(_Q_P, _R_P, 0.0)    # P
         nonbonded.addParticle(_Q_C4, _R_C4, 0.0)  # C4'
         nonbonded.addParticle(_Q_N, _R_N, 0.0)    # N
 
-    # 盐浓度: 0.145M 等效 ~50mM MgCl₂ (二价阳离子屏蔽更强)
+    # Salt concentration: 0.145M is roughly equivalent to ~50mM MgCl2 (divalent cations screen more strongly)
     nonbonded.addGlobalParameter("screeningLength", 1.0 / np.sqrt(0.145 * 0.06022 * 2))
     # screeningLength = 1/sqrt(kappa), kappa = 4*pi*Na*e^2*I/(eps*kT)
-    # 简化: 0.145M → screeningLength ≈ 0.78nm (Debye 长度)
+    # Simplified: 0.145M -> screeningLength ~= 0.78nm (Debye length)
 
-    # 排除键对 (GB 不重复计算)
+    # Excluded pairs (GB does not recompute these)
     _excl_nb = set()
     for i in range(L):
         for (a, b) in [(P(i), C4(i)), (C4(i), N(i))]:
             k = (min(a, b), max(a, b))
             if k not in _excl_nb:
                 _excl_nb.add(k)
-                nonbonded.addException(a, b, 0.0, 0.3, 0.0)  # 仅碰撞
+                nonbonded.addException(a, b, 0.0, 0.3, 0.0)  # clash only
     for i in range(L - 1):
         k = (P(i), P(i + 1))
         if k not in _excl_nb:
             _excl_nb.add(k)
             nonbonded.addException(P(i), P(i + 1), 0.0, 0.3, 0.0)
-    # 环化 P-P 排除
+    # Cyclization P-P exclusion
     if L > 2:
         k = (P(0), P(L - 1))
         if k not in _excl_nb:
@@ -470,27 +478,27 @@ def _build_3bead_system_gpu(
 
     system.addForce(nonbonded)
 
-    # -- B. GB 溶剂化力 (OBC2 / GBOBC2) --
+    # -- B. GB solvation force (OBC2 / GBOBC2) --
     gb = mm.GBSAOBCForce()
-    gb.setSoluteDielectric(4.0)       # 溶质介电: CG 珠子不是原子, 需要更高介电
-    gb.setSolventDielectric(78.5)     # 水介电常数
-    # OpenMM 8.x: setSolventRadius 已移除, 用默认值 0.14
+    gb.setSoluteDielectric(4.0)       # solute dielectric: CG beads are not atoms and need a higher dielectric
+    gb.setSolventDielectric(78.5)     # water dielectric constant
+    # OpenMM 8.x: setSolventRadius was removed; the default 0.14 is used
     # GBSAOBCForce.addParticle(charge, radius, scalingFactor)
-    # scalingFactor: 0.0 = HCT, 0.5 = OBC1, 1.0 = OBC2 (默认核酸用 OBC2)
+    # scalingFactor: 0.0 = HCT, 0.5 = OBC1, 1.0 = OBC2 (OBC2 is the default for nucleic acids)
     for i in range(L):
         gb.addParticle(_Q_P, _R_P, 1.0)    # P
         gb.addParticle(_Q_C4, _R_C4, 1.0)  # C4'
         gb.addParticle(_Q_N, _R_N, 1.0)    # N
     system.addForce(gb)
 
-    # -- C. 短程碰撞排斥 (补充 GB 不覆盖的 Pauli 排斥) --
-    # 保留一个轻量级碰撞力, 防止结构在退火时坍缩
+    # -- C. Short-range clash repulsion (supplements the Pauli repulsion that GB does not cover) --
+    # Keep a lightweight clash force to prevent the structure from collapsing during annealing
     clash_force = mm.CustomBondForce(
         "k_clash * (dmin - r)^2 * step(dmin - r)")
     clash_force.addPerBondParameter("k_clash")
     clash_force.addPerBondParameter("dmin")
     for i in range(L):
-        for j in range(i + 2, min(i + 8, L)):  # 只检查近邻 2-7 残基
+        for j in range(i + 2, min(i + 8, L)):  # only check neighboring residues 2-7
             clash_force.addBond(P(i), P(j), [K_CLASH * 10.0, 0.3])
     system.addForce(clash_force)
 
@@ -502,61 +510,61 @@ def _build_minimal_system_gpu(
     pairs: List[Tuple[int, int, float]],
     pair_scale: float = 1.0,
 ):
-    """构建极简 P-only 折叠力场 (两阶段方案阶段1).
+    """Build a minimal P-only folding force field (two-stage scheme, stage 1).
 
-    只含:
-      1. P 骨架键 P[i]-P[i+1] (r0=5.9Å, k=31000 kJ/mol/nm²)
-      2. P-P 配对键 (r0=5.9Å, k=40000×w×pair_scale)
-    无 clash/堆叠/键角/C4'N — 这些项在完整力场下阻碍折叠
-    (实测完整力场配对卡在 45Å, 极简力场折叠到 21Å).
+    Contains only:
+      1. P backbone bonds P[i]-P[i+1] (r0=5.9A, k=31000 kJ/mol/nm^2)
+      2. P-P base-pair bonds (r0=5.9A, k=40000*w*pair_scale)
+    No clash/stacking/angle/C4'N — those terms hinder folding in the full force field
+    (measured: the full force field stalls pairs at 45A; the minimal one folds to 21A).
 
     Args:
-        p_coords: (L,3) P 坐标 (Å)
-        pairs: [(i,j,w)] ViennaRNA 配对
-        pair_scale: 配对力缩放
+        p_coords: (L,3) P coordinates (Angstroms)
+        pairs: [(i,j,w)] ViennaRNA base pairs
+        pair_scale: pairing-force scaling
 
     Returns:
-        (system, coords_nm, pair_force) — 只有 P bead (L 个粒子)
+        (system, coords_nm, pair_force) — P beads only (L particles)
     """
     L = len(p_coords)
-    coords_nm = p_coords / 10.0  # Å → nm
+    coords_nm = p_coords / 10.0  # Angstroms -> nm
 
     system = mm.System()
     for _ in range(L):
         system.addParticle(110.0)
 
-    # 1. P 骨架键
+    # 1. P backbone bonds
     bond_bb = mm.HarmonicBondForce()
-    bb_k = 31000.0  # kJ/mol/nm²
+    bb_k = 31000.0  # kJ/mol/nm^2
     for i in range(L - 1):
         bond_bb.addBond(i, i + 1, BOND_P_NEXT / 10.0, bb_k)
-    # 1b. BSJ 闭合键: 强制首尾 P-P ~5.9Å, 防止退火时环打开
+    # 1b. BSJ closure bond: force first-last P-P ~5.9A to stop the ring opening during annealing
     bond_bb.addBond(0, L - 1, BOND_P_NEXT / 10.0, 500.0)
     system.addForce(bond_bb)
 
-    # 1c. 骨架角度约束: 防止折叠时 backbone 角度塌缩
+    # 1c. Backbone angle restraint: prevent the backbone angle from collapsing during folding
     angle_bb = mm.HarmonicAngleForce()
     for i in range(L - 2):
         angle_bb.addAngle(i, i + 1, i + 2,
-                          2.618,  # 150° in rad (A-form RNA backbone)
-                          500.0)  # kJ/mol/rad²
+                          2.618,  # 150 deg in rad (A-form RNA backbone)
+                          500.0)  # kJ/mol/rad^2
     system.addForce(angle_bb)
 
-    # 1d. 碰撞排斥: 防止原子重叠 (核心: 没有这个结构会坍缩成球)
+    # 1d. Clash repulsion: prevent atoms from overlapping (critical: without it the structure collapses into a ball)
     clash = mm.CustomNonbondedForce(
         "step(d_min - r) * 0.5 * k_clash * (d_min - r)^2")
-    clash.addGlobalParameter("k_clash", 5000.0)  # kJ/mol/nm²
-    clash.addGlobalParameter("d_min", 0.3)  # 3.0A = 0.3nm 最小距离
+    clash.addGlobalParameter("k_clash", 5000.0)  # kJ/mol/nm^2
+    clash.addGlobalParameter("d_min", 0.3)  # 3.0A = 0.3nm minimum distance
     for _ in range(L):
         clash.addParticle()
-    # 只对近邻检查 (15nt 窗口), 避免 O(n²)
+    # Only check near neighbors (15-nt window) to avoid O(n^2)
     neighbors = []
     for i in range(L):
         nb = list(range(max(0, i - 15), min(L, i + 16)))
         nb = [j for j in nb if j > i]
         if nb:
             neighbors.append((i, nb))
-    # 用 InteractionGroup 分组
+    # Group them using InteractionGroup
     all_a, all_b = [], []
     for i, nbs in neighbors:
         all_a.extend([i] * len(nbs))
@@ -565,14 +573,14 @@ def _build_minimal_system_gpu(
         clash.addInteractionGroup(all_a, all_b)
     system.addForce(clash)
 
-    # 2. P-P 配对键 (折叠驱动, 加碰撞排斥后可适当减小力常数)
+    # 2. P-P base-pair bonds (folding driver; the force constant can be reduced now that clash repulsion is present)
     pair_force = mm.CustomBondForce("0.5*k_pair*(r-r0)^2")
     pair_force.addPerBondParameter("k_pair")
     pair_force.addPerBondParameter("r0")
     for (i, j, w) in pairs:
         if (0 <= i < L and 0 <= j < L and abs(i - j) > 1
                 and not (i == 0 and j == L - 1)):
-            # 远端配对 (>100nt) 力常数 ×2
+            # Far pairs (>100 nt) get 2x the force constant
             far_boost = 2.0 if (min(abs(j-i), L-abs(j-i)) > 100) else 1.0
             pair_force.addBond(
                 i, j, [30000.0 * w * pair_scale * far_boost, BOND_P_NEXT / 10.0])
@@ -582,7 +590,7 @@ def _build_minimal_system_gpu(
 
 
 def _create_minimal_topology(L: int) -> Topology:
-    """创建 P-only 拓扑 (每 nt 一个 P atom)."""
+    """Create a P-only topology (one P atom per nt)."""
     topo = Topology()
     chain = topo.addChain()
     for i in range(L):
@@ -592,7 +600,7 @@ def _create_minimal_topology(L: int) -> Topology:
 
 
 def _create_3bead_topology(L: int) -> Topology:
-    """创建 3-bead CG 拓扑 (P/C4'/N per nt)."""
+    """Create a 3-bead CG topology (P/C4'/N per nt)."""
     topo = Topology()
     chain = topo.addChain()
     for i in range(L):
@@ -603,7 +611,7 @@ def _create_3bead_topology(L: int) -> Topology:
     return topo
 
 
-# ── 三阶段退火 ──
+# ── Three-stage annealing ──
 
 def _run_annealing(
     sim: Simulation,
@@ -614,7 +622,7 @@ def _run_annealing(
     n_anneal: int = 200,
     verbose: bool = False,
 ) -> Tuple[float, np.ndarray]:
-    """三阶段退火: 弱配对+弱BSJ → 强配对+中BSJ → 强配对+强BSJ.
+    """Three-stage annealing: weak pairing+weak BSJ -> strong pairing+medium BSJ -> strong pairing+strong BSJ.
 
     Returns:
         (final_energy, final_coords_nm)
@@ -622,7 +630,7 @@ def _run_annealing(
     def set_pair_k(scale):
         for i in range(pair_force.getNumBonds()):
             p1, p2, params = pair_force.getBondParameters(i)
-            # 更新 k, 保持 r0
+            # Update k, keep r0
             pair_force.setBondParameters(
                 i, p1, p2,
                 [scale * K_PAIR, params[1]])
@@ -638,25 +646,25 @@ def _run_annealing(
         bsj_force.updateParametersInContext(sim.context)
         bsj_guide.updateParametersInContext(sim.context)
 
-    # 记录初始能量
+    # Record the initial energy
     pre_state = sim.context.getState(getPositions=True, getEnergy=True)
     e_pre = pre_state.getPotentialEnergy()._value
 
-    # 阶段1: 中温 + 弱配对 + 弱BSJ, 螺旋形成
+    # Stage 1: medium temperature + weak pairing + weak BSJ, helix formation
     set_pair_k(0.1)
     set_bsj_k(0.3)
     sim.integrator.setTemperature(350 * unit.kelvin)
     sim.step(n_anneal)
     sim.minimizeEnergy(maxIterations=2000)
 
-    # 阶段2: 中温 + 强配对 + 中BSJ, WC 配对拉拢
+    # Stage 2: medium temperature + strong pairing + medium BSJ, draw the WC pairs together
     set_pair_k(1.0)
     set_bsj_k(1.0)
     sim.integrator.setTemperature(320 * unit.kelvin)
     sim.step(n_anneal)
     sim.minimizeEnergy(maxIterations=2000)
 
-    # 阶段3: 低温 + 强配对 + 强BSJ, 闭合
+    # Stage 3: low temperature + strong pairing + strong BSJ, closure
     set_pair_k(1.0)
     set_bsj_k(5.0)
     sim.integrator.setTemperature(300 * unit.kelvin)
@@ -665,7 +673,7 @@ def _run_annealing(
         tolerance=10.0 * unit.kilojoules_per_mole / unit.nanometer,
         maxIterations=3000)
 
-    # 阶段4 (新增): 极低温 + 超强BSJ, 精修闭合
+    # Stage 4 (new): very low temperature + ultra-strong BSJ, refine the closure
     set_pair_k(1.0)
     set_bsj_k(10.0)
     sim.integrator.setTemperature(280 * unit.kelvin)
@@ -678,7 +686,7 @@ def _run_annealing(
     pos = state.getPositions(asNumpy=True)._value  # nm
     e1 = state.getPotentialEnergy()._value
 
-    # 安全网: MD 暴走回退
+    # Safety net: fall back if the MD runs away
     if e1 > e_pre * 0.5 and e_pre < 0:
         pos = pre_state.getPositions(asNumpy=True)._value
         e1 = e_pre
@@ -688,25 +696,25 @@ def _run_annealing(
 
 def _run_anneal_worker(
     worker_idx: int,
-    p_coords: np.ndarray,       # (L,3) Å P 坐标
+    p_coords: np.ndarray,       # (L,3) Angstroms, P coordinates
     pairs: List[Tuple[int, int, float]],
     n_anneal: int,
     n_threads: int,
 ):
-    """多进程退火 worker: 独立构建 system + 三阶段退火.
+    """Multiprocess annealing worker: independently builds the system + runs three-stage annealing.
 
-    用不同随机种子 (worker_idx) 增加轨迹多样性.
+    Uses a different random seed (worker_idx) to increase trajectory diversity.
     Returns:
         (final_energy, final_coords_nm)
     """
     import numpy as _np
-    # 不同种子 -> 不同 C4'/N 初始扰动
+    # Different seeds -> different C4'/N initial perturbations
     _np.random.seed(42 + worker_idx)
 
     system, coords_nm, pair_force, stack_force, bsj_force, bsj_guide = \
         _build_3bead_system_gpu(
             p_coords, pairs, pair_scale=1.0, bsj_k_scale=0.1 + 0.05 * worker_idx,
-            pair_guide_k=600.0)  # 配对窗引导力 (↑300→600), 把远端配对拉近
+            pair_guide_k=600.0)  # pair-window guide force (raised 300->600), pulls far pairs together
     topo = _create_3bead_topology(len(p_coords))
 
     integrator = LangevinMiddleIntegrator(
@@ -716,7 +724,7 @@ def _run_anneal_worker(
     sim = Simulation(topo, system, integrator, plat, plat_props)
     sim.context.setPositions(coords_nm * unit.nanometer)
 
-    # 用全局 _run_annealing 做三阶段退火
+    # Use the module-level _run_annealing for three-stage annealing
     e_final, pos_final = _run_annealing(
         sim, pair_force, bsj_force, bsj_guide, len(p_coords),
         n_anneal=n_anneal, verbose=False)
@@ -725,16 +733,16 @@ def _run_anneal_worker(
 
 def _run_minimal_anneal_worker(
     worker_idx: int,
-    p_coords: np.ndarray,       # (L,3) Å P 坐标
+    p_coords: np.ndarray,       # (L,3) Angstroms, P coordinates
     pairs: List[Tuple[int, int, float]],
     n_anneal: int,
     n_threads: int,
 ):
-    """极简力场退火 worker (两阶段方案阶段1: 折叠).
+    """Minimal-force-field annealing worker (two-stage scheme, stage 1: folding).
 
-    只含 P 骨架键 + P-P 配对, 无 clash/堆叠. 高温退火折叠.
+    Contains only P backbone bonds + P-P pairing; no clash/stacking. High-temperature annealing folds the chain.
     Returns:
-        (final_energy, final_coords_ang)  # P-only, Å
+        (final_energy, final_coords_ang)  # P-only, Angstroms
     """
     system, coords_nm, pair_force = _build_minimal_system_gpu(
         p_coords, pairs, pair_scale=1.0)
@@ -747,25 +755,25 @@ def _run_minimal_anneal_worker(
     sim = Simulation(topo, system, integrator, plat, plat_props)
     sim.context.setPositions(coords_nm * unit.nanometer)
 
-    # 先最小化消除初始 clash
+    # Minimize first to remove initial clashes
     sim.minimizeEnergy(maxIterations=3000)
 
-    # 逐步降温退火 (折叠驱动): 高温跑配对拉近, 逐步降温
-    # 加强版: 8阶段, 更细粒度温度控制
+    # Gradually cool while annealing (folding driver): high temperature brings pairs together, then cool stepwise
+    # Enhanced version: 8 stages for finer-grained temperature control
     stages = [
-        (400, n_anneal // 8),   # 中高温: 保留局部结构, 远端配对探索
-        (380, n_anneal // 8),   # 中温: 螺旋形成
-        (360, n_anneal // 8),   # 中温: 配对拉近
-        (340, n_anneal // 8),   # 中低温: WC配对收敛
-        (320, n_anneal // 8),   # 低温: 碰撞消除
-        (310, n_anneal // 8),   # 低温: 结构精修
-        (305, n_anneal // 8),   # 接近室温: BSJ闭合
-        (300, n_anneal // 8),   # 室温: 最终稳定
+        (400, n_anneal // 8),   # medium-high T: preserve local structure, explore far pairs
+        (380, n_anneal // 8),   # medium T: helix formation
+        (360, n_anneal // 8),   # medium T: bring pairs together
+        (340, n_anneal // 8),   # medium-low T: WC pairing converges
+        (320, n_anneal // 8),   # low T: remove clashes
+        (310, n_anneal // 8),   # low T: structural refinement
+        (305, n_anneal // 8),   # near room T: BSJ closure
+        (300, n_anneal // 8),   # room T: final stabilization
     ]
     for T, n in stages:
         integrator.setTemperature(T * unit.kelvin)
         sim.step(max(1, n))
-    # 终局最小化 (更严格)
+    # Final minimization (stricter)
     sim.minimizeEnergy(
         tolerance=5.0 * unit.kilojoules_per_mole / unit.nanometer,
         maxIterations=8000)
@@ -773,7 +781,7 @@ def _run_minimal_anneal_worker(
     state = sim.context.getState(getPositions=True, getEnergy=True)
     pos_nm = state.getPositions(asNumpy=True)._value  # nm
     e = state.getPotentialEnergy()._value
-    pos_ang = pos_nm * 10.0  # → Å
+    pos_ang = pos_nm * 10.0  # -> Angstroms
     return e, pos_ang
 
 
@@ -785,21 +793,21 @@ def _run_parallel_minimal_annealing(
     platform_name: str = "CPU",
     verbose: bool = False,
 ) -> Tuple[float, np.ndarray]:
-    """多进程并行极简折叠: N 条轨迹, 取最低能量.
+    """Multiprocess parallel minimal folding: N trajectories; keep the lowest energy.
 
     Args:
-        p_coords: (L,3) P 坐标 (Å)
+        p_coords: (L,3) P coordinates (Angstroms)
         pairs: [(i,j,w)]
 
     Returns:
-        (best_energy, best_coords_ang)  # P-only, Å
+        (best_energy, best_coords_ang)  # P-only, Angstroms
     """
     import multiprocessing as mp
 
     total_threads = os.cpu_count() or 8
     per_traj_threads = max(1, total_threads // n_trajectories)
     if verbose:
-        print(f"  极简折叠: {n_trajectories} 轨迹 x {per_traj_threads} 线程")
+        print(f"  Minimal fold: {n_trajectories} trajectories x {per_traj_threads} threads")
 
     ctx = mp.get_context("spawn")
     with ctx.Pool(processes=n_trajectories) as pool:
@@ -826,15 +834,15 @@ def _run_parallel_annealing(
     platform_name: str = "CPU",
     verbose: bool = False,
 ) -> Tuple[float, np.ndarray]:
-    """多进程并行退火: N 条轨迹各 32/N 线程, 取最低能量.
+    """Multiprocess parallel annealing: N trajectories each using 32/N threads; keep the lowest energy.
 
     Args:
-        p_coords: (L,3) P 坐标 (Å)
+        p_coords: (L,3) P coordinates (Angstroms)
         pairs: [(i,j,w)]
-        n_anneal: 每阶段步数
-        n_trajectories: 并行轨迹数
-        platform_name: 平台
-        verbose: 打印
+        n_anneal: steps per stage
+        n_trajectories: number of parallel trajectories
+        platform_name: platform
+        verbose: verbosity
 
     Returns:
         (best_energy, best_coords_nm)
@@ -844,8 +852,8 @@ def _run_parallel_annealing(
     total_threads = os.cpu_count() or 8
     per_traj_threads = max(1, total_threads // n_trajectories)
     if verbose:
-        print(f"  并行退火: {n_trajectories} 条轨迹 x {per_traj_threads} 线程 "
-              f"(总 {total_threads} 核)")
+        print(f"  Parallel annealing: {n_trajectories} trajectories x {per_traj_threads} threads "
+              f"({total_threads} cores total)")
 
     ctx = mp.get_context("spawn")
     with ctx.Pool(processes=n_trajectories) as pool:
@@ -865,11 +873,11 @@ def _run_parallel_annealing(
     return best_energy, best_pos
 
 
-# ── T-REMD (多温度副本交换) ──
+# ── T-REMD (multi-temperature replica exchange) ──
 
 def _run_remd_worker(
     worker_idx: int,
-    p_coords: np.ndarray,       # (L,3) Å P 坐标
+    p_coords: np.ndarray,       # (L,3) Angstroms, P coordinates
     pairs: List[Tuple[int, int, float]],
     temperature: float,
     n_steps: int,
@@ -880,27 +888,29 @@ def _run_remd_worker(
     sequence: str = None,
     use_trirnasp: bool = False,
     trirnasp_energy_dir: str = None,
-    trirnasp_scale: float = 0.003,  # 统一默认值: 0.003 (最优值)
+    trirnasp_scale: float = 0.003,  # unified default: 0.003 (optimal value)
     trirnasp_update_freq: int = 10,
     trirnasp_max_force: float = 500.0,
 ):
-    """REMD 单副本 worker 进程: 本地重建 system + 模拟 + Pipe 交换.
+    """REMD single-replica worker process: rebuilds the system locally + simulates + Pipe exchange.
 
-    worker 接收 P 坐标和配对, 自行构建 system (避免 pickle
-    OpenMM 对象), 每个 exchange_interval 步报告能量并接收交换坐标.
-    minimal=True 时用极简力场 (P骨架+P配对, 保持折叠一致性).
+    The worker receives the P coordinates and pairs and builds its own system (avoiding
+    pickling of OpenMM objects), reporting the energy every exchange_interval steps and
+    receiving swapped coordinates. With minimal=True the minimal force field is used
+    (P backbone + P pairing, keeping fold consistency).
 
-    use_trirnasp=True: 加入 TriRNASP 三体统计势作为额外能量项.
-    每 trirnasp_update_freq 步通过 CustomExternalForce 更新梯度.
-    trirnasp_max_force: 单粒子最大力模长 (kJ/mol/nm), 防止统计势
-        梯度在远离天然构象处爆炸把结构炸飞.
+    With use_trirnasp=True: adds the TriRNASP three-body statistical potential as an extra
+    energy term. Gradients are refreshed every trirnasp_update_freq steps via a
+    CustomExternalForce. trirnasp_max_force: maximum per-particle force magnitude
+    (kJ/mol/nm), preventing the statistical-potential gradient from exploding far from the
+    native conformation and blowing up the structure.
     """
     TRI_MAX_F2 = trirnasp_max_force * trirnasp_max_force
 
     def _tri_forces(grad):
-        """梯度 → capped per-particle 力数组 (N_total,3)."""
+        """Gradient -> capped per-particle force array (N_total,3)."""
         f = -grad * trirnasp_scale * _TRI_KBT * 10.0
-        # cap: 模长超限的按比例缩
+        # Cap: scale down forces whose magnitude exceeds the limit
         norms_sq = (f * f).sum(axis=-1, keepdims=True)
         over = norms_sq > TRI_MAX_F2
         if over.any():
@@ -912,13 +922,13 @@ def _run_remd_worker(
             p_coords, pairs, pair_scale=1.0)
         topo = _create_minimal_topology(len(p_coords))
     else:
-        # 每个 worker 独立构建 system (不同 bsj_k_scale 增加多样性)
+        # Each worker builds its own system (different bsj_k_scale adds diversity)
         system, coords_nm, _pf, _sf, _bjf, _bjg = _build_3bead_system_gpu(
             p_coords, pairs, pair_scale=1.0, bsj_k_scale=0.5 + 0.1 * worker_idx,
-            pair_guide_k=600.0)  # 配对窗引导力 (↑300→600)
+            pair_guide_k=600.0)  # pair-window guide force (raised 300->600)
         topo = _create_3bead_topology(len(p_coords))
 
-    # ── TriRNASP 三体统计势 ──
+    # ── TriRNASP three-body statistical potential ──
     L = len(p_coords)
     tri_potential = None
     tri_force = None
@@ -931,8 +941,8 @@ def _run_remd_worker(
         try:
             from torusfold.scheme2.trirnasp_openmm import TriRNASPPotential
             tri_potential = TriRNASPPotential(trirnasp_energy_dir)
-            # CustomExternalForce: 每粒子独立恒力 Fx/Fy/Fz (per-particle 参数)
-            # 表达式 "fx*x+fy*y+fz*z" 的负梯度 = -[fx,fy,fz] = 施加的恒力
+            # CustomExternalForce: an independent constant force Fx/Fy/Fz per particle (per-particle parameters)
+            # The negative gradient of "fx*x+fy*y+fz*z" is -[fx,fy,fz] = the applied constant force
             tri_force = mm.CustomExternalForce("fx*x + fy*y + fz*z")
             tri_force.addPerParticleParameter("fx")
             tri_force.addPerParticleParameter("fy")
@@ -942,7 +952,7 @@ def _run_remd_worker(
                 tri_force.addParticle(p_idx, [0.0, 0.0, 0.0])
             system.addForce(tri_force)
         except Exception as e:
-            print(f"    [TriRNASP] worker {worker_idx} 初始化失败: {e}")
+            print(f"    [TriRNASP] worker {worker_idx} initialization failed: {e}")
             tri_potential = None
             tri_force = None
 
@@ -956,11 +966,11 @@ def _run_remd_worker(
     sim = Simulation(topo, system, integrator, plat, plat_props)
     sim.context.setPositions(coords_nm * unit.nanometer)
 
-    # ── TriRNASP 初始力: 在首次 minimize 之前设置,
-    #     让 minimization 直接朝统计势偏好的方向收敛 ──
+    # ── TriRNASP initial force: set before the first minimize so that
+    #     minimization converges directly toward the statistical-potential preference ──
     tri_energy = 0.0
     if tri_potential is not None and tri_force is not None:
-        pos_A = coords_nm * 10.0  # nm→Å
+        pos_A = coords_nm * 10.0  # nm -> Angstroms
         coords_3b = pos_A.reshape(L, 3, 3)
         tri_energy, tri_grad = tri_potential.score_with_gradient(coords_3b, sequence)
         f_flat = _tri_forces(tri_grad)  # (3L, 3) capped
@@ -969,16 +979,16 @@ def _run_remd_worker(
             tri_force.setParticleParameters(p_idx, p_idx, [fx, fy, fz])
         tri_force.updateParametersInContext(sim.context)
 
-    # 首次 minimization: 含 TriRNASP 外力, 加大迭代数
+    # First minimization: includes the TriRNASP external force; use more iterations
     sim.minimizeEnergy(maxIterations=2000)
 
-    # 记录初始能量
+    # Record the initial energy
     state = sim.context.getState(getEnergy=True, getPositions=True)
     e0 = state.getPotentialEnergy()._value
     best_energy = e0
     best_pos = state.getPositions(asNumpy=True)._value
 
-    # minimize 后重算 TriRNASP 能量 (坐标已变)
+    # Recompute the TriRNASP energy after minimize (coordinates have changed)
     if tri_potential is not None:
         pos_min = best_pos * 10.0
         tri_energy, _ = tri_potential.score_with_gradient(
@@ -986,9 +996,9 @@ def _run_remd_worker(
 
     conn.send(("init", worker_idx, e0 + tri_energy * trirnasp_scale * _TRI_KBT))
 
-    # ── 退火阶段: 复用 _run_annealing 的多阶段收紧策略 ──
-    # 纯 minimize + MD 无法从随机构象收敛 (能量降 <1%);
-    # 需要温度/力常数阶梯逐步折叠. 退火步数 = 总步数的 40%.
+    # ── Annealing phase: reuse _run_annealing's multistage tightening strategy ──
+    # Minimize + MD alone cannot converge from a random conformation (energy drops <1%);
+    # a temperature/force-constant ladder is needed to fold stepwise. Anneal steps = 40% of the total.
     n_anneal_steps = max(200, int(n_steps * 0.4))
     try:
         e_ann, pos_ann = _run_annealing(
@@ -999,9 +1009,9 @@ def _run_remd_worker(
             state_a = sim.context.getState(getEnergy=True, getPositions=True)
             best_pos = state_a.getPositions(asNumpy=True)._value
     except Exception as _e_ann:
-        print(f"    [REMD worker {worker_idx}] anneal 跳过: {_e_ann}")
+        print(f"    [REMD worker {worker_idx}] anneal skipped: {_e_ann}")
 
-    # 退火后重算 TriRNASP 能量并刷新外力 (坐标大变)
+    # After annealing, recompute the TriRNASP energy and refresh the external force (coordinates changed a lot)
     if tri_potential is not None:
         state_a2 = sim.context.getState(getPositions=True)
         coords_3b = (state_a2.getPositions(asNumpy=True)._value * 10.0).reshape(L, 3, 3)
@@ -1013,9 +1023,9 @@ def _run_remd_worker(
                 tri_force.setParticleParameters(p_idx, p_idx, [fx, fy, fz])
             tri_force.updateParametersInContext(sim.context)
 
-    # 主循环 (剩余步数继续精修)
+    # Main loop (the remaining steps continue refinement)
     for step_i in range(max(n_steps - n_anneal_steps, exchange_interval)):
-        # ── 更新 TriRNASP 力 (每 trirnasp_update_freq 步) ──
+        # ── Refresh the TriRNASP force (every trirnasp_update_freq steps) ──
         if tri_potential is not None and tri_force is not None and \
            (step_i + 1) % trirnasp_update_freq == 0:
             state_pos = sim.context.getState(getPositions=True)
@@ -1037,43 +1047,44 @@ def _run_remd_worker(
                 best_energy = energy
                 best_pos = state.getPositions(asNumpy=True)._value
 
-        # 交换点: 发能量+坐标, 等交换决策
+        # Exchange point: send energy+coordinates, wait for the exchange decision
         if (step_i + 1) % exchange_interval == 0:
             state = sim.context.getState(getEnergy=True, getPositions=True)
             energy = state.getPotentialEnergy()._value  # kJ/mol
-            # 总能量 = OpenMM + TriRNASP
+            # Total energy = OpenMM + TriRNASP
             total_energy = energy + tri_energy * trirnasp_scale * _TRI_KBT
             pos = state.getPositions(asNumpy=True)._value
             conn.send(("report", worker_idx, total_energy, pos))
-            # 等待主进程交换结果
+            # Wait for the master's exchange result
             cmd = conn.recv()
             if cmd[0] == "swap":
                 new_pos = cmd[1]
                 sim.context.setPositions(new_pos * unit.nanometer)
-                # 交换后重新计算 TriRNASP 能量
+                # After a swap, recompute the TriRNASP energy
                 if tri_potential is not None:
                     pos_A = new_pos * 10.0
                     coords_3b = pos_A.reshape(L, 3, 3)
                     tri_energy, _ = tri_potential.score_with_gradient(coords_3b, sequence)
-            # "keep" 则不动
+            # On "keep", leave the positions unchanged
 
-    # 最终报告
+    # Final report
     conn.send(("done", worker_idx, best_energy + tri_energy * trirnasp_scale * _TRI_KBT, best_pos))
     conn.close()
 
 
 def _clamp_replicas_by_memory(n_replicas: int, mem_per_proc_gb: float = 4.0) -> int:
-    """根据剩余内存限制并行进程数.
+    """Clamp the number of parallel processes to the available memory.
 
-    默认 1.5GB/副本 — 实测 2009nt 3-bead 系统每进程仅 ~200-300MB
-    (解释器+OpenMM 库占大头), 旧的 6GB 估计过于保守导致 CPU 并行度低.
+    Default 1.5GB/replica — measured: a 2009-nt 3-bead system uses only ~200-300MB per
+    process (interpreter + OpenMM library dominate), so the old 6GB estimate was overly
+    conservative and kept CPU parallelism low.
 
     Args:
-        n_replicas: 期望进程数
-        mem_per_proc_gb: 每进程估算内存 (GB)
+        n_replicas: desired number of processes
+        mem_per_proc_gb: estimated memory per process (GB)
 
     Returns:
-        限制后的进程数 (至少 1)
+        clamped process count (at least 1)
     """
     try:
         import psutil
@@ -1085,10 +1096,11 @@ def _clamp_replicas_by_memory(n_replicas: int, mem_per_proc_gb: float = 4.0) -> 
 
 
 def _balance_replicas_threads(n_replicas: int) -> Tuple[int, int]:
-    """CPU-only 平台的副本/线程配比: 副本数优先打满全部核心.
+    """Replica/thread balance for CPU-only platforms: prioritize filling all cores with replicas.
 
-    OpenMM CPU 平台对小系统 (<10k 粒子) 多线程扩展性差,
-    与其 6 副本×5 线程, 不如 16 副本×2 线程 — 交换采样更充分且总吞吐更高.
+    The OpenMM CPU platform scales poorly with threads on small systems (<10k particles),
+    so 16 replicas x 2 threads beats 6 replicas x 5 threads — richer exchange sampling and
+    higher overall throughput.
 
     Returns:
         (adjusted_n_replicas, per_replica_threads)
@@ -1096,7 +1108,7 @@ def _balance_replicas_threads(n_replicas: int) -> Tuple[int, int]:
     total = os.cpu_count() or 8
     if n_replicas >= total:
         return n_replicas, 1
-    # 尽量让 replicas × threads == total, 副本优先
+    # Try to make replicas x threads == total, favoring replicas
     per_thread = max(1, total // n_replicas)
     return n_replicas, per_thread
 
@@ -1113,29 +1125,30 @@ def _run_remd(
     sequence: str = None,
     use_trirnasp: bool = False,
     trirnasp_energy_dir: str = None,
-    trirnasp_scale: float = 0.003,  # 统一默认值: 0.003 (最优值)
+    trirnasp_scale: float = 0.003,  # unified default: 0.003 (optimal value)
     trirnasp_update_freq: int = 10,
 ) -> Tuple[float, np.ndarray]:
-    """执行 T-REMD 增强采样 (多进程并行).
+    """Run T-REMD enhanced sampling (multiprocess parallel).
 
-    每个副本一个进程, 自行构建 system (只传 numpy/list).
-    线程数 = cpu_count // n_replicas, 总核心全打满.
-    minimal=True 时用极简力场 (P骨架+P配对), 返回 P-only nm 坐标.
+    One process per replica; each builds its own system (only numpy/list is passed).
+    Threads = cpu_count // n_replicas, filling all cores.
+    With minimal=True the minimal force field is used (P backbone + P pairing) and P-only
+    nm coordinates are returned.
 
     Args:
-        p_coords: (L,3) P 坐标 (Å)
-        pairs: [(i,j,w)] 配对
-        platform_name: 平台
-        n_replicas: 副本数
-        n_steps: 总步数
-        exchange_interval: 交换间隔
-        verbose: 打印
-        minimal: 用极简力场 (默认 False)
-        sequence: RNA 序列 (use_trirnasp=True 时必需)
-        use_trirnasp: 启用 TriRNASP 三体统计势
-        trirnasp_energy_dir: 能量表目录
-        trirnasp_scale: TriRNASP 能量缩放因子
-        trirnasp_update_freq: 梯度更新频率 (每 N 步)
+        p_coords: (L,3) P coordinates (Angstroms)
+        pairs: [(i,j,w)] base pairs
+        platform_name: platform
+        n_replicas: number of replicas
+        n_steps: total number of steps
+        exchange_interval: exchange interval
+        verbose: verbosity
+        minimal: use the minimal force field (default False)
+        sequence: RNA sequence (required when use_trirnasp=True)
+        use_trirnasp: enable the TriRNASP three-body statistical potential
+        trirnasp_energy_dir: directory of the energy tables
+        trirnasp_scale: TriRNASP energy scaling factor
+        trirnasp_update_freq: gradient-update frequency (every N steps)
 
     Returns:
         (best_energy, best_coords_nm)  # minimal=True: P-only nm; False: 3-bead nm
@@ -1143,18 +1156,18 @@ def _run_remd(
     from scipy.constants import k as kB
     import multiprocessing as mp
 
-    # 温度阶梯: 300K -> ~460K (几何间隔)
+    # Temperature ladder: 300K -> ~460K (geometric spacing)
     temperatures = [300.0 * (1.10 ** i) for i in range(n_replicas)]
 
-    # 每副本线程数: 副本数优先打满全部核心
+    # Threads per replica: prioritize filling all cores with replicas
     total_threads = os.cpu_count() or 8
-    # 内存感知: 实测每进程 ~200-300MB, 按 1.5GB/副本估已很宽裕
+    # Memory-aware: measured ~200-300MB per process, so 1.5GB/replica is generous
     n_replicas = _clamp_replicas_by_memory(n_replicas, mem_per_proc_gb=1.5)
     n_replicas, per_replica_threads = _balance_replicas_threads(n_replicas)
     if verbose:
-        print(f"    REMD: {n_replicas} 副本并行, "
-              f"每副本 {per_replica_threads} 线程 "
-              f"(总 {total_threads} 核)")
+        print(f"    REMD: {n_replicas} replicas in parallel, "
+              f"{per_replica_threads} threads per replica "
+              f"({total_threads} cores total)")
 
     ctx = mp.get_context("spawn")
     processes = []
@@ -1173,9 +1186,9 @@ def _run_remd(
         processes.append(p)
         conns.append(parent_conn)
 
-    # 主进程: 协调交换
+    # Master process: coordinate exchanges
     best_energy = float("inf")
-    # 初始坐标 (nm): 极简模式 P-only, 完整模式 3-bead (补 C4'/N)
+    # Initial coordinates (nm): P-only in minimal mode, 3-bead in full mode (fill in C4'/N)
     if minimal:
         best_pos = p_coords / 10.0  # (L,3) P-only nm
     else:
@@ -1189,14 +1202,14 @@ def _run_remd(
     accept_count = 0
     total_exchanges = max(1, (n_steps // exchange_interval) * (n_replicas - 1))
 
-    # 阶段1: 等所有副本 init
+    # Stage 1: wait for all replicas to init
     for ri in range(n_replicas):
         msg = conns[ri].recv()
         assert msg[0] == "init"
         if msg[2] < best_energy:
             best_energy = msg[2]
 
-    # 阶段2: 协调交换
+    # Stage 2: coordinate exchanges
     n_exchange_points = n_steps // exchange_interval
     for _ in range(n_exchange_points):
         energies = [None] * n_replicas
@@ -1210,7 +1223,7 @@ def _run_remd(
                 best_energy = msg[2]
                 best_pos = msg[3].copy()
 
-        # 相邻副本 Metropolis 交换
+        # Metropolis exchange between neighboring replicas
         swap_decisions = [False] * (n_replicas - 1)
         for ri in range(n_replicas - 1):
             ui, uj = energies[ri], energies[ri + 1]
@@ -1221,7 +1234,7 @@ def _run_remd(
                 swap_decisions[ri] = True
                 accept_count += 1
 
-        # 应用交换: 发新坐标给参与交换的副本
+        # Apply exchanges: send new coordinates to the replicas involved
         for ri in range(n_replicas):
             new_pos = None
             if ri > 0 and swap_decisions[ri - 1]:
@@ -1233,7 +1246,7 @@ def _run_remd(
             else:
                 conns[ri].send(("keep",))
 
-    # 阶段3: 收尾
+    # Stage 3: wrap-up
     for ri in range(n_replicas):
         msg = conns[ri].recv()
         assert msg[0] == "done"
@@ -1248,12 +1261,12 @@ def _run_remd(
 
     if verbose:
         rate = accept_count / total_exchanges
-        print(f"    REMD: E={best_energy:.0f}, 交换率 {rate:.1%}")
+        print(f"    REMD: E={best_energy:.0f}, exchange rate {rate:.1%}")
 
     return best_energy, best_pos
 
 
-# ── bpp 引导的远端配对发现 ──
+# ── bpp-guided discovery of far pairs ──
 
 def discover_far_pairs_from_bpp(
     bpp_matrix: np.ndarray,
@@ -1263,48 +1276,48 @@ def discover_far_pairs_from_bpp(
     top_k: int = 50,
     existing_pairs: Optional[List[Tuple[int, int, float]]] = None,
 ) -> List[Tuple[int, int, float]]:
-    """从 ViennaRNA bpp 概率矩阵发现远端配对.
+    """Discover far pairs from a ViennaRNA bpp probability matrix.
 
-    参考 scheme10_full.py BppPriorModule 的共享伴侣 Jaccard 相似度:
+    Based on the shared-partner Jaccard similarity in BppPriorModule (scheme10_full.py):
 
-      核心洞察:
-        1. bpp(i,j) 高 → i 和 j 在同一个折叠单元 (茎区)
-        2. 同一折叠单元的核苷酸倾向于在空间聚簇
-        3. 如果 i 和 k 都在多个高 bpp 茎区中出现 → 它们可能在同一个结构域
-        4. 这种"共现关系"推断远端接触的可能性
+      Core insight:
+        1. High bpp(i,j) -> i and j are in the same folding unit (stem)
+        2. Nucleotides in the same folding unit tend to cluster in space
+        3. If i and k both appear in several high-bpp stems -> they may be in the same domain
+        4. This "co-occurrence" lets us infer the likelihood of far contacts
 
-      算法:
-        对每对 (i,j) (|i-j| >= min_gap):
-          P(i) = {k | bpp(i,k) > threshold}  -- i 的配对伙伴集
-          P(j) = {k | bpp(j,k) > threshold}  -- j 的配对伙伴集
-          J(i,j) = |P(i) ∩ P(j)| / |P(i) ∪ P(j)|  -- Jaccard 相似度
-          w(i,j) = bpp(i,j) * J(i,j)  -- 直接bpp概率 × 共享伴侣相似度
+      Algorithm:
+        For each pair (i,j) with |i-j| >= min_gap:
+          P(i) = {k | bpp(i,k) > threshold}  -- partner set of i
+          P(j) = {k | bpp(j,k) > threshold}  -- partner set of j
+          J(i,j) = |P(i) & P(j)| / |P(i) | P(j)|  -- Jaccard similarity
+          w(i,j) = bpp(i,j) * J(i,j)  -- direct bpp probability x shared-partner similarity
 
-        J 高 → i 和 j 共享很多配对伙伴 → 同一结构域 → 空间接近
-        即使 bpp(i,j) 本身不高, 共享伴侣多也能推断远端接触.
+        High J -> i and j share many partners -> same domain -> spatially close.
+        Even when bpp(i,j) itself is low, many shared partners can still suggest a far contact.
 
     Args:
-        bpp_matrix: (L,L) 配对概率矩阵
-        sequence: RNA 序列
-        min_gap: 最小序列间隔 (默认 24, 即 >1 轮螺旋)
-        bpp_threshold: 最小 bpp 值 (用于定义"配对伙伴")
-        top_k: 最多返回多少对
-        existing_pairs: 已有配对 [(i,j,w)], 排除重复
+        bpp_matrix: (L,L) base-pair probability matrix
+        sequence: RNA sequence
+        min_gap: minimum sequence separation (default 24, i.e. >1 turn of helix)
+        bpp_threshold: minimum bpp value (used to define "pairing partners")
+        top_k: maximum number of pairs to return
+        existing_pairs: existing pairs [(i,j,w)], to avoid duplicates
 
     Returns:
-        [(i, j, w)] 新发现的远端配对 (w = bpp * Jaccard)
+        [(i, j, w)] newly discovered far pairs (w = bpp * Jaccard)
     """
     L = len(sequence)
     if bpp_matrix is None or bpp_matrix.shape[0] != L:
         return []
 
-    # 构建已有配对集合 (避免重复)
+    # Build a set of existing pairs (to avoid duplicates)
     existing_set = set()
     if existing_pairs:
         for (i, j, w) in existing_pairs:
             existing_set.add((min(i, j), max(i, j)))
 
-    # Step 1: 预计算每个位置的配对伙伴集
+    # Step 1: precompute the partner set of each position
     partner_sets = []
     for i in range(L):
         partners = set()
@@ -1313,7 +1326,7 @@ def discover_far_pairs_from_bpp(
                 partners.add(k)
         partner_sets.append(partners)
 
-    # Step 2: 对每对远端 (i,j) 计算 Jaccard 相似度
+    # Step 2: compute the Jaccard similarity for every far pair (i,j)
     candidates = []
     for i in range(L):
         pi = partner_sets[i]
@@ -1329,33 +1342,33 @@ def discover_far_pairs_from_bpp(
 
             bpp_val = float(bpp_matrix[i, j])
 
-            # 共享伴侣 Jaccard: |P(i) ∩ P(j)| / |P(i) ∪ P(j)|
+            # Shared-partner Jaccard: |P(i) & P(j)| / |P(i) | P(j)|
             shared = len(pi & pj)
             union = len(pi) + len(pj) - shared
             if union == 0:
                 continue
             jaccard = shared / union
 
-            # 综合权重 (加性, 参考 BppPriorModule):
+            # Combined weight (additive, following BppPriorModule):
             #   w = bpp_direct + alpha * jaccard_cooccurrence
-            # 即使 bpp(i,j)=0, 共享伴侣多也能推断远端接触
-            # alpha 控制 co-occurrence 的贡献强度
+            # Even with bpp(i,j)=0, many shared partners can still suggest a far contact
+            # alpha controls the co-occurrence contribution
             alpha = 0.5
             w = bpp_val + alpha * jaccard
 
-            if w > 0.01:  # 最小阈值
+            if w > 0.01:  # minimum threshold
                 candidates.append((i, j, w, bpp_val, jaccard))
 
-    # Step 3: 按综合权重 w 降序排列 (x[2] = w, x[3] = bpp_val)
-    candidates.sort(key=lambda x: -x[2])  # 按 w 排序
+    # Step 3: sort by combined weight w descending (x[2] = w, x[3] = bpp_val)
+    candidates.sort(key=lambda x: -x[2])  # sort by w
 
-    # Step 4: 去冗余 (同一对附近只保留最强)
+    # Step 4: remove redundancy (keep only the strongest near each location)
     result = []
     used = set()
     for (i, j, w, bpp_val, jaccard) in candidates:
         if len(result) >= top_k:
             break
-        # 去冗余: 10nt 窗口内只保留一个
+        # De-redundancy: keep only one per 10-nt window
         key_red = (i // 10, j // 10)
         if key_red in used:
             continue
@@ -1365,7 +1378,7 @@ def discover_far_pairs_from_bpp(
     return result
 
 
-# ── 多轮 REMD 温度退火 ──
+# ── Multi-round REMD temperature annealing ──
 
 def _run_multistage_remd(
     p_coords: np.ndarray,
@@ -1378,54 +1391,54 @@ def _run_multistage_remd(
     sequence: str = None,
     use_trirnasp: bool = False,
     trirnasp_energy_dir: str = None,
-    trirnasp_scale: float = 0.003,  # 统一默认值: 0.003 (最优值)
+    trirnasp_scale: float = 0.003,  # unified default: 0.003 (optimal value)
     trirnasp_update_freq: int = 10,
 ) -> Tuple[float, np.ndarray]:
-    """多轮 REMD 温度退火: 先高温探索, 再逐步降温精修.
+    """Multi-round REMD temperature annealing: explore at high temperature first, then cool stepwise and refine.
 
-    参考 scheme10_full.py 的 ensemble_temperatures:
-      round 0: 300-500K (高温探索, 打破局部极小)
-      round 1: 250-400K (中温收敛)
-      round 2: 200-350K (低温精修)
+    Following the ensemble_temperatures in scheme10_full.py:
+      round 0: 300-500K (high-temperature exploration, escape local minima)
+      round 1: 250-400K (medium-temperature convergence)
+      round 2: 200-350K (low-temperature refinement)
 
-    每轮 REMD 取最低能量构象作为下轮起点.
+    Each round uses the lowest-energy conformation of the previous round as its start.
 
     Args:
-        p_coords: (L,3) P 坐标 (Å)
+        p_coords: (L,3) P coordinates (Angstroms)
         pairs: [(i,j,w)]
-        platform_name: 平台
-        n_rounds: 退火轮数
-        n_replicas: 每轮副本数
-        n_steps_per_round: 每轮步数
-        verbose: 打印
-        sequence: RNA 序列 (use_trirnasp=True 时必需)
-        use_trirnasp: 启用 TriRNASP 三体统计势
-        trirnasp_energy_dir: 能量表目录
-        trirnasp_scale: TriRNASP 能量缩放因子
-        trirnasp_update_freq: 梯度更新频率 (每 N 步)
+        platform_name: platform
+        n_rounds: number of annealing rounds
+        n_replicas: replicas per round
+        n_steps_per_round: steps per round
+        verbose: verbosity
+        sequence: RNA sequence (required when use_trirnasp=True)
+        use_trirnasp: enable the TriRNASP three-body statistical potential
+        trirnasp_energy_dir: directory of the energy tables
+        trirnasp_scale: TriRNASP energy scaling factor
+        trirnasp_update_freq: gradient-update frequency (every N steps)
 
     Returns:
-        (best_energy, best_coords_ang) — P-only Å (内部 ×10 转换)
+        (best_energy, best_coords_ang) — P-only Angstroms (x10 internally)
     """
     best_energy = float("inf")
     best_pos = p_coords.copy()
-    L_remd = len(p_coords)  # P-only 粒子数 (输入总是 P-only)
+    L_remd = len(p_coords)  # number of P-only particles (input is always P-only)
 
     for rnd in range(n_rounds):
-        # 每轮温度范围递降, 但不低于 280K (RNA 低温冻结)
+        # The temperature range drops each round but stays above 280K (RNA freezes at low temperature)
         temp_high = max(350.0, 500.0 - rnd * 30.0)
         temp_low = max(280.0, 300.0 - rnd * 10.0)
 
         if verbose:
-            print(f"    REMD 退火 round {rnd + 1}/{n_rounds}: "
+            print(f"    REMD annealing round {rnd + 1}/{n_rounds}: "
                   f"T={temp_low:.0f}-{temp_high:.0f}K, "
-                  f"{n_replicas} 副本, {n_steps_per_round} 步")
+                  f"{n_replicas} replicas, {n_steps_per_round} steps")
 
-        # 用自定义温度阶梯替代默认的 300*1.1^i
+        # Use a custom temperature ladder instead of the default 300*1.1^i
         from scipy.constants import k as kB
         import multiprocessing as mp
 
-        # 先 clamp 再算温度 (避免温度列表长度不匹配)
+        # Clamp first, then build the temperatures (avoid a length mismatch in the temperature list)
         n_replicas_clamped = _clamp_replicas_by_memory(n_replicas, mem_per_proc_gb=1.5)
         temperatures = [temp_low + (temp_high - temp_low) * i / max(1, n_replicas_clamped - 1)
                         for i in range(n_replicas_clamped)]
@@ -1443,7 +1456,7 @@ def _run_multistage_remd(
                 target=_run_remd_worker,
                 args=(ri, best_pos, pairs, temperatures[ri], n_steps_per_round,
                       max(10, n_steps_per_round // 10), per_replica_threads,
-                      child_conn, False,  # 全力场 REMD
+                      child_conn, False,  # full force-field REMD
                       sequence, use_trirnasp, trirnasp_energy_dir,
                       trirnasp_scale, trirnasp_update_freq),
             )
@@ -1452,12 +1465,12 @@ def _run_multistage_remd(
             processes.append(p)
             conns.append(parent_conn)
 
-        # 协调交换
+        # Coordinate exchanges
         accept_count = 0
         round_best_e = float("inf")
-        round_best_pos = best_pos / 10.0  # Å → nm (workers report in nm)
+        round_best_pos = best_pos / 10.0  # Angstroms -> nm (workers report in nm)
 
-        # 等 init: ("init", worker_idx, energy) — 3 元素, 无坐标
+        # Wait for init: ("init", worker_idx, energy) — 3 elements, no coordinates
         for ri in range(n_replicas):
             msg = conns[ri].recv()
             if msg[0] == "init" and msg[2] < round_best_e:
@@ -1494,7 +1507,7 @@ def _run_multistage_remd(
                     new_pos = positions[ri + 1]
                 conns[ri].send(("swap", new_pos) if new_pos is not None else ("keep",))
 
-        # 收尾: ("done", worker_idx, best_energy, best_pos)
+        # Wrap-up: ("done", worker_idx, best_energy, best_pos)
         for ri in range(n_replicas):
             try:
                 msg = conns[ri].recv()
@@ -1509,30 +1522,30 @@ def _run_multistage_remd(
         for conn in conns:
             conn.close()
 
-        # 更新全局最优
+        # Update the global best
         if round_best_e < best_energy:
             best_energy = round_best_e
-            best_pos = round_best_pos * 10.0  # nm → Å
-            # worker 返回 3-bead 坐标 (3L×3), 但下一轮 worker 期望
-            # P-only 输入 (L×3) 来构建3-bead系统. 提取 P bead 防止
-            # 3-bead→9-bead 膨胀导致坐标垃圾.
+            best_pos = round_best_pos * 10.0  # nm -> Angstroms
+            # The worker returns 3-bead coordinates (3Lx3), but the next round expects
+            # P-only input (Lx3) to build the 3-bead system. Extract the P beads to avoid
+            # a 3-bead -> 9-bead blow-up producing garbage coordinates.
             if best_pos.shape[0] == 3 * L_remd:
                 best_pos = best_pos[0::3].copy()
-        # 确保 best_pos 始终是 P-only (L×3), 防止 worker 收到3-bead 输入
+        # Ensure best_pos stays P-only (Lx3) so workers never receive 3-bead input
         if best_pos.shape[0] != L_remd:
             if verbose:
-                print(f"    [REMD] best_pos shape 异常 ({best_pos.shape}), 强制提取 P-only")
+                print(f"    [REMD] abnormal best_pos shape ({best_pos.shape}); forcing P-only extraction")
             best_pos = best_pos[0::3].copy() if best_pos.shape[0] == 3 * L_remd else best_pos[:L_remd]
 
         if verbose:
             rate = accept_count / max(1, n_ex * (n_replicas - 1))
             print(f"    REMD round {rnd + 1}: E={round_best_e:.0f}, "
-                  f"交换率 {rate:.1%}")
+                  f"exchange rate {rate:.1%}")
 
     return best_energy, best_pos
 
 
-# ── 势能引导精修 ──
+# ── Potential-guided refinement ──
 
 def _potential_guided_refine(
     p_coords: np.ndarray,
@@ -1542,29 +1555,29 @@ def _potential_guided_refine(
     n_minimize: int = 3000,
     verbose: bool = False,
 ) -> Tuple[float, np.ndarray]:
-    """势能引导精修: 对 REMD 最低能量构象做额外 OpenMM 最小化 + 短 MD.
+    """Potential-guided refinement: extra OpenMM minimization + short MD on the lowest-energy REMD conformation.
 
-    参考 scheme10_full.py 的 DynamicEnsembleGenerator:
+    Following DynamicEnsembleGenerator in scheme10_full.py:
       potential_weight=0.1, potential_refine_steps=10
-    用全 3-bead 力场 (含堆叠/键角/碰撞) 精修, 而非极简力场.
+    Refines with the full 3-bead force field (including stacking/angle/clash), not the minimal one.
 
     Args:
-        p_coords: (L,3) P 坐标 (Å)
+        p_coords: (L,3) P coordinates (Angstroms)
         pairs: [(i,j,w)]
-        sequence: RNA 序列
-        secondary_structure: 二级结构
-        n_minimize: 最小化步数
-        verbose: 打印
+        sequence: RNA sequence
+        secondary_structure: secondary structure
+        n_minimize: number of minimization steps
+        verbose: verbosity
 
     Returns:
         (refined_energy, refined_coords_nm)
     """
     L = len(p_coords)
 
-    # 清洗坐标
+    # Sanitize coordinates
     p_coords = _sanitize_p_coords(p_coords.copy())
 
-    # 构建完整 3-bead 力场 (含堆叠/键角/碰撞)
+    # Build the full 3-bead force field (including stacking/angle/clash)
     system, coords_nm, pair_force, stack_force, bsj_force, bsj_guide = \
         _build_3bead_system_gpu(p_coords, pairs, pair_scale=1.0, bsj_k_scale=1.0)
 
@@ -1577,15 +1590,15 @@ def _potential_guided_refine(
     sim = Simulation(topo, system, integrator, plat, plat_props)
     sim.context.setPositions(coords_nm * unit.nanometer)
 
-    # 阶段1: 能量最小化
+    # Stage 1: energy minimization
     sim.minimizeEnergy(
         tolerance=10.0 * unit.kilojoules_per_mole / unit.nanometer,
         maxIterations=n_minimize)
 
-    # 阶段2: 短 MD 精修 (300K, 5ps)
+    # Stage 2: short MD refinement (300K, 5ps)
     sim.step(2500)
 
-    # 阶段3: 终局最小化
+    # Stage 3: final minimization
     sim.minimizeEnergy(
         tolerance=5.0 * unit.kilojoules_per_mole / unit.nanometer,
         maxIterations=n_minimize)
@@ -1595,22 +1608,22 @@ def _potential_guided_refine(
     pos = state.getPositions(asNumpy=True)._value  # nm
 
     if verbose:
-        print(f"    势能精修: E={e:.0f} kJ/mol")
+        print(f"    Potential refinement: E={e:.0f} kJ/mol")
 
     return e, pos
 
 
-# ── 坐标清洗和紧凑化 ──
+# ── Coordinate sanitization and compaction ──
 
 def _sanitize_p_coords(p_coords: np.ndarray) -> np.ndarray:
-    """清洗 P 坐标: 替换 NaN/Inf 为相邻有效坐标的均值."""
+    """Sanitize P coordinates: replace NaN/Inf with the mean of adjacent valid coordinates."""
     L = len(p_coords)
     bad = np.any(~np.isfinite(p_coords), axis=1)
     if not np.any(bad):
         return p_coords
 
     n_bad = int(np.sum(bad))
-    print(f"  [OpenMM GPU] 发现 {n_bad}/{L} 个 NaN/Inf P 坐标, 清洗中...")
+    print(f"  [OpenMM GPU] found {n_bad}/{L} NaN/Inf P coordinates; cleaning...")
 
     for i in range(L):
         if not bad[i]:
@@ -1638,7 +1651,7 @@ def _sanitize_p_coords(p_coords: np.ndarray) -> np.ndarray:
 
 
 def _is_extended_helix(p_coords: np.ndarray, threshold: float = 200.0) -> bool:
-    """检测 P 坐标是否是展开结构 (首末端距离远超环状 RNA 合理范围)."""
+    """Detect whether the P coordinates form an extended structure (end-to-end distance far beyond a reasonable circular-RNA range)."""
     if len(p_coords) < 2:
         return False
     end_to_end = float(np.linalg.norm(p_coords[-1] - p_coords[0]))
@@ -1646,9 +1659,10 @@ def _is_extended_helix(p_coords: np.ndarray, threshold: float = 200.0) -> bool:
 
 
 def _generate_compact_coords(L: int, pairs: List[Tuple[int, int, float]]) -> np.ndarray:
-    """为长序列生成紧凑的环状起始坐标.
+    """Generate compact circular starting coordinates for long sequences.
 
-    圆环半径由 P-P 键长和序列长度决定, 加小扰动避免退化.
+    The ring radius is set by the P-P bond length and the sequence length, with a small
+    perturbation to avoid degeneracy.
     """
     coords = np.zeros((L, 3), dtype=np.float64)
     circumference = L * BOND_P_NEXT
@@ -1664,7 +1678,7 @@ def _generate_compact_coords(L: int, pairs: List[Tuple[int, int, float]]) -> np.
 
 
 def _has_nan_energy(sim: 'Simulation') -> bool:
-    """检查模拟当前能量是否为 NaN/Inf."""
+    """Check whether the simulation's current energy is NaN/Inf."""
     try:
         state = sim.context.getState(getEnergy=True)
         e = state.getPotentialEnergy()._value
@@ -1673,7 +1687,7 @@ def _has_nan_energy(sim: 'Simulation') -> bool:
         return True
 
 
-# ── 主入口: isrnacirc_cg_refine 兼容接口 ──
+# ── Main entry: isrnacirc_cg_refine-compatible interface ──
 
 def openmm_gpu_refine(
     input_pdb: str,
@@ -1698,76 +1712,76 @@ def openmm_gpu_refine(
     skip_minimal_fold: bool = False,
     use_trirnasp: bool = False,
     trirnasp_energy_dir: str = None,
-    trirnasp_scale: float = 0.003,  # 统一默认值: 0.003 (最优值)
+    trirnasp_scale: float = 0.003,  # unified default: 0.003 (optimal value)
     trirnasp_update_freq: int = 10,
 ) -> Tuple[str, float]:
-    """OpenMM GPU 加速 CG MD 精修 (isrnacirc_cg_refine 兼容接口).
+    """OpenMM GPU-accelerated CG MD refinement (isrnacirc_cg_refine-compatible interface).
 
-    替代 IsRNAcirc.exe CPU-only 精修:
-    1. 读 PDB → 提取 P 坐标 + bpp 远端配对发现
-    2. 3-bead CG 力场 (bpp 加权配对力)
-    3. 三阶段退火 (弱→强配对+BSJ)
-    4. 多轮 REMD 温度退火 (高温探索→低温精修)
-    5. 势能引导精修 (全 3-bead 力场最小化+短MD)
-    6. 物理约束弛豫 (键长/键角/碰撞/BSJ/WC配对)
-    7. CG → 全原子 (cg_to_allatom, 可选跳过)
-    8. 输出精修后 PDB
+    Replaces the CPU-only refinement in IsRNAcirc.exe:
+    1. Read PDB -> extract P coordinates + bpp far-pair discovery
+    2. 3-bead CG force field (bpp-weighted pairing force)
+    3. Three-stage annealing (weak -> strong pairing + BSJ)
+    4. Multi-round REMD temperature annealing (high-T exploration -> low-T refinement)
+    5. Potential-guided refinement (full 3-bead force-field minimization + short MD)
+    6. Physical-constraint relaxation (bond length/angle/clash/BSJ/WC pairing)
+    7. CG -> all-atom (cg_to_allatom; optional skip)
+    8. Write the refined PDB
 
     Args:
-        input_pdb: 输入 PDB 路径
-        output_dir: 输出目录
-        sequence: RNA 序列
-        secondary_structure: 二级结构
-        name: 项目名
-        nstep: 退火步数 (每阶段), 默认 20000
-        nstep_close: (兼容参数, 未使用)
-        nstru: (兼容参数, 未使用)
-        timeout: 超时秒数
+        input_pdb: input PDB path
+        output_dir: output directory
+        sequence: RNA sequence
+        secondary_structure: secondary structure
+        name: project name
+        nstep: annealing steps (per stage), default 20000
+        nstep_close: (compatibility parameter, unused)
+        nstru: (compatibility parameter, unused)
+        timeout: timeout in seconds
         platform_name: "auto"/"CUDA"/"OpenCL"/"CPU"
-        use_remd: 是否启用 REMD
-        remd_n_replicas: REMD 副本数, 默认 6
-        remd_n_steps: REMD 步数, 默认 3000
-        verbose: 打印详细信息
-        skip_cg_to_allatom: 跳过内部 CG→全原子转换 (输入已是全原子时用)
-        use_physical_relax: 是否启用物理约束弛豫 (默认 True)
-        bpp_matrix: (L,L) ViennaRNA 配对概率矩阵 (可选, 用于 bpp 加权配对力)
-        bpp_weight: bpp 加权系数 (0=纯硬编码, 1=纯bpp)
-        use_multistage_remd: 是否启用多轮 REMD 温度退火 (默认 True)
-        use_potential_refine: 是否启用势能引导精修 (默认 True)
+        use_remd: whether to enable REMD
+        remd_n_replicas: number of REMD replicas, default 6
+        remd_n_steps: number of REMD steps, default 3000
+        verbose: print detailed output
+        skip_cg_to_allatom: skip the internal CG->all-atom conversion (use when the input is already all-atom)
+        use_physical_relax: whether to enable physical-constraint relaxation (default True)
+        bpp_matrix: (L,L) ViennaRNA base-pair probability matrix (optional; used for the bpp-weighted pairing force)
+        bpp_weight: bpp mixing weight (0=pure hard-coded, 1=pure bpp)
+        use_multistage_remd: whether to enable multi-round REMD temperature annealing (default True)
+        use_potential_refine: whether to enable potential-guided refinement (default True)
 
     Returns:
         (output_pdb_path, final_energy, diag)  # diag: {"hot_start_energy": float}
     """
     if not OPENMM_AVAILABLE:
         raise ImportError(
-            "OpenMM 未安装, 无法使用 GPU 精修。"
-            "请安装 OpenMM: conda install -c conda-forge openmm")
+            "OpenMM is not installed; GPU refinement is unavailable. "
+            "Install OpenMM with: conda install -c conda-forge openmm")
 
     t0 = time.time()
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
-    # 检测平台
+    # Detect the platform
     platform = detect_best_platform(platform_name)
     if verbose:
-        print(f"  [OpenMM GPU] 平台: {platform}")
+        print(f"  [OpenMM GPU] platform: {platform}")
 
-    # 1. 读 P 坐标
+    # 1. Read the P coordinates
     p_coords = _read_p_coords(input_pdb)
     L = len(p_coords)
     if verbose:
-        print(f"  [OpenMM GPU] 序列长度: {L} nt")
+        print(f"  [OpenMM GPU] sequence length: {L} nt")
 
     if L < 3:
-        raise ValueError(f"序列太短 ({L} nt), 无法做 CG MD")
+        raise ValueError(f"sequence too short ({L} nt) for CG MD")
 
-    # 1b. 清洗 NaN/Inf 坐标
+    # 1b. Clean NaN/Inf coordinates
     p_coords = _sanitize_p_coords(p_coords)
 
-    # 从 pairs 参数解析配对 (从 secondary_structure 推断)
+    # Resolve the base pairs from the pairs argument (inferred from secondary_structure)
     pairs = _dotbracket_to_pairs(secondary_structure)
 
-    # 1c. bpp 远端配对发现: 从 bpp 矩阵补充远端配对
+    # 1c. bpp far-pair discovery: add far pairs from the bpp matrix
     if bpp_matrix is not None and bpp_matrix.shape[0] == L:
         far_pairs_discovered = discover_far_pairs_from_bpp(
             bpp_matrix, sequence, min_gap=24, bpp_threshold=0.01,
@@ -1775,39 +1789,39 @@ def openmm_gpu_refine(
         if far_pairs_discovered:
             pairs = pairs + far_pairs_discovered
             if verbose:
-                print(f"  [bpp] 发现 {len(far_pairs_discovered)} 个远端配对, "
-                      f"总计 {len(pairs)} 对")
+                print(f"  [bpp] discovered {len(far_pairs_discovered)} far pairs, "
+                      f"{len(pairs)} pairs total")
 
-    # 1d. 检查坐标质量, 仅在无效/键长异常时替换为紧凑环状坐标
-    # 注意: 首末距大不代表展开 — 环状 RNA 首末距天然可大.
-    # 检查 P-P 键长: 若平均键长异常 (远超 5.9A 合理范围), 才判定为坏结构.
+    # 1d. Check the coordinate quality; replace with compact circular coordinates only when invalid/bond-lengths are abnormal
+    # Note: a large end-to-end distance does not mean the structure is extended — the ends of a circular RNA can naturally be far apart.
+    # Check P-P bond lengths: only judge the structure bad when the mean bond length is abnormal (far beyond the reasonable ~5.9A range).
     avg_pp = 0.0
     if L > 1:
         diffs = p_coords[1:] - p_coords[:-1]
         pp_dists = np.linalg.norm(diffs, axis=1)
         avg_pp = float(np.mean(pp_dists[:min(L - 1, 500)]))
 
-    # 如果键长在 nm 尺度 (<1.5A), 说明坐标单位是 nm 而非 Å, 乘10转 Å
-    # 5.9A 不会误触发, 0.59nm 正确转换
+    # If the bond lengths are on the nm scale (<1.5A), the coordinate unit is nm rather than
+    # Angstroms; multiply by 10. 5.9A never false-triggers; 0.59nm is correctly converted.
     if avg_pp < 1.5 and L > 1:
         p_coords = p_coords * 10.0
         avg_pp = avg_pp * 10.0
         if verbose:
-            print(f"  [OpenMM GPU] 坐标单位修复: avg_pp {avg_pp/10:.2f} -> {avg_pp:.2f}A")
+            print(f"  [OpenMM GPU] coordinate-unit fix: avg_pp {avg_pp/10:.2f} -> {avg_pp:.2f}A")
 
     use_compact = (not np.isfinite(avg_pp)) or avg_pp > 20.0 or avg_pp < 1.0
     if use_compact:
         if verbose:
-            print(f"  [OpenMM GPU] P-P 键长异常 (avg={avg_pp:.2f}A), "
-                  f"生成紧凑环状起始坐标...")
+            print(f"  [OpenMM GPU] abnormal P-P bond length (avg={avg_pp:.2f}A); "
+                  f"generating compact circular starting coordinates...")
         p_coords = _generate_compact_coords(L, pairs)
 
-    # 2. 构建系统 (bpp 加权配对力)
+    # 2. Build the system (bpp-weighted pairing force)
     system, coords_nm, pair_force, stack_force, bsj_force, bsj_guide = \
         _build_3bead_system_gpu(p_coords, pairs, pair_scale=1.0, bsj_k_scale=0.1,
                                 bpp_matrix=bpp_matrix, bpp_weight=bpp_weight)
 
-    # 3. 创建拓扑和模拟
+    # 3. Create the topology and simulation
     topo = _create_3bead_topology(L)
 
     try:
@@ -1820,21 +1834,21 @@ def openmm_gpu_refine(
         1.0 / unit.picosecond,
         0.002 * unit.picosecond,
     )
-    # CPU 平台设多线程 (默认只用1个核)
+    # Set multithreading on the CPU platform (the default would use only 1 core)
     plat_props = {}
     if plat.getName() == "CPU":
         n_threads = os.cpu_count() or 8
         plat_props["CpuThreads"] = str(n_threads)
         if verbose:
-            print(f"  [OpenMM GPU] CPU 线程数: {n_threads}")
+            print(f"  [OpenMM GPU] CPU threads: {n_threads}")
 
     sim = Simulation(topo, system, integrator, plat, plat_props)
     try:
         sim.context.setPositions(coords_nm * unit.nanometer)
     except Exception as e_pos:
-        # GPU 内存不足 (LLVM ERROR), 回退到 CPU
+        # GPU out of memory (LLVM ERROR); fall back to CPU
         if verbose:
-            print(f"  [OpenMM GPU] 平台 {platform} 失败: {e_pos}, 回退到 CPU...")
+            print(f"  [OpenMM GPU] platform {platform} failed: {e_pos}; falling back to CPU...")
         plat = Platform.getPlatformByName("CPU")
         n_threads = os.cpu_count() or 8
         plat_props = {"CpuThreads": str(n_threads)}
@@ -1846,13 +1860,13 @@ def openmm_gpu_refine(
 
     e0 = sim.context.getState(getEnergy=True).getPotentialEnergy()._value
     if verbose:
-        print(f"  [OpenMM GPU] 初始能量: {e0:.0f} kJ/mol")
+        print(f"  [OpenMM GPU] initial energy: {e0:.0f} kJ/mol")
 
-    # 4. 检查初始能量, NaN/Inf 时用更紧凑的坐标重试
+    # 4. Check the initial energy; retry with more compact coordinates if it is NaN/Inf
     if not np.isfinite(e0):
         if verbose:
-            print(f"  [OpenMM GPU] 初始能量异常 ({e0}), "
-                  f"用更紧凑的环状坐标重试...")
+            print(f"  [OpenMM GPU] abnormal initial energy ({e0}); "
+                  f"retrying with more compact circular coordinates...")
         compact_r = max(10.0, L * BOND_P_NEXT / (2.0 * np.pi) * 0.3)
         rng = np.random.default_rng(123)
         p_fb = np.zeros((L, 3), dtype=np.float64)
@@ -1870,22 +1884,22 @@ def openmm_gpu_refine(
         sim.context.setPositions(coords_nm * unit.nanometer)
         e0 = sim.context.getState(getEnergy=True).getPotentialEnergy()._value
         if verbose:
-            print(f"  [OpenMM GPU] 重试初始能量: {e0:.0f} kJ/mol")
+            print(f"  [OpenMM GPU] retry initial energy: {e0:.0f} kJ/mol")
 
-    # 5. 最小化
+    # 5. Minimize
     try:
         sim.minimizeEnergy(
             tolerance=100.0 * unit.kilojoules_per_mole / unit.nanometer,
             maxIterations=1000)
     except Exception as e:
         if verbose:
-            print(f"  [OpenMM GPU] 最小化异常: {e}")
+            print(f"  [OpenMM GPU] minimization error: {e}")
 
-    # 最小化后检查, 如果还是 NaN 尝试极紧凑起始
+    # Check after minimizing; if still NaN, try an extremely compact start
     if _has_nan_energy(sim):
         if verbose:
-            print(f"  [OpenMM GPU] 最小化后能量异常, "
-                  f"极紧凑起始+弱力重试...")
+            print(f"  [OpenMM GPU] energy abnormal after minimization; "
+                  f"retrying with an extremely compact start and weak forces...")
         compact_r2 = max(8.0, L * BOND_P_NEXT / (2.0 * np.pi) * 0.15)
         rng2 = np.random.default_rng(456)
         p_v3 = np.zeros((L, 3), dtype=np.float64)
@@ -1906,27 +1920,28 @@ def openmm_gpu_refine(
             maxIterations=200)
         e0 = sim.context.getState(getEnergy=True).getPotentialEnergy()._value
         if verbose:
-            print(f"  [OpenMM GPU] V3 初始能量: {e0:.0f} kJ/mol")
+            print(f"  [OpenMM GPU] V3 initial energy: {e0:.0f} kJ/mol")
 
-    # 6. 两阶段折叠+精修
-    # 阶段1: 极简力场折叠 (P骨架 + P-P配对, 无 clash) → 配对收敛
-    # 阶段2: 完整力场 REMD 精修 (从折叠后坐标出发)
-    # skip_minimal_fold: REMD迭代时跳过极简折叠,直接用上轮精修坐标
+    # 6. Two-stage folding + refinement
+    # Stage 1: minimal-force-field folding (P backbone + P-P pairing, no clash) -> pairing converges
+    # Stage 2: full-force-field REMD refinement (starting from the folded coordinates)
+    # skip_minimal_fold: when iterating REMD, skip the minimal fold and use the previous round's refined coordinates directly
     if skip_minimal_fold:
         if verbose:
-            print(f"  [OpenMM GPU] 跳过极简折叠 (热启动模式), 直接用输入坐标")
-        # p_coords 来自全原子 PDB 读取, 需要只取 P 原子坐标
-        # 如果 p_coords 行数 > L, 说明读到了全原子, 需要过滤
+            print(f"  [OpenMM GPU] skipping minimal fold (hot-start mode); using the input coordinates directly")
+        # p_coords came from reading an all-atom PDB; keep only the P-atom coordinates.
+        # If p_coords has more than L rows, all-atom data was read and must be filtered.
         if len(p_coords) > L:
-            p_only = p_coords[:L]  # 全原子 PDB 的前 L 行是 P (如果格式正确)
+            p_only = p_coords[:L]  # the first L rows of an all-atom PDB are the P atoms (if formatted correctly)
             if verbose:
-                print(f"  [OpenMM GPU] 输入坐标 {len(p_coords)} 原子, 取前 {L} 个 P 坐标")
+                print(f"  [OpenMM GPU] input has {len(p_coords)} atoms; taking the first {L} P coordinates")
         else:
             p_only = p_coords
-        anneal_pos_ang = p_only  # P-only 坐标
-        # 计算初始能量 (与 REMD/3-bead 弛豫同一力场口径).
-        # 旧实现只建了一个 LJ 配对势的临时系统, E≈-n_pairs*0.5 (如 -58),
-        # 与全力场能量不可比, 导致 best_energy 永远停在热启动值、REMD 改善无法被采纳.
+        anneal_pos_ang = p_only  # P-only coordinates
+        # Compute the initial energy (same force-field convention as REMD / the 3-bead relaxation).
+        # The old implementation built a temporary LJ pairing-potential system, E ~= -n_pairs*0.5 (e.g. -58),
+        # which was not comparable to the full-force-field energy, so best_energy stayed pinned at the
+        # hot-start value and REMD improvements were never accepted.
         try:
             _hs_sys, _hs_coords_nm, _pf_hs, _sf_hs, _bjf_hs, _bjg_hs = \
                 _build_3bead_system_gpu(p_only, pairs,
@@ -1936,42 +1951,44 @@ def openmm_gpu_refine(
                 300 * unit.kelvin, 1.0 / unit.picosecond, 0.002 * unit.picosecond)
             _hs_sim = Simulation(_hs_topo, _hs_sys, _hs_int, plat, plat_props)
             _hs_sim.context.setPositions(_hs_coords_nm * unit.nanometer)
-            # 先最小化再算能量 — 3-bead 的 C4'/N 初始坐标是随机扰动的,
-            # 不最小化的话 E≈数百万 kJ/mol (碰撞/键角爆炸), 与 REMD worker 的
-            # E ≈ 10-30 万不可比. 最小化 ~500 步使 3-bead 坐标自洽后再评估.
+            # Minimize before scoring — the C4'/N initial coordinates in 3-bead are randomly
+            # perturbed, and without minimization E is on the order of millions of kJ/mol
+            # (clash/angle blow-up), which cannot be compared with the REMD workers' E ~ 100k-300k.
+            # Minimize ~500 steps to make the 3-bead coordinates self-consistent, then evaluate.
             _hs_sim.minimizeEnergy(maxIterations=500)
             anneal_e = _hs_sim.context.getState(getEnergy=True).getPotentialEnergy()._value
             if verbose:
-                print(f"  [OpenMM GPU] 热启动初始能量: {anneal_e:.0f} kJ/mol "
-                      f"(3-bead 全力场口径)")
+                print(f"  [OpenMM GPU] hot-start initial energy: {anneal_e:.0f} kJ/mol "
+                      f"(full 3-bead force-field convention)")
             del _hs_sim, _hs_int, _hs_topo, _hs_sys
         except Exception as e_energy:
-            # 不要设 E=0, 那会假收敛. 用高能量 fallback 让后续精修继续
+            # Do not set E=0 — that would fake convergence. Use a high-energy fallback so the
+            # later refinement can continue.
             anneal_e = 999999.0
             if verbose:
-                print(f"  [OpenMM GPU] 热启动能量计算失败: {e_energy}")
+                print(f"  [OpenMM GPU] hot-start energy computation failed: {e_energy}")
     else:
         if verbose:
-            print(f"  [OpenMM GPU] 极简力场折叠 ({nstep} 步, 多进程并行)...")
+            print(f"  [OpenMM GPU] minimal-force-field folding ({nstep} steps, multiprocess)...")
         n_traj = _clamp_replicas_by_memory(2, mem_per_proc_gb=1.5)
         if verbose:
-            print(f"  [OpenMM GPU] 极简折叠: {n_traj} 轨迹, 内存感知限制")
+            print(f"  [OpenMM GPU] minimal fold: {n_traj} trajectories (memory-aware limit)")
         try:
             anneal_e, anneal_pos_ang = _run_parallel_minimal_annealing(
                 p_coords, pairs, n_anneal=nstep, n_trajectories=n_traj,
                 platform_name="CPU", verbose=verbose)
         except Exception as e_anneal_par:
             if verbose:
-                print(f"  [OpenMM GPU] 极简折叠失败: {e_anneal_par}, 回退顺序退火...")
+                print(f"  [OpenMM GPU] minimal folding failed: {e_anneal_par}; falling back to serial annealing...")
             anneal_e, anneal_pos_ang = _run_annealing(
                 sim, pair_force, bsj_force, bsj_guide, L,
                 n_anneal=nstep, verbose=verbose)
-            anneal_pos_ang = anneal_pos_ang[0::3] * 10.0  # 3-bead nm → P Å
+            anneal_pos_ang = anneal_pos_ang[0::3] * 10.0  # 3-bead nm -> P Angstroms
 
         if verbose:
-            print(f"  [OpenMM GPU] 折叠后能量: {anneal_e:.0f} kJ/mol")
+            print(f"  [OpenMM GPU] energy after folding: {anneal_e:.0f} kJ/mol")
 
-    # 5b. 远端配对预拉: 低温+强远端力, 专门把远端配对拉到位
+    # 5b. Far-pair pre-pull: low temperature + strong far-pair force to pull far pairs into place
     if anneal_e < 100 and L > 50:
         try:
             _sys_fr, _cfr, _pf_fr = _build_minimal_system_gpu(
@@ -1993,31 +2010,32 @@ def openmm_gpu_refine(
                 tolerance=5.0 * unit.kilojoules_per_mole / unit.nanometer,
                 maxIterations=3000)
             _st = _sim_fr.context.getState(getPositions=True, getEnergy=True)
-            _fr_pos = _st.getPositions(asNumpy=True)._value * 10.0  # nm → Å
+            _fr_pos = _st.getPositions(asNumpy=True)._value * 10.0  # nm -> Angstroms
             _fr_e = _st.getPotentialEnergy()._value
-            # 检查是否改善
+            # Check whether this is an improvement
             _fr_bonds = np.linalg.norm(_fr_pos[1:] - _fr_pos[:-1], axis=1)[:100]
             if np.mean(_fr_bonds) > 3.0 and _fr_e < anneal_e:
                 anneal_pos_ang = _fr_pos
                 anneal_e = _fr_e
                 if verbose:
-                    print(f"  [OpenMM GPU] 远端预拉: E={_fr_e:.0f}, "
-                          f"远端配对距离改善")
+                    print(f"  [OpenMM GPU] far-pair pre-pull: E={_fr_e:.0f}, "
+                          f"far-pair distances improved")
         except Exception as e:
             if verbose:
-                print(f"  [OpenMM GPU] 远端预拉跳过: {e}")
+                print(f"  [OpenMM GPU] far-pair pre-pull skipped: {e}")
 
-    # 6. T-REMD (可选) — 从折叠后 P 坐标 (Å) 出发
+    # 6. T-REMD (optional) — start from the folded P coordinates (Angstroms)
     final_e = anneal_e
-    final_pos_pang = anneal_pos_ang  # (L,3) Å
+    final_pos_pang = anneal_pos_ang  # (L,3) Angstroms
 
-    # 能量已很低 (<10 kJ/mol) 时跳过 REMD (已收敛)
+    # Skip REMD when the energy is already very low (<10 kJ/mol, already converged)
     if use_remd and L >= 10 and final_e > 10:
         if use_multistage_remd:
-            # 多轮 REMD: 用全力场 (3-bead, 含堆叠/键角/碰撞)
-            # 极简力场太简单, 温度差异不影响能量, 交换率为 0
+            # Multi-round REMD with the full force field (3-bead, including stacking/angle/clash).
+            # The minimal force field is too simple: temperature differences do not affect the
+            # energy, so the exchange rate is 0.
             if verbose:
-                print(f"  [OpenMM GPU] 多轮 REMD ({remd_n_replicas} 副本, 8轮, 全力场)...")
+                print(f"  [OpenMM GPU] multi-round REMD ({remd_n_replicas} replicas, 8 rounds, full force field)...")
             remd_e, remd_pos = _run_multistage_remd(
                 final_pos_pang, pairs, platform,
                 n_rounds=8,
@@ -2030,43 +2048,43 @@ def openmm_gpu_refine(
                 trirnasp_scale=trirnasp_scale,
                 trirnasp_update_freq=trirnasp_update_freq)
         else:
-            # 单轮 REMD (全力场)
+            # Single-round REMD (full force field)
             if verbose:
-                print(f"  [OpenMM GPU] T-REMD ({remd_n_replicas} 副本, {remd_n_steps} 步, 全力场)...")
+                print(f"  [OpenMM GPU] T-REMD ({remd_n_replicas} replicas, {remd_n_steps} steps, full force field)...")
             remd_e, remd_pos = _run_remd(
                 final_pos_pang, pairs, platform,
                 n_replicas=remd_n_replicas,
                 n_steps=remd_n_steps,
                 verbose=verbose,
-                minimal=False,  # 全力场: 堆叠/键角/碰撞
+                minimal=False,  # full force field: stacking/angle/clash
                 sequence=sequence,
                 use_trirnasp=use_trirnasp,
                 trirnasp_energy_dir=trirnasp_energy_dir,
                 trirnasp_scale=trirnasp_scale,
                 trirnasp_update_freq=trirnasp_update_freq)
-        # REMD 是精修阶段, 成功后总是采用其坐标 (配对进一步收敛).
+        # REMD is the refinement stage; always adopt its coordinates on success (pairs converge further).
         if remd_pos is not None and np.isfinite(remd_e):
             final_e = remd_e
-            # 诊断: 打印 REMD 返回的 shape
+            # Diagnostic: print the shape returned by REMD
             if verbose:
-                print(f"  [OpenMM GPU] REMD 返回: shape={remd_pos.shape}, E={remd_e:.0f}")
-            # _run_multistage_remd 返回3-bead Å (内部已 ×10), _run_remd 返回
-            # 3-bead nm (未转换). 下游 final_pos_pang 期望 P-only Å (L×3).
-            # 统一处理: 提取 P bead, 确保单位为 Å.
+                print(f"  [OpenMM GPU] REMD returned: shape={remd_pos.shape}, E={remd_e:.0f}")
+            # _run_multistage_remd returns 3-bead Angstroms (already x10 internally); _run_remd returns
+            # 3-bead nm (unconverted). Downstream, final_pos_pang expects P-only Angstroms (Lx3).
+            # Handle uniformly: extract the P beads and ensure the unit is Angstroms.
             if remd_pos.ndim == 2 and remd_pos.shape[0] == 3 * L:
-                p_only_nm = remd_pos[0::3].copy()  # 3-bead → P-only
-                # 检测单位: 如果是 nm (键长~0.6), 乘10转Å
+                p_only_nm = remd_pos[0::3].copy()  # 3-bead -> P-only
+                # Detect the unit: if nm (bond length ~0.6), multiply by 10 to get Angstroms
                 _avg_pp = float(np.mean(np.linalg.norm(
                     p_only_nm[1:] - p_only_nm[:-1], axis=1)[:100]))
-                if _avg_pp < 1.0:  # nm 尺度
+                if _avg_pp < 1.0:  # nm scale
                     final_pos_pang = p_only_nm * 10.0
-                else:  # Å 尺度
+                else:  # Angstrom scale
                     final_pos_pang = p_only_nm
                 if verbose:
                     _pp = np.linalg.norm(final_pos_pang[1:] - final_pos_pang[:-1], axis=1)
-                    print(f"    REMD 3-bead→P-only: avg_PP={np.mean(_pp):.2f}A")
+                    print(f"    REMD 3-bead->P-only: avg_PP={np.mean(_pp):.2f}A")
             elif remd_pos.ndim == 2 and remd_pos.shape[0] >= 2:
-                # P-only 但可能单位是 nm
+                # P-only, but the unit may be nm
                 _avg_pp = float(np.mean(np.linalg.norm(
                     remd_pos[1:] - remd_pos[:-1], axis=1)[:100]))
                 if _avg_pp < 1.0:
@@ -2074,10 +2092,12 @@ def openmm_gpu_refine(
                 else:
                     final_pos_pang = remd_pos
 
-    # 6b. 势能引导精修: 跳过 — 力场不兼容会把极简力场坐标炸掉
-    # 势能精修用 3-bead 全力场 (stacking/angle/clash) 精修极简力场坐标,
-    # 但单位/参数不兼容, 导致 E 从 200K 跳到 58M kJ/mol.
-    # 直接用极简折叠输出, 不再做势能精修.
+    # 6b. Potential-guided refinement: skipped — an incompatible force field would blow up the
+    #     minimal-force-field coordinates.
+    # Potential refinement would use the 3-bead full force field (stacking/angle/clash) on
+    # minimal-force-field coordinates, but the units/parameters are incompatible, making E jump
+    # from 200K to 58M kJ/mol.
+    # Use the minimal-fold output directly and do not run potential refinement.
     if False and use_potential_refine and L >= 10 and final_e > 1000:
         try:
             pg_e, pg_pos = _potential_guided_refine(
@@ -2085,16 +2105,16 @@ def openmm_gpu_refine(
                 n_minimize=3000, verbose=verbose)
             if np.isfinite(pg_e) and pg_e < final_e:
                 final_e = pg_e
-                final_pos_pang = pg_pos * 10.0  # nm → Å
+                final_pos_pang = pg_pos * 10.0  # nm -> Angstroms
         except Exception as e:
             if verbose:
-                print(f"    势能精修跳过: {e}")
+                print(f"    potential refinement skipped: {e}")
     elif verbose and final_e <= 100:
-        print(f"    势能精修: 跳过 (E={final_e:.0f} 已收敛)")
+        print(f"    potential refinement: skipped (E={final_e:.0f}, converged)")
 
-    # 6b. 3-bead 全力场弛豫 (与 REMD 同一力场, 保证一致性)
-    # 用 _build_3bead_system_gpu 构建堆叠/角度/碰撞/配对/BSJ 全力场
-    # 然后做短时间300K MD + 最小化, 提取 P 坐标
+    # 6b. 3-bead full-force-field relaxation (same force field as REMD for consistency).
+    # Build the full force field (stacking/angle/clash/pairing/BSJ) with _build_3bead_system_gpu,
+    # then run a short 300K MD + minimization and extract the P coordinates.
     if use_physical_relax and L >= 10:
         try:
             _sys_rx, _c_rx, _pf_rx, _sf_rx, _bjf_rx, _bjg_rx = \
@@ -2108,7 +2128,7 @@ def openmm_gpu_refine(
             _sim_rx = app.Simulation(_topo_rx, _sys_rx, _int_rx, _plat_rx,
                                      {"CpuThreads": str(_nthreads_rx)})
             _sim_rx.context.setPositions(_c_rx * unit.nanometer)
-            # 300K 短 MD (2000步) + 最小化
+            # Short 300K MD (2000 steps) + minimization
             _sim_rx.step(2000)
             _sim_rx.minimizeEnergy(
                 tolerance=5.0 * unit.kilojoules_per_mole / unit.nanometer,
@@ -2116,108 +2136,108 @@ def openmm_gpu_refine(
             _st_rx = _sim_rx.context.getState(getPositions=True, getEnergy=True)
             _rx_pos = _st_rx.getPositions(asNumpy=True)._value  # nm
             _rx_e = _st_rx.getPotentialEnergy()._value
-            # 提取 P 坐标 (Å)
+            # Extract the P coordinates (Angstroms)
             _rx_p = _rx_pos[0::3] * 10.0
             _rx_bonds = np.linalg.norm(_rx_p[1:] - _rx_p[:-1], axis=1)
             _rx_avg = float(np.mean(_rx_bonds))
-            # 弛豫后能量必须优于弛豫前, 否则跳过
+            # The relaxed energy must beat the pre-relaxation energy, otherwise skip
             if _rx_avg > 3.0 and np.all(np.isfinite(_rx_p)) and _rx_e < final_e:
                 final_pos_pang = _rx_p
                 final_e = _rx_e
                 if verbose:
                     _bsj_d = np.linalg.norm(_rx_p[0] - _rx_p[-1])
-                    print(f"  [3-bead弛豫] E={_rx_e:.0f}, bond={_rx_avg:.2f}A, "
+                    print(f"  [3-bead relaxation] E={_rx_e:.0f}, bond={_rx_avg:.2f}A, "
                           f"BSJ={_bsj_d:.2f}A")
             elif verbose:
                 if _rx_e >= final_e:
-                    print(f"  [3-bead弛豫] 跳过 (E={_rx_e:.0f} >= 当前 {final_e:.0f})")
+                    print(f"  [3-bead relaxation] skipped (E={_rx_e:.0f} >= current {final_e:.0f})")
                 else:
-                    print(f"  [3-bead弛豫] 跳过 (avg_bond={_rx_avg:.2f}A, 异常)")
+                    print(f"  [3-bead relaxation] skipped (avg_bond={_rx_avg:.2f}A, abnormal)")
         except Exception as e:
             if verbose:
-                print(f"  [物理弛豫] 跳过: {e}")
+                print(f"  [physical relaxation] skipped: {e}")
 
-    # 把折叠后 P 坐标 (Å) 转成 3-bead nm (补 C4'/N), 供后续输出
+    # Convert the folded P coordinates (Angstroms) to 3-bead nm (fill in C4'/N) for later output
     rng_final = np.random.default_rng(7)
     final_pos = np.zeros((3 * L, 3), dtype=np.float64)
     for i in range(L):
-        final_pos[3 * i] = final_pos_pang[i] / 10.0  # P, Å→nm
+        final_pos[3 * i] = final_pos_pang[i] / 10.0  # P, Angstroms -> nm
         final_pos[3 * i + 1] = final_pos_pang[i] / 10.0 + rng_final.normal(0, 0.03, 3)
         final_pos[3 * i + 2] = final_pos_pang[i] / 10.0 + rng_final.normal(0, 0.03, 3)
 
-    # 7. CG → 全原子
-    # CG_to_allatom 的模板匹配期望 P-P ~5.9Å (真实 RNA 尺度)
-    # 但 OpenMM 退火后的坐标可能尺度偏大, 需要缩放
-    _BOND_P_NEXT = 0.59  # 5.9Å = 0.59nm (默认值)
+    # 7. CG -> all-atom
+    # CG_to_allatom's template matching expects P-P ~5.9A (true RNA scale), but OpenMM-annealed
+    # coordinates may be somewhat larger in scale and need rescaling.
+    _BOND_P_NEXT = 0.59  # 5.9A = 0.59nm (default)
     try:
         from .cg_forcefield import BOND_P_NEXT as _bpn
-        _BOND_P_NEXT = _bpn / 10.0  # BOND_P_NEXT 单位是 Å, 转 nm
+        _BOND_P_NEXT = _bpn / 10.0  # BOND_P_NEXT is in Angstroms; convert to nm
     except ImportError:
         pass
-    p_coords = final_pos[0::3]  # (L,3) P bead in nm
+    p_coords = final_pos[0::3]  # (L,3) P beads in nm
 
-    # 验证: P 键长应在 0.3-1.2nm 范围 (3-12A)
-    # 超出范围说明坐标单位有问题, 绝不缩放
+    # Validation: P bond lengths should be in the 0.3-1.2nm range (3-12A). Outside that range the
+    # coordinate unit is suspect; never rescale.
     if L > 1:
         avg_pp_nm = float(np.mean(np.linalg.norm(p_coords[1:] - p_coords[:-1], axis=1)[:100]))
         if verbose:
-            print(f"  [OpenMM GPU] CG P键长: {avg_pp_nm:.4f}nm ({avg_pp_nm*10:.2f}A)")
-        # 只在合理范围内微调 (0.45-0.75nm), 超出范围不动
+            print(f"  [OpenMM GPU] CG P bond length: {avg_pp_nm:.4f}nm ({avg_pp_nm*10:.2f}A)")
+        # Fine-tune only within a reasonable range (0.45-0.75nm); leave it otherwise
         if 0.45 < avg_pp_nm < 0.75 and abs(avg_pp_nm - _BOND_P_NEXT) > 0.03:
             scale = _BOND_P_NEXT / avg_pp_nm
             final_pos = final_pos * scale
             if verbose:
-                print(f"  [OpenMM GPU] 坐标微调: {avg_pp_nm:.4f} -> {_BOND_P_NEXT:.4f}nm")
+                print(f"  [OpenMM GPU] coordinate fine-tune: {avg_pp_nm:.4f} -> {_BOND_P_NEXT:.4f}nm")
         elif avg_pp_nm < 0.45 or avg_pp_nm > 0.75:
             if verbose:
-                print(f"  [OpenMM GPU] 键长异常 ({avg_pp_nm:.4f}nm), 跳过缩放")
+                print(f"  [OpenMM GPU] abnormal bond length ({avg_pp_nm:.4f}nm); skipping rescale")
 
     cg_pdb = str(out_path / f"{name}_cg.pdb")
     _write_allatom_pdb(final_pos, L, cg_pdb, sequence=sequence)
 
     if skip_cg_to_allatom:
-        # 输入已是全原子 (merged_aa), 跳过重复 CG→全原子转换.
-        # 只写精修后的 CG PDB, Level 2 会自行读取 P 坐标.
+        # The input is already all-atom (merged_aa); skip the redundant CG->all-atom conversion.
+        # Write only the refined CG PDB; Level 2 reads the P coordinates itself.
         output_pdb = cg_pdb
     else:
         aa_pdb = str(out_path / f"{name}_aa_raw.pdb")
         try:
             from .isrnacirc_wrapper import cg_to_allatom
             cg_to_allatom(cg_pdb, aa_pdb, sequence)
-            # 检查输出文件是否有效 (至少 10 行 ATOM)
+            # Check that the output file is valid (at least 10 ATOM lines)
             with open(aa_pdb) as _f:
                 n_atoms = sum(1 for _ in _f if _.startswith("ATOM"))
             if n_atoms < 10:
-                raise RuntimeError(f"CG→全原子输出只有 {n_atoms} 个原子, 不够")
-            # 验证 P 键长: cg_to_allatom 可能破坏 P 坐标
+                raise RuntimeError(f"CG->all-atom output has only {n_atoms} atoms; not enough")
+            # Validate the P bond lengths: cg_to_allatom may corrupt the P coordinates
             _aa_p = _read_p_coords(aa_pdb)
             if len(_aa_p) > 1:
                 _aa_bonds = np.linalg.norm(_aa_p[1:] - _aa_p[:-1], axis=1)
                 _aa_avg = float(np.mean(_aa_bonds))
-                # P-P 键长正常范围 4.5-7.5A, 超出则 cg_to_allatom 坐标损坏
+                # The normal P-P bond-length range is 4.5-7.5A; outside it, cg_to_allatom corrupted the coordinates
                 if _aa_avg < 4.5 or _aa_avg > 7.5:
                     if verbose:
-                        print(f"  [OpenMM GPU] cg_to_allatom P键长异常 ({_aa_avg:.2f}A), 回退到 CG PDB")
+                        print(f"  [OpenMM GPU] abnormal cg_to_allatom P bond length ({_aa_avg:.2f}A); falling back to the CG PDB")
                     aa_pdb = cg_pdb
         except Exception as e:
             if verbose:
-                print(f"  [OpenMM GPU] CG→全原子失败: {e}, 输出 CG 坐标")
+                print(f"  [OpenMM GPU] CG->all-atom failed: {e}; writing CG coordinates")
             aa_pdb = cg_pdb
 
-        # 8. 写最终输出 PDB
+        # 8. Write the final output PDB
         output_pdb = str(out_path / f"{name}_openmm.pdb")
         _write_refined_pdb(aa_pdb, output_pdb)
 
     elapsed = time.time() - t0
     if verbose:
-        print(f"  [OpenMM GPU] 完成: E={final_e:.0f} kJ/mol, "
-              f"耗时 {elapsed:.1f}s")
+        print(f"  [OpenMM GPU] done: E={final_e:.0f} kJ/mol, "
+              f"elapsed {elapsed:.1f}s")
 
     return output_pdb, final_e, {"hot_start_energy": anneal_e}
 
 
 def _dotbracket_to_pairs(ss: str) -> List[Tuple[int, int, float]]:
-    """从 dot-bracket 提取配对列表 [(i,j,1.0)]."""
+    """Extract a base-pair list [(i,j,1.0)] from a dot-bracket string."""
     pairs = []
     stack = []
     for i, ch in enumerate(ss):
@@ -2230,23 +2250,23 @@ def _dotbracket_to_pairs(ss: str) -> List[Tuple[int, int, float]]:
     return pairs
 
 
-# ── 冒烟测试 ──
+# ── Smoke test ──
 
 def main():
-    """冒烟测试: 生成随机序列, 用 OpenMM GPU 精修."""
+    """Smoke test: generate a random sequence and refine it with OpenMM GPU."""
     import random
     random.seed(42)
     L = 50
     sequence = "".join(random.choices("AUCG", k=L))
     ss = "(" * (L // 2) + ")" * (L // 2)
 
-    # 随机初始坐标 (平面圆)
+    # Random initial coordinates (planar circle)
     angles = np.linspace(0, 2 * np.pi, L, endpoint=False)
-    r = L * 5.9 / (2 * np.pi)  # P-P 间距决定半径
+    r = L * 5.9 / (2 * np.pi)  # the P-P spacing sets the radius
     p_coords = np.column_stack([r * np.cos(angles), r * np.sin(angles),
                                  np.zeros(L)])
 
-    # 写临时 PDB
+    # Write a temporary PDB
     import tempfile
     tmp_dir = tempfile.mkdtemp()
     input_pdb = Path(tmp_dir) / "test_input.pdb"
@@ -2262,16 +2282,16 @@ def main():
     with open(input_pdb, "w") as f:
         f.write("\n".join(lines))
 
-    print(f"序列: {L}nt, SS: {ss[:10]}...")
+    print(f"Sequence: {L}nt, SS: {ss[:10]}...")
     output_pdb, energy, diag = openmm_gpu_refine(
         str(input_pdb), tmp_dir, sequence, ss,
         name="test", nstep=100, use_remd=True,
         remd_n_replicas=3, remd_n_steps=200,
         platform_name="auto", verbose=True,
     )
-    print(f"\n输出: {output_pdb}")
-    print(f"能量: {energy:.0f} kJ/mol")
-    print(f"热启动能量: {diag.get('hot_start_energy', float('nan')):.0f} kJ/mol")
+    print(f"\nOutput: {output_pdb}")
+    print(f"Energy: {energy:.0f} kJ/mol")
+    print(f"Hot-start energy: {diag.get('hot_start_energy', float('nan')):.0f} kJ/mol")
 
 
 if __name__ == "__main__":

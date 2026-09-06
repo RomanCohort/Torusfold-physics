@@ -10,16 +10,16 @@ from pathlib import Path
 
 
 # isRNAcirc standalone root
-# CG_to_allatom.exe 不支持中文路径 (GBK 编码, Windows 原生 exe)
-# exe + DLL 必须在同一无中文路径下 (Windows DLL loader 不支持中文路径)
-# 通过环境变量 ISRNACIRC_BIN_DIR 指向含 CG_to_allatom.exe + DLL 的 ASCII 目录
+# CG_to_allatom.exe does not support non-ASCII paths (GBK-encoded, native Windows exe)
+# exe + DLL must stay together under an ASCII-only path (Windows DLL loader rejects non-ASCII paths)
+# ISRNACIRC_BIN_DIR env var points to an ASCII-only directory holding CG_to_allatom.exe + its DLLs
 _ISRNACIRC_BIN_DIR = os.environ.get("ISRNACIRC_BIN_DIR", "")
 
-# exe: env 指定目录下查找 (未配置时留空, cg_to_allatom() 内给出清晰报错)
+# exe: looked up in the env-specified directory (blank when unset; cg_to_allatom() gives a clear error)
 _CG_TO_AA_EXE = os.path.join(_ISRNACIRC_BIN_DIR, "CG_to_allatom.exe") \
     if _ISRNACIRC_BIN_DIR else ""
 
-# coeff: 必须用 ASCII 路径, exe 不支持中文
+# coeff: must be an ASCII-only path; the exe rejects non-ASCII paths
 _COEFF_DIR = os.environ.get("CG_TO_ALLATOM_COEFF", "")
 
 
@@ -65,7 +65,7 @@ def cg_to_allatom(cg_pdb_path, output_pdb_path, sequence=None):
         )
 
     cmd = [_CG_TO_AA_EXE, cg_pdb_path, output_pdb_path, _COEFF_DIR]
-    # DLL 搜索: bin/ 下有 MSVC/FFTW 等运行时 DLL, 需要加入 PATH
+    # DLL search: the bin/ folder holds MSVC/FFTW runtime DLLs, which need to be on PATH
     _bin_dir = os.path.dirname(_CG_TO_AA_EXE)
     _env = os.environ.copy()
     _existing_path = _env.get("PATH", "")

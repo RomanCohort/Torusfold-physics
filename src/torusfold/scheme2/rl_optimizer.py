@@ -1,19 +1,23 @@
 """
-rl_optimizer.py - RL 远端配对优化器 (MCTS + 策略网络)。
+rl_optimizer.py - RL far/long-range pair optimizer (MCTS + policy network).
 
-RL 不替代物理管线, 只补 circRNA 长程配对的局部最优盲区。在 CG 粒度
-(P 坐标) 上用 MCTS 探索跳出局部解, 把远端配对拉拢到 WC 几何 (C1'-C1'
-~10.5 Å), 再交给已有物理管线 (1EHZ 重建 + amber 精修) 收敛局部几何。
+RL does not replace the physics pipeline; it only fills the local-optimum blind
+spot of circRNA long-range pairing. At the CG resolution (P coordinates) it uses
+MCTS exploration to escape local minima and pull far/long-range pairs into
+Watson-Crick geometry (C1'-C1' ~10.5 A), then hands off to the existing physics
+pipeline (1EHZ reconstruction + amber refinement) to converge the local
+geometry.
 
-架构 (见 docs/scheme2_rl_design.md):
-  - 状态: 远端配对块小图 (节点=茎块, 边=块间拓扑距离)
-  - 策略网络: 3 层 GNN + 动作头 (π_block, π_dir, π_step)
-  - 动作: (块索引, 6 方向, 3 步长) 离散
-  - reward: Σ exp(-|d_C1'C1' - 10.5| / 2) over 远端配对
-  - MCTS: policy 先验 + rollout 跑短 CG 精修评估
+Architecture (see docs/scheme2_rl_design.md):
+  - State: a small graph of far/long-range pairing blocks (nodes = stem blocks,
+    edges = inter-block topological distance)
+  - Policy network: 3-layer GNN + action heads (pi_block, pi_dir, pi_step)
+  - Actions: discrete (block index, 6 directions, 3 step sizes)
+  - Reward: sum over far/long-range pairs of exp(-|d_C1'C1' - 10.5| / 2)
+  - MCTS: policy prior + rollout running a short CG refinement to evaluate
 
-训练: PPO + GAE (training/ 单独脚本)。
-推理: 加载权重, MCTS 搜索输出优化后 P 坐标。
+Training: PPO + GAE (separate training/ scripts).
+Inference: load the weights; MCTS search outputs the optimized P coordinates.
 """
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-# torch 惰性导入 (rl_optimizer 可能在不训练时被 import, 避免强依赖)
+# Lazy torch import (rl_optimizer may be imported outside training; avoids a hard dependency)
 _torch = None
 
 
@@ -34,10 +38,10 @@ def _get_torch():
     return _torch
 
 
-# ---------- 常量 ----------
-# 动作空间 (离散)
+# ---------- Constants ----------
+# Action space (discrete)
 N_DIRECTIONS = 6   # ±x ±y ±z
-N_STEPS = 3        # 步长档: 0.5, 2.0, 5.0 Å
+N_STEPS = 3        # step-size levels: 0.5, 2.0, 5.0 A
 STEP_SIZES = (0.5, 2.0, 5.0)
 DIRECTIONS = np.array([
     [1, 0, 0], [-1, 0, 0],
@@ -45,31 +49,32 @@ DIRECTIONS = np.array([
     [0, 0, 1], [0, 0, -1],
 ], dtype=np.float32)
 
-WC_TARGET_DIST = 10.5  # Å, Watson-Crick C1'-C1' 目标距离
+WC_TARGET_DIST = 10.5  # A, Watson-Crick C1'-C1' target distance
 
 
-# ---------- 状态表示 ----------
+# ---------- State representation ----------
 @dataclass
 class BlockState:
-    """一个远端配对茎块的状态。"""
-    block_idx: int                 # 块在远端列表中的索引
-    residues_i: List[int]          # 块内 i 侧残基索引
-    residues_j: List[int]          # 块内 j 侧残基索引
-    centroid_i: np.ndarray         # i 侧质心 P 坐标 (3,)
-    centroid_j: np.ndarray         # j 侧质心 P 坐标 (3,)
-    current_deviation: float       # 当前 C1'-C1' 平均偏差 (Å)
+    """State of a single far/long-range pairing stem block."""
+    block_idx: int                 # index of this block in the far-block list
+    residues_i: List[int]          # residue indices on the i side of the block
+    residues_j: List[int]          # residue indices on the j side of the block
+    centroid_i: np.ndarray         # i-side centroid P coordinates (3,)
+    centroid_j: np.ndarray         # j-side centroid P coordinates (3,)
+    current_deviation: float       # current mean C1'-C1' deviation (A)
 
 
 @dataclass
 class RLOptimizerState:
-    """RL 优化的完整状态。"""
-    p_coords: np.ndarray            # (L, 3) CG P 坐标
+    """Complete state for RL optimization."""
+    p_coords: np.ndarray            # (L, 3) CG P coordinates
     sequence: str
-    far_blocks: List[BlockState]   # 远端配对块列表
-    far_pairs: List[Tuple[int, int]]  # 远端配对 (i, j) 列表
-    # 块间邻接 (稀疏): [(block_a, block_b, topo_dist), ...]
+    far_blocks: List[BlockState]   # far/long-range pairing blocks
+    far_pairs: List[Tuple[int, int]]  # far/long-range pairs (i, j)
+    # Inter-block adjacency (sparse): [(block_a, block_b, topo_dist), ...]
     block_edges: List[Tuple[int, int, float]] = field(default_factory=list)
-    # coding mask: 透传给下游 amber 精修, coding 区残基钉死
+    # coding mask: passed through to the downstream amber refinement, which pins
+    # the residues of coding regions
     coding_mask: Optional[np.ndarray] = None  # shape (L,) bool, True=coding
 
 
@@ -80,21 +85,22 @@ def build_rl_state(
     stem_blocks: List[List[Tuple[int, int]]],
     coding_mask: Optional[np.ndarray] = None,
 ) -> RLOptimizerState:
-    """从 CG P 坐标 + 远端配对 + 茎块构建 RL 状态。
+    """Build an RL state from CG P coordinates + far/long-range pairs + stem blocks.
 
     Args:
-        p_coords: (L, 3) CG 求解输出的 P 坐标
-        sequence: ACGU 字符串
-        far_pairs: 远端配对 [(i, j), ...] (来自 pair_graph.far_end_pairs)
-        stem_blocks: 茎块 [[(i, j), ...], ...] (来自 pair_graph.extract_stem_blocks)
-        coding_mask: 可选 coding 标注 (来自 pair_graph.parse_case_annotation)
-            透传给下游, 不影响 RL 动作空间 (RL 全序列可动)
+        p_coords: (L, 3) P coordinates output by the CG solver
+        sequence: ACGU string
+        far_pairs: far/long-range pairs [(i, j), ...] (from pair_graph.far_end_pairs)
+        stem_blocks: stem blocks [[(i, j), ...], ...] (from pair_graph.extract_stem_blocks)
+        coding_mask: optional coding annotation (from pair_graph.parse_case_annotation);
+            passed through downstream and does not constrain the RL action space
+            (RL may move the whole sequence)
     """
-    # 筛出远端茎块 (块内配对都在 far_pairs 里)
+    # Keep only far/long-range stem blocks (blocks whose pairs are all in far_pairs)
     far_set = set((min(i, j), max(i, j)) for i, j in far_pairs)
     far_blocks: List[BlockState] = []
     for bidx, block in enumerate(stem_blocks):
-        # 块内配对是否都在远端集
+        # Are all pairs in this block in the far set?
         in_far = all((min(i, j), max(i, j)) in far_set for i, j in block)
         if not in_far:
             continue
@@ -102,7 +108,8 @@ def build_rl_state(
         res_j = [j for _, j in block]
         ci = p_coords[res_i].mean(axis=0)
         cj = p_coords[res_j].mean(axis=0)
-        # 当前偏差: 块内配对 C1'-C1' 均值 (用 P 近似, CG 粒度无 C1')
+        # Current deviation: mean C1'-C1' over the block pairs (approximated with P;
+        # C1' is not available at CG resolution)
         dev = float(np.mean([
             np.linalg.norm(p_coords[i] - p_coords[j]) for i, j in block
         ]))
@@ -111,11 +118,11 @@ def build_rl_state(
             centroid_i=ci, centroid_j=cj, current_deviation=dev,
         ))
 
-    # 块间邻接: 拓扑距离 < 100 的块对 (稀疏边)
+    # Inter-block adjacency: block pairs with topological distance < 100 (sparse edges)
     block_edges: List[Tuple[int, int, float]] = []
     for a in range(len(far_blocks)):
         for b in range(a + 1, len(far_blocks)):
-            # 块间距离 = 两块质心最近距离 (近似)
+            # Inter-block distance = nearest distance between the two centroids (approximation)
             d_ij = np.linalg.norm(far_blocks[a].centroid_i - far_blocks[b].centroid_j)
             d_ji = np.linalg.norm(far_blocks[a].centroid_j - far_blocks[b].centroid_i)
             d = min(d_ij, d_ji)
@@ -130,14 +137,17 @@ def build_rl_state(
 
 
 # ---------- Reward ----------
-# 正则系数 (防作弊: 拉拢远端配对时不能撞原子/扭曲骨架)
-# 实测 λ2=0.1 太强 (单残基平移破坏邻居骨架键, R_distort 暴增压过 R_pair,
-# MCTS 不敢动)。降到 0.01 让 R_pair 主导, 正则只在严重扭曲时介入。
-LAMBDA_CLASH = 0.05   # 非键 P-P 太近惩罚
-LAMBDA_DISTORT = 0.01  # 相邻 P-P 偏离 5.9Å 惩罚 (弱, 不压过 R_pair)
-CLASH_THRESH = 3.0    # P-P < 此值算位障 (CG 粒度近似)
-BOND_LEN_CG = 5.9     # CG 相邻 P-P 目标距离
-BOND_TOL = 1.0        # 相邻 P-P 偏离 5.9±1.0 算扭曲
+# Regularization coefficients (anti-cheating: pulling far/long-range pairs
+# together must not clash atoms or distort the backbone)
+# Measured: lambda2=0.1 was too strong (translating a single residue broke the
+# neighbor backbone bonds, R_distort blew up past R_pair, and MCTS would not
+# move). Lowered to 0.01 so R_pair dominates; the regularizer only intervenes
+# under severe distortion.
+LAMBDA_CLASH = 0.05   # penalty for non-bonded P-P too close
+LAMBDA_DISTORT = 0.01  # penalty for neighbor P-P deviating from 5.9 A (weak, does not overwhelm R_pair)
+CLASH_THRESH = 3.0    # P-P below this counts as a clash (approximation at CG resolution)
+BOND_LEN_CG = 5.9     # target CG neighbor P-P distance
+BOND_TOL = 1.0        # neighbor P-P deviating from 5.9 +/- 1.0 counts as distorted
 
 
 def compute_reward(
@@ -150,12 +160,13 @@ def compute_reward(
     trirnasp_scale: float = 1.0,
     progress: float = None,
 ) -> float:
-    """远端配对 reward + 正则 (防作弊) + 可选 TriRNASP 统计势 (向量化版)。
+    """Far/long-range-pair reward + regularization (anti-cheating) + optional TriRNASP statistical potential (vectorized).
 
-    R = w_pair·R_pair - λ1·R_clash - λ2·R_distort + w_trirnasp·(-trirnasp_score)
+    R = w_pair*R_pair - lambda1*R_clash - lambda2*R_distort + w_trirnasp*(-trirnasp_score)
 
-    向量化: R_clash 用 numpy 广播代替 Python 双循环, R_distort 全向量化,
-    R_pair 全向量化。L=2003 时 ~50× 快于旧版 Python 循环。
+    Vectorized: R_clash uses numpy broadcasting instead of Python double loops,
+    R_distort is fully vectorized, and R_pair is fully vectorized. At L=2003 this
+    is ~50x faster than the old Python loop version.
     """
     L = len(p_coords)
     if not far_pairs:
@@ -163,7 +174,7 @@ def compute_reward(
 
     far_pairs_arr = np.asarray(far_pairs, dtype=np.int64)  # (P, 2)
 
-    # ── R_pair (向量化) ──
+    # -- R_pair (vectorized) --
     pi, pj = far_pairs_arr[:, 0], far_pairs_arr[:, 1]
     d_pair = np.linalg.norm(p_coords[pi] - p_coords[pj], axis=1)
     dev_pair = np.abs(d_pair - WC_TARGET_DIST)
@@ -172,19 +183,19 @@ def compute_reward(
     if not use_regularization or L < 3:
         return r_pair
 
-    # ── R_clash (向量化: 只检查远端残基, 排除邻居+配对对) ──
+    # -- R_clash (vectorized: only check far/long-range residues, excluding neighbors and paired pairs) --
     r_clash = 0.0
     far_res = np.unique(far_pairs_arr.ravel())
     if len(far_res) > 0:
-        # 距离矩阵: far_res × 全序列 (仅需要的行)
+        # Distance matrix: far_res x full sequence (only the needed rows)
         d_mat = np.linalg.norm(p_coords[far_res, None] - p_coords[None, :], axis=2)  # (n_far, L)
-        # 掩码: 排除自身、邻居 (±1)、已配对对
+        # Mask: exclude self, neighbors (+/-1), and already-paired pairs
         mask = np.ones_like(d_mat, dtype=bool)
         for idx, r in enumerate(far_res):
-            mask[idx, r] = False                       # 自身
-            if r > 0: mask[idx, r - 1] = False        # 左邻
-            if r < L - 1: mask[idx, r + 1] = False    # 右邻
-        # 排除已配对对 (i-j 本来就近)
+            mask[idx, r] = False                       # self
+            if r > 0: mask[idx, r - 1] = False        # left neighbor
+            if r < L - 1: mask[idx, r + 1] = False    # right neighbor
+        # Exclude already-paired pairs (i-j are already close by design)
         for a, b in far_pairs:
             ia = np.searchsorted(far_res, a)
             ib = np.searchsorted(far_res, b)
@@ -192,21 +203,21 @@ def compute_reward(
                 mask[ia, b] = False
             if ib < len(far_res) and far_res[ib] == b:
                 mask[ib, a] = False
-        # clashing: d < CLASH_THRESH 且未被掩码
+        # clashing: d < CLASH_THRESH and not masked out
         clash_val = np.where(mask, np.maximum(CLASH_THRESH - d_mat, 0.0), 0.0)
         r_clash = float(clash_val.sum())
 
-    # ── R_distort (向量化) ──
+    # -- R_distort (vectorized) --
     d_adj = np.linalg.norm(p_coords[1:] - p_coords[:-1], axis=1)  # (L-1,)
     dev_bond = np.abs(d_adj - BOND_LEN_CG)
     r_distort = float(np.sum(np.maximum(dev_bond - BOND_TOL, 0.0)))
-    # BSJ 闭合
+    # BSJ closure
     d_bsj = np.linalg.norm(p_coords[0] - p_coords[-1])
     dev_bsj = abs(d_bsj - BOND_LEN_CG)
     if dev_bsj > BOND_TOL:
         r_distort += dev_bsj - BOND_TOL
 
-    # ── R_trirnasp (保持不变) ──
+    # -- R_trirnasp (unchanged) --
     r_trirnasp = 0.0
     if trirnasp_potential is not None and sequence is not None:
         try:
@@ -221,7 +232,7 @@ def compute_reward(
         except Exception:
             pass
 
-    # ── 课程学习权重 ──
+    # -- Curriculum-learning weights --
     if progress is not None:
         w_pair = 1.0 - 0.5 * progress
         w_trirnasp = trirnasp_scale * progress
@@ -234,78 +245,82 @@ def compute_reward(
     return float(w_pair * r_pair - LAMBDA_CLASH * r_clash - LAMBDA_DISTORT * r_distort + scaled_trirnasp)
 
 
-# ---------- 策略网络 ----------
+# ---------- Policy network ----------
 class PolicyNetwork:
-    """块 GNN 策略网络 (torch, 手写消息传递, 不依赖 torch_geometric)。
+    """Block GNN policy network (torch, hand-written message passing, no torch_geometric dependency).
 
-    输入: RLOptimizerState
-    输出: π_block (softmax over 块), π_dir (6), π_step (3)
+    Input: RLOptimizerState
+    Output: pi_block (softmax over blocks), pi_dir (6), pi_step (3)
 
-    架构: 块节点特征 -> node_enc -> K 层消息传递 (block_edges 邻接) ->
-          块嵌入 -> 3 个动作头
+    Architecture: block-node features -> node_enc -> K message-passing layers
+    (block_edges adjacency) -> block embeddings -> 3 action heads
 
-    消息传递 (GCN 式): h_i <- ReLU(W·h_i + W·Σ_{j∈N(i)} h_j / |N(i)|)
-    边来自 state.block_edges (块间质心距<100 的稀疏邻接)。
+    Message passing (GCN-style): h_i <- ReLU(W*h_i + W*sum_{j in N(i)} h_j / |N(i)|)
+    Edges come from state.block_edges (sparse adjacency of blocks whose centroid
+    distance is < 100).
     """
     def __init__(self, hidden_dim: int = 128, n_mp_layers: int = 3):
         torch = _get_torch()
         self.hidden_dim = hidden_dim
         self.n_mp_layers = n_mp_layers
-        # 节点特征维度: [block_len, centroid_i(3), centroid_j(3), deviation,
-        #                mean_pos(3)] = 11
+        # Node feature dimension: [block_len, centroid_i(3), centroid_j(3),
+        #                          deviation, mean_pos(3)] = 11
         self.node_feat_dim = 11
-        # 节点编码 (特征 -> hidden)
+        # Node encoder (features -> hidden)
         self.node_enc = torch.nn.Sequential(
             torch.nn.Linear(self.node_feat_dim, hidden_dim),
             torch.nn.ReLU(),
             torch.nn.Linear(hidden_dim, hidden_dim),
             torch.nn.ReLU(),
         )
-        # 消息传递层 (每层一个 Linear, 残差连接)
+        # Message-passing layers (one Linear per layer, with residual connections)
         self.mp_layers = torch.nn.ModuleList([
             torch.nn.Linear(hidden_dim, hidden_dim) for _ in range(n_mp_layers)
         ])
-        # 动作头
-        self.head_block = torch.nn.Linear(hidden_dim, 1)  # 每块打分, softmax over 块
+        # Action heads
+        self.head_block = torch.nn.Linear(hidden_dim, 1)  # scores each block; softmax over blocks
         self.head_dir = torch.nn.Linear(hidden_dim, N_DIRECTIONS)
         self.head_step = torch.nn.Linear(hidden_dim, N_STEPS)
-        # value 头 (PPO GAE 用, 输出标量 V(s))。从块均值嵌入出, 代表整图状态价值。
+        # Value head (used by PPO/GAE; outputs the scalar V(s)). It reads from the
+        # mean block embedding and represents the whole-graph state value.
         self.head_value = torch.nn.Linear(hidden_dim, 1)
         self.softmax = torch.nn.Softmax(dim=-1)
 
     def _message_passing(self, h, edge_index, edge_weight):
-        """K 层消息传递。h: (n, hidden), edge_index: (2, E) tensor。
+        """K message-passing layers. h: (n, hidden); edge_index: (2, E) tensor.
 
-        GCN 式归一化聚合, 边权 = 1/(1+d) (块间质心越近影响越大)。
-        无邻居的孤立节点只过自身变换 (保留信息)。
+        GCN-style normalized aggregation with edge weight = 1/(1+d) (the closer
+        two block centroids, the stronger the influence). An isolated node with
+        no neighbors just passes through its own transform (information kept).
         """
         torch = _get_torch()
         n = h.shape[0]
         for layer in self.mp_layers:
-            # 聚合邻居 (scatter_add, 边权加权)
+            # Aggregate neighbors (scatter_add, weighted by edge weight)
             if edge_index is not None and edge_index.shape[1] > 0:
                 src, dst = edge_index[0], edge_index[1]
-                # 每个目标节点收到的加权消息
+                # Weighted messages received by each target node
                 agg = torch.zeros_like(h)
                 msg = h[src] * edge_weight.unsqueeze(-1)
                 agg = agg.index_add(0, dst, msg)
-                # 按度归一化 (加 1 防零, 自身算一个邻居)
+                # Normalize by degree (add 1 to avoid dividing by zero; self counts as one neighbor)
                 deg = torch.zeros(n, dtype=h.dtype, device=h.device)
                 deg = deg.index_add(0, dst, edge_weight)
                 agg = agg / (deg + 1.0).unsqueeze(-1)
                 h_new = torch.relu(layer(h + agg))
             else:
-                # 无边: 只过自身变换 (退化为 MLP, 保留旧路径)
+                # No edges: only pass through the node's own transform (degrades to an MLP; keeps the old path)
                 h_new = torch.relu(layer(h))
-            h = h_new + h  # 残差
+            h = h_new + h  # residual connection
         return h
 
     @staticmethod
     def _edges_to_tensor(state: RLOptimizerState):
-        """把 state.block_edges 转成 (edge_index, edge_weight) tensor。
+        """Convert state.block_edges into (edge_index, edge_weight) tensors.
 
-        block_edges: [(a, b, topo_dist), ...] (无向, 存一份, 消息传递时双向)
-        返回 edge_index (2, 2E) 双向, edge_weight (2E,) = 1/(1+d)。
+        block_edges: [(a, b, topo_dist), ...] (undirected, stored once; message
+        passing uses both directions). Returns a bidirectional edge_index
+        (2, 2E) and edge_weight (2E,) = 1/(1+d).
         """
         torch = _get_torch()
         if not state.block_edges:
@@ -321,7 +336,7 @@ class PolicyNetwork:
         return edge_index, edge_weight
 
     def _embed(self, state: RLOptimizerState):
-        """共享嵌入: 状态 -> 块嵌入 h (n_blocks, hidden)。forward/value 共用。"""
+        """Shared embedding: state -> block embeddings h (n_blocks, hidden). Shared by forward/value."""
         torch = _get_torch()
         if not state.far_blocks:
             return None
@@ -341,30 +356,30 @@ class PolicyNetwork:
         return h
 
     def forward(self, state: RLOptimizerState, *, return_value: bool = False):
-        """返回 (π_block, π_dir, π_step[, V])。
+        """Return (pi_block, pi_dir, pi_step[, V]).
 
-        return_value=False (推理默认): 三元组, MCTS 用。
-        return_value=True (训练用): 四元组, 多一个标量 V(s)。
+        return_value=False (inference default): the triple, used by MCTS.
+        return_value=True (training): the quadruple, with an extra scalar V(s).
         """
         torch = _get_torch()
         h = self._embed(state)
         if h is None:
             return (None, None, None, None) if return_value else (None, None, None)
-        # π_block: 每块打分后 softmax
+        # pi_block: softmax over the per-block scores
         block_scores = self.head_block(h).squeeze(-1)  # (n_blocks,)
         pi_block = self.softmax(block_scores)
-        # π_dir / π_step: 用平均嵌入 (块选择独立于方向/步长)
+        # pi_dir / pi_step: use the mean embedding (block choice is independent of direction/step)
         h_mean = h.mean(dim=0, keepdim=True)
         pi_dir = self.softmax(self.head_dir(h_mean)).squeeze(0)
         pi_step = self.softmax(self.head_step(h_mean)).squeeze(0)
         if return_value:
-            # V(s): 从均值嵌入出, 代表整图价值
-            v = self.head_value(h_mean).squeeze(0).squeeze(-1)  # 标量
+            # V(s): read from the mean embedding; represents the whole-graph value
+            v = self.head_value(h_mean).squeeze(0).squeeze(-1)  # scalar
             return pi_block, pi_dir, pi_step, v
         return pi_block, pi_dir, pi_step
 
     def value(self, state: RLOptimizerState):
-        """单独算 V(s) (GAE bootstrap 用)。"""
+        """Compute V(s) on its own (for the GAE bootstrap)."""
         torch = _get_torch()
         h = self._embed(state)
         if h is None:
@@ -402,7 +417,8 @@ class PolicyNetwork:
         sd = torch.load(path, map_location="cpu", weights_only=False)
         self.hidden_dim = sd["hidden_dim"]
         self.n_mp_layers = sd["n_mp_layers"]
-        # 兼容旧权重 (无 mp_layers): 重建空 ModuleList, 消息传递退化为自身变换
+        # Compatible with old weights (no mp_layers): rebuild an empty ModuleList;
+        # message passing then degrades to the identity transform
         if "mp_layers" in sd:
             self.mp_layers = torch.nn.ModuleList([
                 torch.nn.Linear(self.hidden_dim, self.hidden_dim)
@@ -413,25 +429,27 @@ class PolicyNetwork:
         self.head_block.load_state_dict(sd["head_block"])
         self.head_dir.load_state_dict(sd["head_dir"])
         self.head_step.load_state_dict(sd["head_step"])
-        # 兼容旧权重 (无 head_value): 随机初始化, 训练前不影响推理
+        # Compatible with old weights (no head_value): leave it randomly
+        # initialized; it does not affect inference before training
         if "head_value" in sd:
             self.head_value.load_state_dict(sd["head_value"])
 
 
-# ---------- 动作执行 ----------
+# ---------- Action execution ----------
 def apply_action(
     state: RLOptimizerState,
     block_idx: int,
     dir_idx: int,
     step_idx: int,
 ) -> Tuple[np.ndarray, int]:
-    """执行动作: 平移指定块的 i 侧残基 (j 侧不动), 改变 i-j 相对距离。
+    """Execute an action: translate the i-side residues of the given block (the j side stays put), changing the i-j relative distance.
 
-    只动 i 侧: 配对距离 = |P[i] - P[j]|, 移动 i 会改变这个距离。
-    旧版 i/j 同向平移, 相对距离不变 (bug, 已修)。
+    Only the i side moves: pair distance = |P[i] - P[j]|, so moving i changes it.
+    The old version translated i and j in the same direction, leaving the
+    relative distance unchanged (a bug, now fixed).
 
     Returns:
-        (new_p_coords, block_idx) — block_idx 供 _rebuild_blocks 增量更新。
+        (new_p_coords, block_idx) - block_idx lets _rebuild_blocks update incrementally.
     """
     new_p = state.p_coords.copy()
     b = state.far_blocks[block_idx]
@@ -446,7 +464,7 @@ def apply_action(
 # ---------- MCTS ----------
 @dataclass
 class MCTSNode:
-    """MCTS 搜索节点。"""
+    """An MCTS search node."""
     p_coords: np.ndarray
     reward: float
     parent: Optional["MCTSNode"] = None
@@ -454,18 +472,23 @@ class MCTSNode:
     visits: int = 0
     value: float = 0.0
     action_taken: Optional[Tuple[int, int, int]] = None
-    _far_blocks: Optional[List] = None  # 缓存块状态, 避免重复重建
+    _far_blocks: Optional[List] = None  # cached block states, to avoid rebuilding
 
 
 class MCTS:
     """Monte Carlo Tree Search with policy prior.
 
-    策略网络给先验概率, Simulation 阶段可选:
-      - use_rollout=False (先验版): 叶节点估值直接用当前 reward (快, 但短视)
-      - use_rollout=True  (默认): 叶节点后再走 rollout_depth 步启发式 rollout,
-        用终点 reward 估值 (多看几步, 评估更准但慢 rollout_depth 倍)
-    rollout 用启发式 (偏差大的块优先, 朝 j 侧方向拉), 不用 policy (policy 是
-    待训练对象, 训练前不能用来评估自己, 否则 reward 信号有偏)。
+    The policy network provides the prior probabilities; the Simulation stage is
+    optional:
+      - use_rollout=False (prior-only): value a leaf directly from its current
+        reward (fast, but short-sighted)
+      - use_rollout=True (default): after reaching a leaf, run rollout_depth
+        steps of heuristic rollout and value it by the terminal reward (looks
+        further ahead; more accurate but rollout_depth times slower)
+    Rollout uses heuristics (blocks with large deviation first, pulled toward
+    the j side), not the policy: the policy is the object being trained and
+    cannot be used to evaluate itself before training, or the reward signal
+    would be biased.
     """
     def __init__(
         self,
@@ -486,11 +509,12 @@ class MCTS:
         state: RLOptimizerState,
         far_pairs: List[Tuple[int, int]],
     ) -> Tuple[int, int, int]:
-        """启发式选动作 (rollout 和无策略 fallback 共用)。
+        """Pick an action heuristically (shared by rollout and the no-policy fallback).
 
-        块: 偏差大的块概率高 (softmax over deviation);
-        方向: 块 i 侧朝 j 侧的向量量化到 6 方向, 70% 选它 30% 随机;
-        步长: 偏差大用大步, 偏小用小步。
+        Block: blocks with larger deviation are more likely (softmax over deviation);
+        Direction: the vector from the block's i side toward its j side is
+            quantized to the 6 directions; choose it 70% of the time, random 30%;
+        Step: large deviation uses a big step, small deviation a small step.
         """
         n_blocks = len(state.far_blocks)
         deviations = [abs(b.current_deviation - WC_TARGET_DIST) for b in state.far_blocks]
@@ -522,12 +546,13 @@ class MCTS:
         far_pairs: List[Tuple[int, int]],
         progress: float = None,
     ) -> float:
-        """从叶节点启发式走 rollout_depth 步, 返回终点 reward。
+        """Walk rollout_depth heuristic steps from a leaf node and return the terminal reward.
 
-        纯 numpy (不建树), 速度快。中间状态用 _rebuild_blocks 增量更新。
+        Pure numpy (no tree built), so it is fast. Intermediate states are updated
+        incrementally with _rebuild_blocks.
         """
         p = state.p_coords.copy()
-        cur_blocks = _rebuild_blocks(state, p)  # 首次全量
+        cur_blocks = _rebuild_blocks(state, p)  # full rebuild on the first call
         for _ in range(self.rollout_depth):
             tmp = RLOptimizerState(
                 p_coords=p, sequence=state.sequence,
@@ -546,15 +571,15 @@ class MCTS:
         far_pairs: List[Tuple[int, int]],
         progress: float = None,
     ) -> np.ndarray:
-        """MCTS 搜索, 返回 reward 最高的 P 坐标。
+        """Run MCTS search and return the P coordinates with the highest reward.
 
-        Selection 用 UCB1 (含 policy prior), Expansion 每次加一个子节点,
-        Simulation 用当前 reward 直接评估 (no rollout, 先验版),
-        Backprop 沿父链更新 visit/value。
+        Selection uses UCB1 (with the policy prior), Expansion adds one child per
+        iteration, Simulation scores the current reward directly (no rollout,
+        prior-only version), and Backprop updates visit/value up the parent chain.
 
         Args:
-            progress: 课程学习进度 [0,1], 传递给 compute_reward。
-                     None 表示无课程 (向后兼容)。
+            progress: curriculum-learning progress [0, 1], forwarded to compute_reward.
+                None means no curriculum (backward compatible).
         """
         root_reward = compute_reward(state.p_coords, far_pairs, progress=progress)
         root = MCTSNode(p_coords=state.p_coords, reward=root_reward)
@@ -565,10 +590,10 @@ class MCTS:
             return state.p_coords
 
         for sim in range(self.n_simulations):
-            # --- Selection: 沿树下行, UCB1 选子节点 ---
+            # --- Selection: descend the tree, choosing children by UCB1 ---
             node = root
             cur_p = state.p_coords.copy()
-            cur_blocks = state.far_blocks  # 首次用原始块
+            cur_blocks = state.far_blocks  # first iteration uses the original blocks
             while node.children:
                 # UCB1 = value/visits + c_puct * prior * sqrt(ln(parent_visits)/visits)
                 best_child = None
@@ -589,10 +614,10 @@ class MCTS:
                     break
                 node = best_child
                 cur_p = best_child.p_coords
-                # 节点已存 far_blocks (创建时已算好), 无需重建
+                # The node already stores far_blocks (computed at creation); no rebuild needed
                 cur_blocks = getattr(node, '_far_blocks', state.far_blocks)
 
-            # --- Expansion: 从 node 展开一个新子节点 (policy prior 选动作) ---
+            # --- Expansion: grow one new child from node (action chosen by the policy prior) ---
             tmp_state = RLOptimizerState(
                 p_coords=cur_p, sequence=state.sequence,
                 far_blocks=cur_blocks,
@@ -610,14 +635,14 @@ class MCTS:
                 bidx, didx, sidx = self._heuristic_action(tmp_state, far_pairs)
 
             new_p, changed_blk = apply_action(tmp_state, bidx, didx, sidx)
-            # 增量重建: 只重算被修改的块
+            # Incremental rebuild: only recompute the modified block
             new_blocks = _rebuild_blocks(tmp_state, new_p, changed_block=changed_blk)
 
-            # 课程学习: 每次 simulation 的 progress 线性递增
+            # Curriculum learning: progress increases linearly across simulations
             sim_progress = (sim + 1) / self.n_simulations if progress is not None else None
             r_exp = compute_reward(new_p, far_pairs, progress=sim_progress)
 
-            # --- Simulation: 叶节点估值 (可选 rollout 多看几步) ---
+            # --- Simulation: value the leaf (optional rollout to look a few steps ahead) ---
             if self.use_rollout:
                 roll_state = RLOptimizerState(
                     p_coords=new_p, sequence=state.sequence,
@@ -633,14 +658,15 @@ class MCTS:
                              _far_blocks=new_blocks)
             node.children.append(child)
 
-            # --- Backprop: 沿父链更新 visit/value ---
+            # --- Backprop: update visit/value up the parent chain ---
             cur = child
             while cur is not None:
                 cur.visits += 1
                 cur.value += r
                 cur = cur.parent
 
-            # best 用即时 reward (不卷入 rollout 估值, 避免 rollout 随机性污染最优解)
+            # best uses the immediate reward (kept out of the rollout estimate, so
+            # rollout randomness cannot pollute the best solution)
             if r_exp > best.reward:
                 best = MCTSNode(p_coords=new_p, reward=r_exp,
                                 parent=None, action_taken=(bidx, didx, sidx))
@@ -650,16 +676,16 @@ class MCTS:
 
 def _rebuild_blocks(state: RLOptimizerState, new_p: np.ndarray,
                      changed_block: int = -1) -> List[BlockState]:
-    """用新 P 坐标重建块状态 (增量更新: 只重算 changed_block, 其余复用旧质心/偏差)。
+    """Rebuild the block states from the new P coordinates (incremental: only recompute changed_block, reuse the old centroids/deviations otherwise).
 
-    changed_block: 被 apply_action 修改的块索引, -1 = 全量重建 (首次)。
+    changed_block: the block index modified by apply_action; -1 = full rebuild (first call).
     """
     new_blocks = []
     for idx, b in enumerate(state.far_blocks):
         if idx == changed_block or changed_block == -1:
             ci = new_p[b.residues_i].mean(axis=0)
             cj = new_p[b.residues_j].mean(axis=0)
-            # 向量化计算偏差
+            # Compute the deviation vectorized
             ri_arr = np.asarray(b.residues_i)
             rj_arr = np.asarray(b.residues_j)
             dev = float(np.mean(np.linalg.norm(new_p[ri_arr] - new_p[rj_arr], axis=1)))
@@ -668,12 +694,12 @@ def _rebuild_blocks(state: RLOptimizerState, new_p: np.ndarray,
                 centroid_i=ci, centroid_j=cj, current_deviation=dev,
             ))
         else:
-            # 复用旧块 (坐标没变)
+            # Reuse the old block (coordinates unchanged)
             new_blocks.append(b)
     return new_blocks
 
 
-# ---------- 端到端入口 ----------
+# ---------- End-to-end entry point ----------
 def optimize_far_pairs(
     p_coords: np.ndarray,
     sequence: str,
@@ -685,24 +711,26 @@ def optimize_far_pairs(
     coding_mask: Optional[np.ndarray] = None,
     progress: float = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict]:
-    """端到端: CG P 坐标 + 远端配对 -> RL 优化后 P 坐标 + CG 原坐标。
+    """End to end: CG P coordinates + far/long-range pairs -> RL-optimized P coordinates + original CG coordinates.
 
     Args:
-        p_coords: (L, 3) CG 求解输出
-        sequence: ACGU 字符串
-        far_pairs: 远端配对 [(i, j), ...]
-        stem_blocks: 茎块 [[(i, j), ...], ...]
-        policy_path: 策略网络权重路径 (None 用随机策略, 训练前 baseline)
-        n_simulations: MCTS 模拟次数
-        coding_mask: 可选 coding 标注 (L,) bool。透传进 state, 并在输出
-            里一并返回, 供下游 amber 精修时钉死 coding 区残基。
-        progress: 课程学习进度 [0,1]。None=无课程 (向后兼容),
-                 传入时 MCTS 内部线性插值 (0→1 per simulation)。
+        p_coords: (L, 3) CG solver output
+        sequence: ACGU string
+        far_pairs: far/long-range pairs [(i, j), ...]
+        stem_blocks: stem blocks [[(i, j), ...], ...]
+        policy_path: path to policy-network weights (None = random policy, the pre-training baseline)
+        n_simulations: number of MCTS simulations
+        coding_mask: optional coding annotation (L,) bool. Passed into the state
+            and also returned in the output, so the downstream amber refinement
+            can pin the coding-region residues.
+        progress: curriculum-learning progress [0, 1]. None = no curriculum
+            (backward compatible); when given, MCTS interpolates it linearly
+            (0->1 per simulation).
 
     Returns:
         (optimized_p, cg_coords, info)
-        optimized_p: (L, 3) RL 优化后 P 坐标
-        cg_coords: (L, 3) CG 原坐标副本 (给下游 amber 钉死用)
+        optimized_p: (L, 3) RL-optimized P coordinates
+        cg_coords: (L, 3) copy of the original CG coordinates (for downstream amber pinning)
         info: {reward_before, reward_after, improvement, n_blocks,
                n_far_pairs, n_simulations, policy_loaded, coding_mask}
     """
@@ -711,7 +739,8 @@ def optimize_far_pairs(
         coding_mask=coding_mask,
     )
     reward_before = compute_reward(p_coords, far_pairs)
-    # 保存 CG 原坐标副本 (apply_action 会改 p_coords 引用指向的数组, 这里先 copy)
+    # Keep a copy of the original CG coordinates (apply_action mutates the array
+    # that p_coords references, so copy it first)
     cg_coords = p_coords.copy()
 
     policy = None
@@ -720,7 +749,7 @@ def optimize_far_pairs(
             policy = PolicyNetwork()
             policy.load(policy_path)
         except Exception as exc:
-            print(f"[rl_optimizer] 策略权重加载失败, 用随机策略: {exc!r}")
+            print(f"[rl_optimizer] failed to load policy weights; using a random policy: {exc!r}")
             policy = None
 
     mcts = MCTS(policy=policy, n_simulations=n_simulations)
@@ -735,15 +764,15 @@ def optimize_far_pairs(
         "n_far_pairs": len(far_pairs),
         "n_simulations": n_simulations,
         "policy_loaded": policy is not None,
-        "coding_mask": coding_mask,  # 透传给下游
+        "coding_mask": coding_mask,  # passed through to the downstream refinement
     }
     return optimized_p, cg_coords, info
 
 
-# ── Stub 类: isrnaclong.py 导入但从未实现 ──
+# -- Stub classes: imported by isrnaclong.py but never implemented --
 
 class ReplayBuffer:
-    """经验回放缓冲区 (简化版, 固定容量)."""
+    """Experience replay buffer (simplified, fixed capacity)."""
 
     def __init__(self, capacity=10000):
         from collections import deque
@@ -768,7 +797,7 @@ class ReplayBuffer:
 
 
 class OnlineLearner:
-    """在线学习器: PPO 更新策略网络."""
+    """Online learner: PPO updates for the policy network."""
 
     def __init__(self, policy, buffer, lr=3e-4, gamma=0.99, clip=0.2):
         self.policy = policy
@@ -784,11 +813,11 @@ class OnlineLearner:
                 pass
 
     def update(self, batch_size=32):
-        """从 buffer 采样并做一步 PPO 更新."""
+        """Sample from the buffer and take one PPO update step."""
         if len(self.buffer) < batch_size or self.optimizer is None:
             return 0.0
         states, actions, rewards, next_states, dones = self.buffer.sample(batch_size)
-        # 简化 PPO: 直接 policy gradient (无 GAE)
+        # Simplified PPO: direct policy gradient (no GAE)
         try:
             import torch
             self.policy.train()
@@ -802,7 +831,7 @@ class OnlineLearner:
                 + torch.nn.functional.log_softmax(dir_logits, dim=-1)
                 + torch.nn.functional.log_softmax(step_logits, dim=-1)
             )
-            # 简化: 用 reward 加权 log prob
+            # Simplified: weight the log prob by the reward
             loss = -(log_probs.sum(dim=-1) * rewards_t).mean()
             self.optimizer.zero_grad()
             loss.backward()
@@ -813,7 +842,7 @@ class OnlineLearner:
 
 
 class ContinuousAssemblyPolicy:
-    """连续空间装配策略 (占位, 暂未实现完整版)."""
+    """Continuous-space assembly policy (placeholder; full version not yet implemented)."""
 
     def __init__(self, input_dim=12, hidden_dim=64, output_dim=6):
         self.input_dim = input_dim
@@ -821,31 +850,33 @@ class ContinuousAssemblyPolicy:
         self.output_dim = output_dim
 
     def predict(self, state):
-        """返回连续动作 [offset(3), rotation(3)]."""
+        """Return a continuous action [offset(3), rotation(3)]."""
         return np.zeros(self.output_dim, dtype=np.float32)
 
 
 if __name__ == "__main__":
-    # 自测: 合成远端配对, 验证 RL 能拉拢
+    # Self-test: synthetic far/long-range pairs, checking that RL can pull them together
     np.random.seed(42)
     L = 100
-    # 构造 CG P 坐标 (环形), 远端配对 (10, 60) 故意拉远
+    # Build CG P coordinates on a ring, with the far/long-range pair (10, 60) deliberately pulled far apart
     R = L * 5.9 / (2 * np.pi)
     angles = np.linspace(0, 2 * np.pi, L, endpoint=False)
     p = np.stack([R * np.cos(angles), R * np.sin(angles), np.zeros(L)], axis=1)
-    # 远端配对 (10, 60): 环距 50, 真实 P-P 距离 ~2R*sin(25°) 偏离 10.5
+    # Far/long-range pair (10, 60): ring distance 50, real P-P distance
+    # ~2R*sin(25 deg), i.e. far from 10.5
     far_pairs = [(10, 60)]
-    # 茎块: (10, 60) 单配对 (凑成 4 连续)
+    # Stem block: (10, 60) plus further pairs (to form 4 consecutive pairs)
     stem_blocks = [[(10, 60), (11, 59), (12, 58), (13, 57)]]
-    # 但 (11,59) 等不在 far_pairs, build_rl_state 会跳过 -- 直接造远端块
-    # 简化: 让 far_pairs 包含整块
+    # But (11,59) etc. are not in far_pairs, so build_rl_state would skip them -
+    # just make far_pairs contain the whole block instead.
+    # Simplify: let far_pairs contain the whole block
     far_pairs = [(10, 60), (11, 59), (12, 58), (13, 57)]
 
     d_before = np.linalg.norm(p[10] - p[60])
-    print(f"优化前: pair(10,60) P-P = {d_before:.2f} Å (目标 ~10.5)")
+    print(f"before: pair(10,60) P-P = {d_before:.2f} A (target ~10.5)")
 
     opt_p, _cg_coords, info = optimize_far_pairs(p, "A" * L, far_pairs, [far_pairs],
                                                    n_simulations=30)
     d_after = np.linalg.norm(opt_p[10] - opt_p[60])
-    print(f"优化后: pair(10,60) P-P = {d_after:.2f} Å")
+    print(f"after: pair(10,60) P-P = {d_after:.2f} A")
     print(f"info: {info}")

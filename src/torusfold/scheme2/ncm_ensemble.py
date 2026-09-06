@@ -1,14 +1,15 @@
-"""ncm_ensemble.py — 从 ensemble 距离矩阵反推非经典配对 (NCM)。
+"""ncm_ensemble.py - infer non-canonical pairing (NCM) from ensemble distance matrices.
 
-原理: RNAbpFlow/trRNA2 的共识距离矩阵是几何证据——
-非 WC 碱基对若被两个独立模型一致预测为 ~10Å (WC 几何),
-则该位置大概率形成非经典配对 (Hoogsteen/shear 等 3D 接触).
+Idea: the consensus distance matrices of RNAbpFlow/trRNA2 are geometric evidence -
+if a non-WC base pair is consistently predicted by two independent models at
+~10A (WC geometry), that position most likely forms a non-canonical pair
+(Hoogsteen/shear or other 3D contacts).
 
-与 ncm_detector.py 的序列启发式互补:
-  - 序列启发式: 检测嵌在规则二级结构里的 tandem/miniloop
-  - 距离反推: 检测孤立的、无序列上下文的 3D 接触
+Complementary to the sequence heuristics in ncm_detector.py:
+  - sequence heuristics: detect tandem/miniloop motifs embedded in regular secondary structure
+  - distance inference: detect isolated 3D contacts with no sequence context
 
-用法 (在 Level 0 或 segmented_vfold3d chunk 合并后调用):
+Usage (call after Level 0 or after merging segmented_vfold3d chunks):
     from torusfold.scheme2.ncm_ensemble import infer_ncm_from_distances
     ncm_pairs = infer_ncm_from_distances(
         dist_consensus, sequence, wc_pairs, chunk_offset=seg_start)
@@ -19,19 +20,19 @@ from typing import List, Optional, Set, Tuple
 
 import numpy as np
 
-# WC 目标距离范围: 预测距离在此窗口内的非 WC 对视为 NCM 候选
+# WC target distance window: non-WC pairs predicted inside this window are NCM candidates
 NCM_DIST_LO = 8.0    # Å
 NCM_DIST_HI = 12.5   # Å
-# 最小序列间隔 (排除相邻残基和短环)
+# Minimum sequence separation (excludes adjacent residues and short loops)
 MIN_SEQ_GAP = 4
-# 距离置信度映射: d=10.0Å → conf 最高; 偏离越远越低
+# Distance-to-confidence mapping: d=10.0A peaks confidence; the farther the deviation, the lower
 NCM_REF_DIST = 10.2
-NCM_CONF_MAX = 0.65   # 距离证据封顶 (低于 tandem 的 0.7)
+NCM_CONF_MAX = 0.65   # distance-evidence cap (below the 0.7 used for tandem motifs)
 NCM_CONF_MIN = 0.40
 
 
 def _dist_confidence(d: float) -> float:
-    """预测距离 → 置信度. 高斯核以 NCM_REF_DIST 为中心."""
+    """Map a predicted distance to a confidence. Gaussian kernel centered at NCM_REF_DIST."""
     sigma = 1.5
     c = np.exp(-((d - NCM_REF_DIST) ** 2) / (2 * sigma * sigma))
     return float(NCM_CONF_MIN + (NCM_CONF_MAX - NCM_CONF_MIN) * c)
@@ -46,19 +47,20 @@ def infer_ncm_from_distances(
     min_gap: int = MIN_SEQ_GAP,
     max_pairs: int = 200,
 ) -> List[Tuple[int, int, str, float]]:
-    """从共识距离矩阵反推非经典配对.
+    """Infer non-canonical pairing from a consensus distance matrix.
 
     Args:
-        dist_matrix: (L,L) 共识距离矩阵 (Å), 来自 trRNA2/RNAbpFlow
-        sequence: ACGU 字符串 (chunk 局部序列)
-        wc_pairs: 已知 WC 配对 {(i,j)}, 用于排除
-        known_pairs: 其他已知配对 (硬/软约束), 也排除
-        min_gap: 最小序列间隔
-        max_pairs: 最多返回数 (按置信度排序截断)
+        dist_matrix: (L,L) consensus distance matrix (A), from trRNA2/RNAbpFlow
+        sequence: ACGU string (chunk-local sequence)
+        wc_pairs: known WC pairs {(i,j)}, used for exclusion
+        known_pairs: other known pairs (hard/soft restraints), also excluded
+        min_gap: minimum sequence separation
+        max_pairs: maximum number of pairs returned (sorted by confidence, then truncated)
 
     Returns:
-        [(gi, gj, "ENSEMBLE_DIST", confidence)] — 全局索引
-        (若传入 chunk_offset 由调用方平移; 本函数返回局部索引 + offset 参数版见下)
+        [(gi, gj, "ENSEMBLE_DIST", confidence)] - global indices
+        (a caller that passes chunk_offset translates the indices; this function
+        returns local indices - see the offset-parameter variant below)
     """
     if dist_matrix is None or len(dist_matrix.shape) != 2:
         return []
@@ -70,7 +72,7 @@ def infer_ncm_from_distances(
     b1 = seq_arr[:, None]
     b2 = seq_arr[None, :]
 
-    # 非 WC 且非 GU wobble
+    # neither WC nor G-U wobble
     is_canonical = np.zeros((L, L), dtype=bool)
     for a, b in [("A", "U"), ("U", "A"), ("G", "C"), ("C", "G"),
                  ("G", "U"), ("U", "G")]:
@@ -79,11 +81,11 @@ def infer_ncm_from_distances(
     jj, ii = np.meshgrid(np.arange(L), np.arange(L))
     cand = (~is_canonical) & (jj > ii + min_gap)
 
-    # 距离窗口
+    # distance window
     dist_ok = (dist_matrix >= NCM_DIST_LO) & (dist_matrix <= NCM_DIST_HI)
     cand &= dist_ok
 
-    # 排除已知配对
+    # exclude known pairs
     exclude = set(wc_pairs or [])
     if known_pairs:
         exclude |= set(known_pairs)
@@ -93,12 +95,12 @@ def infer_ncm_from_distances(
     for i, j in zip(idx_i.tolist(), idx_j.tolist()):
         if (min(i, j), max(i, j)) in exclude:
             continue
-        # 双侧对称取均值 (距离矩阵可能不对称)
+        # average both orientations (the distance matrix may be asymmetric)
         d = 0.5 * (float(dist_matrix[i, j]) + float(dist_matrix[j, i]))
         conf = _dist_confidence(d)
         results.append((i, j, "ENSEMBLE_DIST", round(conf, 3)))
 
-    # 按置信度降序, 截断
+    # sort by descending confidence, then truncate
     results.sort(key=lambda x: -x[3])
     return results[:max_pairs]
 
@@ -111,20 +113,21 @@ def infer_ncm_from_chunk(
     overlap: int = 30,
     **kwargs,
 ) -> List[Tuple[int, int, str, float]]:
-    """Chunk 版: 局部索引 → 全局索引.
+    """Chunk variant: local indices -> global indices.
 
     Args:
-        ens_dist_consensus: chunk 内的共识距离矩阵
-        seg_seq: chunk 序列
-        global_wc_pairs: 全局 WC 配对集
-        chunk_start: 该 chunk 在全序列中的起始位置
-        overlap: chunk 重叠区宽度, 重叠区的检出降低置信度 (边界效应)
+        ens_dist_consensus: consensus distance matrix within the chunk
+        seg_seq: chunk sequence
+        global_wc_pairs: global WC pair set
+        chunk_start: start position of this chunk in the full sequence
+        overlap: width of the chunk overlap; detections in the overlap are
+            down-weighted (boundary effect)
 
     Returns:
-        [(全局i, 全局j, type, conf)]
+        [(global i, global j, type, conf)]
     """
     L = len(seg_seq)
-    # 全局 WC → chunk 局部
+    # global WC pairs -> chunk-local
     local_wc = set()
     for gi, gj in global_wc_pairs:
         li, lj = gi - chunk_start, gj - chunk_start
@@ -136,7 +139,7 @@ def infer_ncm_from_chunk(
     out = []
     for li, lj, etype, conf in local_ncms:
         gi, gj = li + chunk_start, lj + chunk_start
-        # 重叠区降权 (两端 overlap 宽度内)
+        # down-weight the overlap region (within overlap width of either end)
         in_overlap = (li < overlap) or (lj >= L - overlap)
         if in_overlap:
             conf = round(conf * 0.7, 3)
@@ -148,14 +151,14 @@ def merge_chunk_ncms(
     chunk_ncm_lists: List[List[Tuple[int, int, str, float]]],
     iou_dedup: int = 0,
 ) -> List[Tuple[int, int, str, float]]:
-    """合并多个 chunk 的 NCM 检出: 同一对取最高置信度.
+    """Merge NCM detections from multiple chunks: per pair, keep the highest confidence.
 
     Args:
-        chunk_ncm_lists: 各 chunk 的 [(gi,gj,type,conf)] 列表
-        iou_dedup: 保留参数 (未来支持近邻去重)
+        chunk_ncm_lists: list of [(gi,gj,type,conf)] lists, one per chunk
+        iou_dedup: reserved argument (for future near-neighbor deduplication)
 
     Returns:
-        合并后的列表, 按置信度降序
+        merged list, sorted by descending confidence
     """
     best: dict = {}
     for lst in chunk_ncm_lists:
@@ -168,23 +171,23 @@ def merge_chunk_ncms(
     return merged
 
 
-# ── 自检 ─────────────────────────────────────────────────────────
+# -- self-test ----------------------------------------------------
 
 if __name__ == "__main__":
-    # 构造: 20nt, (3,14) A-G Hoogsteen 在距离 ~10.2Å
+    # build 20nt with an A-G Hoogsteen pair at (3,14) at ~10.2A
     rng = np.random.default_rng(42)
     L = 20
     seq = "".join(rng.choice(list("ACGU"), L))
-    # 强制 seq[3]='A', seq[14]='G'
+    # force seq[3]='A', seq[14]='G'
     seq = seq[:3] + "A" + seq[4:14] + "G" + seq[15:]
 
-    dist = rng.uniform(20, 80, (L, L))  # 默认远
+    dist = rng.uniform(20, 80, (L, L))  # far by default
     np.fill_diagonal(dist, 0)
     for i in range(L):
         for j in range(L):
             if abs(i - j) <= 1:
                 dist[i, j] = abs(i - j) * 5.9
-    # NCM 对放近距离
+    # place the NCM pair at short distance
     dist[3, 14] = dist[14, 3] = 10.2
 
     wc = {(0, 19), (1, 18)}

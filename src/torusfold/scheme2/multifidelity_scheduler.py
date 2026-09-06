@@ -1,7 +1,7 @@
 """
-multifidelity_scheduler.py — 多保真度调度器 (stub).
+multifidelity_scheduler.py — multi-fidelity scheduler (stub).
 
-控制 CG→allatom 的精修级别和 REMD 参数.
+Controls the CG-to-all-atom refinement level and the REMD parameters.
 """
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -9,7 +9,7 @@ from typing import List, Optional
 
 @dataclass
 class FidelityLevel:
-    """单个保真度级别."""
+    """A single fidelity level."""
     name: str = "default"
     nstep: int = 100000
     nstep_close: int = 50000
@@ -21,7 +21,7 @@ class FidelityLevel:
 
 @dataclass
 class SimulationState:
-    """模拟状态."""
+    """Simulation state."""
     round_idx: int = 0
     best_energy: float = float("inf")
     best_coords: Optional[object] = None
@@ -34,9 +34,9 @@ class SimulationState:
 
 
 class RuleScheduler:
-    """基于规则的多保真度调度器.
+    """Rule-based multi-fidelity scheduler.
 
-    根据当前模拟状态决定下一个保真度级别.
+    Decides the next fidelity level from the current simulation state.
     """
 
     def __init__(self, levels: Optional[List[FidelityLevel]] = None):
@@ -47,17 +47,17 @@ class RuleScheduler:
                 FidelityLevel("fine", nstep=200000, nstep_close=100000, nstru=20),
             ]
         self.levels = levels
-        self.history = []  # 调度历史记录
+        self.history = []  # scheduling history
 
     def next_level(self, state: SimulationState) -> FidelityLevel:
-        """根据状态决定下一个保真度级别."""
+        """Decide the next fidelity level from the state."""
         if state.converged:
             return self.levels[-1]
         idx = min(state.fidelity_level, len(self.levels) - 1)
         return self.levels[idx]
 
     def should_advance(self, state: SimulationState, energy_delta: float) -> bool:
-        """是否应该进入下一个保真度级别."""
-        if abs(energy_delta) < 100.0:  # 能量变化很小
+        """Whether to advance to the next fidelity level."""
+        if abs(energy_delta) < 100.0:  # Energy change is very small
             return True
         return False

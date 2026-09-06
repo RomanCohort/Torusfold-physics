@@ -1,8 +1,8 @@
 """
 torch_md.py — PyTorch GPU Langevin dynamics for CG RNA models.
 
-替代 OpenMM CPU 引擎, 利用 ROCm/CUDA 加速 CG MD 模拟.
-支持骨架键/角/二面角 + 碱基对弹簧 + 碰撞排斥 + Langevin 热浴.
+Replaces the OpenMM CPU engine and uses ROCm/CUDA to accelerate CG MD simulation.
+Supports backbone bonds/angles/dihedrals + base-pair springs + clash repulsion + a Langevin heat bath.
 """
 import torch
 import numpy as np

@@ -1,29 +1,29 @@
 """
-TorusFold-Scheme2 — circRNA 3D 结构预测 (IsRNAcirc 架构 + RL 增强)
+TorusFold-Scheme2 - circRNA 3D structure prediction (IsRNAcirc architecture + RL enhancement)
 
-核心架构 (对标 IsRNAcirc):
-  序列 → ViennaRNA 二级结构 → pair_graph 补远端配对
-  → [RL MCTS 优化初始构象] (方案3)
-  → 3-bead CG 分段折叠 (茎区A-form/环区松散 + RL远端引导力)
-  → [RL 远端配对引导退火] (方案1)
-  → 1EHZ 全原子重建 → Amber14 OL3 精修
+Core architecture (mirroring IsRNAcirc):
+  sequence -> ViennaRNA secondary structure -> pair_graph adds far-range pairs
+  -> [RL MCTS optimizes the initial conformation] (scheme 3)
+  -> 3-bead CG segmented folding (A-form stems / loose loops + RL far-pair guiding forces)
+  -> [RL far-pair-guided annealing] (scheme 1)
+  -> 1EHZ all-atom reconstruction -> Amber14 OL3 refinement
 
-改进 (v2):
-  1. 修饰感知输入: 支持 m6A, Ψ, m1A, 2'-O-Me, m5C
-  2. 物理弛豫后处理: 强制键长/键角/碰撞约束
-  3. 不确定性估计: 基于结构指标的置信度
+Improvements (v2):
+  1. modification-aware input: supports m6A, Ψ, m1A, 2'-O-Me, m5C
+  2. physical-relaxation post-processing: enforces bond-length/bond-angle/clash restraints
+  3. uncertainty estimation: confidence based on structure indicators
 
-IsRNAcirc 关键参数:
-  - 10 副本 REMD 280-460K (我们 8 副本 300-460K)
-  - BSJ k 渐进 0.001→5.0 kcal/mol/Å² (我们 0.1→5.0)
-  - 配对退火 0.01→0.1→1.0 (三步)
-  - 100ns MD (我们 ~0.4ns)
+Key IsRNAcirc parameters:
+  - 10 replicas REMD 280-460K (ours: 8 replicas 300-460K)
+  - BSJ k ramps 0.001→5.0 kcal/mol/Å² (ours: 0.1→5.0)
+  - pairing annealed 0.01→0.1→1.0 (three steps)
+  - 100ns MD (ours ~0.4ns)
 """
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# refine.py 可能不存在 (部分环境缺失), 降级处理
+# refine.py may be absent (missing in some environments); degrade gracefully
 try:
     from .refine import (
         vienna_pair_probs,
@@ -35,7 +35,7 @@ try:
         CLASH_DIST,
     )
 except ImportError:
-    # 提供基础常量和 stub 函数
+    # provide basic constants and stub functions
     BOND_LEN = 5.9
     PAIR_DIST = 10.6
     CLASH_DIST = 3.0
@@ -73,13 +73,13 @@ except ImportError:
     def extract_stem_blocks(pairs, scan):
         raise ImportError("extract_stem_blocks stub — pair_graph.py missing")
 
-# RL 默认权重路径
+# default RL weight paths
 _DEFAULT_RL_POLICY_PATH = str(Path(__file__).resolve().parents[3]
                               / "data" / "bc_policy_big.pt")
 _DEFAULT_DPO_POLICY_PATH = str(Path(__file__).resolve().parents[3]
                                / "data" / "dpo_policy_v3_compat.pt")
 
-# 统计势路径
+# statistical-potential path
 _STAT_POT_PATH = str(Path(__file__).resolve().parents[3]
                      / "data" / "cg_statistical_potential.pkl")
 
@@ -109,34 +109,34 @@ def predict_3d_allatom(
     rl_dpo_rollout: bool = False,
     rl_dpo_simulate: bool = False,
     coding_mask=None,
-    # 新增参数 (v2)
+    # new parameters (v2)
     known_modifications: Optional[List[Dict]] = None,
     use_relaxation: bool = True,
     relaxation_steps: int = 5000,
 ):
-    """端到端: 序列 → 全原子 RNA 结构 (IsRNAcirc 架构).
+    """End-to-end: sequence -> all-atom RNA structure (IsRNAcirc architecture).
 
-    链路 (方案1+3):
-      ViennaRNA 配对 → pair_graph 补远端
-      → [RL MCTS 优化初始构象] (方案3: RL 先拉远端)
-      → 3-bead CG 分段折叠 + [RL 远端引导力] (方案1: RL 指导物理)
-      → 1EHZ 全原子重建 → Amber14 OL3 精修
+    Pipeline (schemes 1+3):
+      ViennaRNA pairing -> pair_graph adds far-range pairs
+      -> [RL MCTS optimizes the initial conformation] (scheme 3: RL pulls far pairs first)
+      -> 3-bead CG segmented folding + [RL far-pair guiding forces] (scheme 1: RL guides physics)
+      -> 1EHZ all-atom reconstruction -> Amber14 OL3 refinement
 
     Args:
-        use_3bead: True=3-bead 分段折叠 (默认), False=旧1-bead (兼容)
-        use_rl: 启用 RL 远端配对优化
-        use_rest2: 启用 REST2 增强采样 (8副本 T-REMD)
-        rl_use_defaults: 自动加载训练好的 BC prior + DPO 打分器
-        known_modifications: 已知修饰位点列表 (可选)
-        use_relaxation: 启用物理弛豫后处理 (默认 True)
-        relaxation_steps: 物理弛豫步数 (默认 5000)
+        use_3bead: True=3-bead segmented folding (default), False=legacy 1-bead (compat)
+        use_rl: enable RL far-pair optimization
+        use_rest2: enable REST2 enhanced sampling (8-replica T-REMD)
+        rl_use_defaults: automatically load the trained BC prior + DPO scorer
+        known_modifications: list of known modification sites (optional)
+        use_relaxation: enable physical-relaxation post-processing (default True)
+        relaxation_steps: number of physical-relaxation steps (default 5000)
 
     Returns:
-        dict: 包含结构坐标、能量、指纹等信息
+        dict: contains structure coordinates, energies, fingerprints, etc.
     """
     pairs, bpp = vienna_pair_probs(sequence, pair_threshold)
 
-    # ── 修饰感知: 检测/编码化学修饰 ──
+    # --- modification-aware: detect/encode chemical modifications ---
     modification_features = None
     detected_modifications = []
     if known_modifications is not None or len(sequence) < 1000:
@@ -144,11 +144,11 @@ def predict_3d_allatom(
             from .modification_aware import detect_modifications, encode_modifications
             detected_modifications = detect_modifications(sequence, known_modifications=known_modifications)
             modification_features = encode_modifications(sequence, detected_modifications)
-            print(f"  检测到 {len(detected_modifications)} 个修饰位点")
+            print(f"  Detected {len(detected_modifications)} modification sites")
         except Exception as e:
             print(f"  [WARN] Modification detection failed: {e}")
 
-    # ── 方案 1+3: RL 先优化初始构象 + 远端配对引导物理退火 ──
+    # --- schemes 1+3: RL first optimizes the initial conformation + far-pair-guided physical annealing ---
     rl_info = None
     far_pairs = []
     cg_coords_for_amber = None
@@ -162,21 +162,21 @@ def predict_3d_allatom(
                 rl_dpo_weight = 5.0
             if not rl_dpo_rollout and not rl_dpo_simulate:
                 rl_dpo_simulate = True
-        # pair_graph: 补 ViennaRNA 漏掉的长程配对 + 标记远端配对
+        # pair_graph: add the far/long-range pairs missed by ViennaRNA and tag the far pairs
         _, scan_pairs, far_pairs = build_full_pair_graph(
             sequence, pairs, do_scan=True,
         )
         stem_blocks = extract_stem_blocks(pairs, scan_pairs)
 
     if use_3bead:
-        # ── 3-bead 管线: cg_forcefield 全残基力场 (已验证 2.4A RMSD) ──
+        # --- 3-bead pipeline: cg_forcefield all-residue force field (verified 2.4A RMSD) ---
         from .cg_forcefield import refine_3bead
         L = len(sequence)
         p_init = scheme2_initial_coords(sequence, pairs, n_samples=8)
         if p_init is None:
-            raise RuntimeError(f"Scheme2 CG 几何求解失败 (L={L})")
+            raise RuntimeError(f"Scheme2 CG geometry solve failed (L={L})")
 
-        # 方案 3: RL 先优化初始构象, 作为物理退火起点
+        # scheme 3: RL first optimizes the initial conformation as the physical-annealing start
         if use_rl and far_pairs:
             opt_p, cg_orig, rl_info = optimize_far_pairs(
                 p_init, sequence, far_pairs, stem_blocks,
@@ -193,22 +193,22 @@ def predict_3d_allatom(
         elif use_rl:
             rl_info = {"skipped": True, "reason": "no_far_pairs"}
 
-        # 3-bead CG 折叠 (cg_forcefield.refine_3bead)
+        # 3-bead CG folding (cg_forcefield.refine_3bead)
         cg_coords, e0_cg, e1_cg = refine_3bead(
             p_init, pairs, platform_name, n_anneal=200,
             stat_pot_path=_STAT_POT_PATH if Path(_STAT_POT_PATH).exists() else None,
             sequence=sequence)
     else:
-        # 旧 1-bead 管线 (兼容)
+        # legacy 1-bead pipeline (compat)
         init = scheme2_initial_coords(sequence, pairs, n_samples=8)
         if init is None:
-            raise RuntimeError(f"Scheme2 CG 几何求解失败 (L={len(sequence)})")
+            raise RuntimeError(f"Scheme2 CG geometry solve failed (L={len(sequence)})")
         cg_coords, e0_cg, e1_cg = openmm_refine(init, pairs, platform_name)
 
     if cg_coords_for_amber is None:
         cg_coords_for_amber = cg_coords
 
-    # ── 物理弛豫后处理: 强制键长/键角/碰撞约束 ──
+    # --- physical-relaxation post-processing: enforces bond-length/bond-angle/clash restraints ---
     relaxation_metrics = None
     if use_relaxation:
         try:
@@ -219,12 +219,12 @@ def predict_3d_allatom(
                 n_steps=relaxation_steps,
                 use_openmm=True,
             )
-            print(f"  物理弛豫: 碰撞 {relaxation_metrics['initial']['clash_count']} → "
+            print(f"  Physical relaxation: clashes {relaxation_metrics['initial']['clash_count']} -> "
                   f"{relaxation_metrics['final']['clash_count']}")
         except Exception as e:
             print(f"  [WARN] Physical relaxation failed: {e}")
 
-    # ── 全原子重建 + Amber 精修 ──
+    # --- all-atom reconstruction + Amber refinement ---
     from .aform_from_template import reconstruct_all_atom as reconstruct_from_template
     structure = reconstruct_from_template(cg_coords, sequence)
 
@@ -239,7 +239,7 @@ def predict_3d_allatom(
         cg_coords=cg_coords_nm,
     )
 
-    # 结构指纹 + 信号
+    # structure fingerprints + signals
     from .immune_heuristic import (
         compute_immune_fingerprints, compute_structure_signals,
     )
@@ -252,7 +252,7 @@ def predict_3d_allatom(
         e1_aa=e1_aa, bsj_dist=bsj_dist, cg_coords=cg_coords,
     )
 
-    # ── 不确定性估计 ──
+    # --- uncertainty estimation ---
     uncertainty = _estimate_uncertainty(
         cg_coords, pairs, far_pairs, bsj_dist, relaxation_metrics,
     )
@@ -273,7 +273,7 @@ def predict_3d_allatom(
         "available": True,
         "immune_fingerprints": immune_fingerprints,
         "structure_signals": structure_signals,
-        # 新增 (v2)
+        # new (v2)
         "detected_modifications": detected_modifications,
         "modification_features": modification_features,
         "relaxation_metrics": relaxation_metrics,
@@ -288,31 +288,31 @@ def _estimate_uncertainty(
     bsj_dist: float,
     relaxation_metrics: Optional[Dict],
 ) -> float:
-    """估计预测不确定性 [0, 1].
+    """Estimate the prediction uncertainty in [0, 1].
 
-    基于多个指标:
-    1. BSJ 闭合距离偏差
-    2. 远端配对距离偏差
-    3. 碰撞数量
-    4. 键长违规数
+    Based on several indicators:
+    1. BSJ closure-distance deviation
+    2. far-pair distance deviation
+    3. number of clashes
+    4. number of bond-length violations
 
     Args:
-        cg_coords: CG P 坐标
-        pairs: 配对列表
-        far_pairs: 远端配对列表
-        bsj_dist: BSJ 闭合距离
-        relaxation_metrics: 弛豫指标
+        cg_coords: CG P coordinates
+        pairs: pair list
+        far_pairs: far-range pair list
+        bsj_dist: BSJ closure distance
+        relaxation_metrics: relaxation metrics
 
     Returns:
-        uncertainty [0, 1]: 0=高置信, 1=低置信
+        uncertainty in [0, 1]: 0=high confidence, 1=low confidence
     """
     uncertainties = []
 
-    # 1. BSJ 闭合偏差 (理想 ~5.9A)
+    # 1. BSJ closure deviation (ideal ~5.9A)
     bsj_deviation = abs(bsj_dist - BOND_LEN) / BOND_LEN
     uncertainties.append(min(1.0, bsj_deviation))
 
-    # 2. 远端配对距离偏差 (理想 ~20A)
+    # 2. far-pair distance deviation (ideal ~20A)
     if far_pairs:
         wc_devs = []
         for i, j in far_pairs:
@@ -322,12 +322,12 @@ def _estimate_uncertainty(
         if wc_devs:
             uncertainties.append(min(1.0, np.mean(wc_devs)))
 
-    # 3. 碰撞数量
+    # 3. number of clashes
     if relaxation_metrics:
         final_clashes = relaxation_metrics.get("final", {}).get("clash_count", 0)
         uncertainties.append(min(1.0, final_clashes / 10.0))
 
-    # 4. 键长违规
+    # 4. bond-length violations
     if relaxation_metrics:
         bond_violations = relaxation_metrics.get("final", {}).get("bond_violations", 0)
         uncertainties.append(min(1.0, bond_violations / 20.0))

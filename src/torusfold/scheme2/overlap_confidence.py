@@ -1,20 +1,21 @@
 """
-overlap_confidence.py — Level 1 重叠区置信度评估
+overlap_confidence.py - Level-1 overlap-region confidence assessment
 
-评估分段预测中相邻 chunk 重叠区的一致性:
-  - 两 chunk 在重叠区的 RMSD → 置信度分数
-  - 多次采样一致性 → 柔性区检测
-  - 逐残基置信度图 → Level 2.3 力场参数化
+Evaluate the consistency of adjacent chunk overlap regions in segmented
+prediction:
+  - RMSD of two chunks over the overlap -> confidence score
+  - multi-sample consistency -> flexible-region detection
+  - per-residue confidence map -> Level-2.3 force-field parameterization
 
-置信度分级:
-  RMSD < 3A  → 高置信 (force_scale=1.0)
-  3-8A       → 中置信 (force_scale=0.5)
-  > 8A       → 柔性区 (force_scale=0.1, 交给力场)
+Confidence tiers:
+  RMSD < 3 A  -> high confidence (force_scale=1.0)
+  3-8 A       -> medium confidence (force_scale=0.5)
+  > 8 A       -> flexible region (force_scale=0.1, left to the force field)
 
-公开 API:
-  evaluate_overlap_confidence()  — 单对 chunk 重叠区评估
-  multi_sample_confidence()      — 多次采样一致性评估
-  segment_confidence_map()       — 逐残基置信度图
+Public API:
+  evaluate_overlap_confidence()  - evaluate a single chunk-pair overlap
+  multi_sample_confidence()      - multi-sample consistency assessment
+  segment_confidence_map()       - per-residue confidence map
 """
 from __future__ import annotations
 
@@ -24,22 +25,22 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 
 
-# ── 常量 ──
-HIGH_CONF_THRESHOLD = 3.0      # RMSD < 3A → 高置信
-FLEXIBLE_THRESHOLD = 8.0       # RMSD > 8A → 柔性区
-DEFAULT_CONFIDENCE_TEMP = 3.0  # sigmoid 温度参数
+# ── Constants ──
+HIGH_CONF_THRESHOLD = 3.0      # RMSD < 3 A -> high confidence
+FLEXIBLE_THRESHOLD = 8.0       # RMSD > 8 A -> flexible region
+DEFAULT_CONFIDENCE_TEMP = 3.0  # sigmoid temperature
 
 
 @dataclass
 class OverlapConfidence:
-    """重叠区置信度评估结果.
+    """Overlap-region confidence evaluation result.
 
     Attributes:
-        rmsd: 重叠区 RMSD (Angstrom)
-        confidence: 置信度 [0, 1], 1.0/(1+rmsd/temp)
-        is_flexible: 是否为柔性区 (rmsd > 8A)
-        force_scale: 力场缩放因子 (高/中/柔性)
-        n_residues: 重叠区残基数
+        rmsd: RMSD of the overlap region (Angstrom)
+        confidence: confidence [0, 1], 1.0/(1+rmsd/temp)
+        is_flexible: whether this is a flexible region (rmsd > 8 A)
+        force_scale: force-field scale factor (high/medium/flexible)
+        n_residues: number of residues in the overlap region
     """
     rmsd: float
     confidence: float
@@ -49,7 +50,7 @@ class OverlapConfidence:
 
     @property
     def tier(self) -> str:
-        """置信度等级: high / medium / flexible."""
+        """Confidence tier: high / medium / flexible."""
         if self.rmsd < HIGH_CONF_THRESHOLD:
             return "high"
         elif self.rmsd < FLEXIBLE_THRESHOLD:
@@ -59,14 +60,14 @@ class OverlapConfidence:
 
 
 def _kabsch_rmsd(moving: np.ndarray, target: np.ndarray) -> float:
-    """Kabsch 对齐后计算 RMSD.
+    """Compute the RMSD after Kabsch alignment.
 
     Args:
-        moving: (N, 3) 待对齐坐标
-        target: (N, 3) 参考坐标
+        moving: (N, 3) coordinates to align
+        target: (N, 3) reference coordinates
 
     Returns:
-        对齐后的 RMSD (Angstrom)
+        aligned RMSD (Angstrom)
     """
     assert moving.shape == target.shape, (
         f"Shape mismatch: {moving.shape} vs {target.shape}"
@@ -75,20 +76,20 @@ def _kabsch_rmsd(moving: np.ndarray, target: np.ndarray) -> float:
     if n == 0:
         return 0.0
 
-    # 中心化
+    # Center the coordinates
     centroid_m = moving.mean(axis=0)
     centroid_t = target.mean(axis=0)
     m = moving - centroid_m
     t = target - centroid_t
 
-    # SVD 求最优旋转
+    # SVD for the optimal rotation
     H = m.T @ t
     U, S, Vt = np.linalg.svd(H)
     d = np.linalg.det(Vt.T @ U.T)
     sign_matrix = np.diag([1.0, 1.0, d])
     R = Vt.T @ sign_matrix @ U.T
 
-    # 对齐 + RMSD
+    # Align + RMSD
     m_aligned = (R @ m.T).T
     diff = m_aligned - t
     rmsd = np.sqrt(np.mean(np.sum(diff ** 2, axis=1)))
@@ -101,19 +102,19 @@ def evaluate_overlap_confidence(
     overlap_indices: np.ndarray,
     temperature: float = DEFAULT_CONFIDENCE_TEMP,
 ) -> OverlapConfidence:
-    """评估两个 chunk 在重叠区的一致性.
+    """Evaluate the consistency of two chunks over the overlap region.
 
-    将 coords_a 和 coords_b 的重叠区坐标提取出来,
-    做 Kabsch 最优对齐后计算 RMSD, 再映射到置信度.
+    Extracts the overlap coordinates of coords_a and coords_b, performs an
+    optimal Kabsch alignment, computes the RMSD, and maps it to a confidence.
 
     Args:
-        coords_a: chunk_a 的预测坐标 (L_a, 3), 包含重叠区
-        coords_b: chunk_b 的预测坐标 (L_b, 3), 包含重叠区
-        overlap_indices: 重叠区在全链中的全局索引
-        temperature: sigmoid 温度, 越小越严格
+        coords_a: chunk_a predicted coordinates (L_a, 3), including the overlap
+        coords_b: chunk_b predicted coordinates (L_b, 3), including the overlap
+        overlap_indices: global indices of the overlap region in the full chain
+        temperature: sigmoid temperature; smaller is stricter
 
     Returns:
-        OverlapConfidence 评估结果
+        An OverlapConfidence evaluation result
     """
     coords_a = np.asarray(coords_a, dtype=np.float64)
     coords_b = np.asarray(coords_b, dtype=np.float64)
@@ -121,31 +122,31 @@ def evaluate_overlap_confidence(
 
     n_residues = len(overlap_indices)
     if n_residues < 3:
-        # 重叠区太短, 无法可靠评估
+        # Overlap too short for a reliable evaluation
         return OverlapConfidence(
             rmsd=0.0, confidence=1.0, is_flexible=False,
             force_scale=1.0, n_residues=n_residues,
         )
 
-    # 提取重叠区坐标 — 这里假设传入的 coords 已经是对应 chunk 的坐标
-    # overlap_indices 是全局索引, 但 coords_a/b 是各自 chunk 局部坐标
-    # 调用方需要确保 overlap_indices 映射到正确的局部索引
-    # 如果 overlap_indices 是全局索引且 chunk 从某个 start 开始:
-    # 这里直接把 overlap_indices 当作两个 coords 中的有效索引
-    # 实际使用中, 传入前应做映射
+    # Extract the overlap-region coordinates - the passed coords are assumed to already be
+    # the coordinates of the corresponding chunk. overlap_indices are global indices, but
+    # coords_a/b are local to each chunk, so the caller must ensure overlap_indices map to
+    # the correct local indices. If overlap_indices are global and a chunk starts at some
+    # offset, the indices are used directly as valid indices into both coordinate sets.
+    # In practice, the mapping should be applied before calling this function.
 
-    # 如果 coords_a 和 coords_b 已经是对齐到同一重叠区的坐标:
+    # If coords_a and coords_b are already aligned to the same overlap region:
     if coords_a.shape[0] == coords_b.shape[0]:
         ol_a = coords_a
         ol_b = coords_b
     else:
-        # 按 overlap_indices 索引 (需要 coords 足够长)
+        # Index by overlap_indices (the coords must be long enough)
         max_idx = max(overlap_indices.max() + 1, 0)
         if coords_a.shape[0] >= max_idx and coords_b.shape[0] >= max_idx:
             ol_a = coords_a[overlap_indices]
             ol_b = coords_b[overlap_indices]
         else:
-            # 降级: 用 min 长度对齐
+            # Fallback: align by the min length
             common = min(coords_a.shape[0], coords_b.shape[0], n_residues)
             ol_a = coords_a[:common]
             ol_b = coords_b[:common]
@@ -153,17 +154,17 @@ def evaluate_overlap_confidence(
     # Kabsch RMSD
     rmsd = _kabsch_rmsd(ol_a, ol_b)
 
-    # 置信度: sigmoid 映射
+    # Confidence: sigmoid mapping
     confidence = 1.0 / (1.0 + rmsd / max(temperature, 1e-6))
 
-    # 柔性判定
+    # Flexible-region decision
     is_flexible = rmsd > FLEXIBLE_THRESHOLD
 
-    # 力场缩放因子
+    # Force-field scale factor
     if rmsd < HIGH_CONF_THRESHOLD:
         force_scale = 1.0
     elif rmsd < FLEXIBLE_THRESHOLD:
-        # 线性插值: 3A→1.0, 8A→0.5
+        # Linear interpolation: 3 A -> 1.0, 8 A -> 0.5
         force_scale = 1.0 - 0.5 * (rmsd - HIGH_CONF_THRESHOLD) / (
             FLEXIBLE_THRESHOLD - HIGH_CONF_THRESHOLD
         )
@@ -186,23 +187,24 @@ def multi_sample_confidence(
     n_samples: int = 5,
     temperature: float = DEFAULT_CONFIDENCE_TEMP,
 ) -> OverlapConfidence:
-    """多次采样评估重叠区一致性.
+    """Evaluate overlap-region consistency across multiple samples.
 
-    对同一序列用不同 random seed 做 n_samples 次预测,
-    计算重叠区坐标的标准差, 一致性高 → 高置信, 低 → 柔性区.
+    Runs n_samples predictions on the same sequence with different random seeds
+    and computes the spread of the overlap coordinates; high consistency leads
+    to high confidence, low consistency to a flexible region.
 
-    原理: 如果一个区域结构确定 (如茎区), 多次预测应该收敛;
-    如果是柔性区 (如环区), 多次预测会发散.
+    Rationale: if a region is structurally determined (e.g., a stem), repeated
+    predictions should converge; if it is flexible (e.g., a loop), they diverge.
 
     Args:
-        sequence: RNA 序列
-        predict_fn: 预测函数 (sequence, seed) → (L, 3) 坐标
-        overlap_indices: 重叠区全局索引
-        n_samples: 采样次数
-        temperature: sigmoid 温度
+        sequence: RNA sequence
+        predict_fn: prediction function (sequence, seed) -> (L, 3) coordinates
+        overlap_indices: global indices of the overlap region
+        n_samples: number of samples
+        temperature: sigmoid temperature
 
     Returns:
-        OverlapConfidence 基于采样一致性的评估结果
+        An OverlapConfidence result based on sampling consistency
     """
     overlap_indices = np.asarray(overlap_indices, dtype=np.int64)
     n_residues = len(overlap_indices)
@@ -213,16 +215,16 @@ def multi_sample_confidence(
             force_scale=1.0, n_residues=n_residues,
         )
 
-    # 多次采样
+    # Multi-sample predictions
     samples: List[np.ndarray] = []
     for i in range(n_samples):
-        seed = 42 + i  # 固定种子保证可复现, 不同 seed 间有差异
+        seed = 42 + i  # fixed seeds keep results reproducible; different seeds add diversity
         coords = predict_fn(sequence, seed)
         coords = np.asarray(coords, dtype=np.float64)
         if coords.shape[0] > overlap_indices.max():
             samples.append(coords[overlap_indices])
         elif coords.shape[0] > 0:
-            # 坐标不够长, 取有效部分
+            # Coordinates too short; take the valid part
             valid = min(coords.shape[0], n_residues)
             samples.append(coords[:valid])
 
@@ -232,7 +234,7 @@ def multi_sample_confidence(
             force_scale=0.5, n_residues=n_residues,
         )
 
-    # 计算两两 RMSD
+    # Compute pairwise RMSD
     rmsds: List[float] = []
     for i in range(len(samples)):
         for j in range(i + 1, len(samples)):
@@ -247,7 +249,7 @@ def multi_sample_confidence(
             force_scale=0.5, n_residues=n_residues,
         )
 
-    # 用平均 RMSD 作为一致性指标
+    # Use the mean RMSD as the consistency metric
     mean_rmsd = float(np.mean(rmsds))
     confidence = 1.0 / (1.0 + mean_rmsd / max(temperature, 1e-6))
     is_flexible = mean_rmsd > FLEXIBLE_THRESHOLD
@@ -276,46 +278,47 @@ def segment_confidence_map(
     overlaps: List[Dict],
     full_length: int,
 ) -> np.ndarray:
-    """生成逐残基置信度图.
+    """Build a per-residue confidence map.
 
-    遍历所有 chunk 和重叠区, 计算每个残基的置信度:
-    - 非重叠区: 使用 chunk 自身置信度 (取自 _score_chunk_quality)
-    - 重叠区: 使用两 chunk 的 RMSD 映射置信度
-    - 无 chunk 覆盖: 默认 0.0
+    Iterates over all chunks and overlap regions, computing a confidence for
+    each residue:
+    - non-overlap regions: use the chunk's own quality score (from _score_chunk_quality)
+    - overlap regions: use the confidence mapped from the two-chunk RMSD
+    - residues not covered by any chunk: default 0.0
 
-    输出用于 Level 2.3 力场参数化: force_scale per residue.
+    The output feeds Level-2.3 force-field parameterization: force_scale per residue.
 
     Args:
-        chunks: 分段信息列表 (from split_sequence)
-        chunk_coords: 每个 chunk 的 P 坐标
-        overlaps: 重叠区信息列表, 每个含:
-            - "indices": 重叠区全局索引
-            - "chunk_a": 左 chunk 索引
-            - "chunk_b": 右 chunk 索引
-        full_length: 完整序列长度
+        chunks: list of segmentation info (from split_sequence)
+        chunk_coords: P coordinates of each chunk
+        overlaps: list of overlap info, each containing:
+            - "indices": global indices of the overlap region
+            - "chunk_a": left chunk index
+            - "chunk_b": right chunk index
+        full_length: length of the full sequence
 
     Returns:
-        (full_length,) 逐残基置信度 [0, 1]
+        (full_length,) per-residue confidence [0, 1]
     """
     confidence = np.zeros(full_length, dtype=np.float64)
     weight = np.zeros(full_length, dtype=np.float64)
 
-    # 1. 非重叠区: chunk 自身质量分
+    # 1. Non-overlap regions: the chunk's own quality score
     for idx, (seg, coords) in enumerate(zip(chunks, chunk_coords)):
         start = seg["start"]
         end = seg["end"]
         length = end - start
         seg_coords = coords[:length] if len(coords) >= length else coords
 
-        # 简单质量指标: 坐标方差越小越确定
+        # Simple quality metric: smaller coordinate variance means higher certainty
         if seg_coords.shape[0] >= 3:
-            # 用相邻残基距离的方差作为确定性指标
+            # Use the variance of adjacent-residue distances as the certainty metric
             diffs = np.diff(seg_coords, axis=0)
             bond_lengths = np.linalg.norm(diffs, axis=1)
-            # 正常 P-P 键长 ~5.9A, 方差越小越确定
+            # Normal P-P bond length ~5.9 A; smaller variance means higher certainty
             if len(bond_lengths) > 1:
                 bl_var = float(np.var(bond_lengths))
-                # 映射: 方差 0→1.0, 方差 5→0.3
+                # Mapping: variance 0 -> 1.0, variance 5 -> 0.3
                 chunk_conf = max(0.3, 1.0 - bl_var / 5.0)
             else:
                 chunk_conf = 0.5
@@ -326,7 +329,7 @@ def segment_confidence_map(
             confidence[i] += chunk_conf
             weight[i] += 1.0
 
-    # 2. 重叠区: 两 chunk RMSD → 置信度 (权重更高)
+    # 2. Overlap regions: two-chunk RMSD -> confidence (higher weight)
     for ol in overlaps:
         ol_indices = np.asarray(ol["indices"], dtype=np.int64)
         idx_a = ol["chunk_a"]
@@ -340,11 +343,11 @@ def segment_confidence_map(
         seg_a = chunks[idx_a]
         seg_b = chunks[idx_b]
 
-        # 映射全局重叠索引到 chunk 局部坐标
+        # Map global overlap indices to chunk-local coordinates
         ol_local_a = ol_indices - seg_a["start"]
         ol_local_b = ol_indices - seg_b["start"]
 
-        # 提取重叠区坐标
+        # Extract the overlap-region coordinates
         valid_a = (ol_local_a >= 0) & (ol_local_a < coords_a.shape[0])
         valid_b = (ol_local_b >= 0) & (ol_local_b < coords_b.shape[0])
         valid = valid_a & valid_b
@@ -360,12 +363,12 @@ def segment_confidence_map(
             np.arange(valid.sum()),
         )
 
-        # 重叠区置信度用 2x 权重覆盖
+        # Overlap-region confidence overrides with 2x weight
         for i, global_idx in enumerate(ol_indices[valid]):
             confidence[global_idx] = ol_conf.confidence
-            weight[global_idx] = 2.0  # 重叠区权重更高
+            weight[global_idx] = 2.0  # overlap regions get a higher weight
 
-    # 归一化
+    # Normalize
     weight = np.maximum(weight, 1e-8)
     confidence = confidence / weight
 
@@ -373,18 +376,18 @@ def segment_confidence_map(
 
 
 def force_scale_from_confidence(confidence: float) -> float:
-    """从置信度分数映射到力场缩放因子.
+    """Map a confidence score to a force-field scale factor.
 
     Args:
-        confidence: [0, 1] 置信度
+        confidence: confidence in [0, 1]
 
     Returns:
-        force_scale: 0.1 (柔性) ~ 1.0 (高置信)
+        force_scale: 0.1 (flexible) ~ 1.0 (high confidence)
     """
     if confidence >= 0.75:
         return 1.0
     elif confidence >= 0.3:
-        # 线性插值: 0.3→0.5, 0.75→1.0
+        # Linear interpolation: 0.3 -> 0.5, 0.75 -> 1.0
         return 0.5 + 0.5 * (confidence - 0.3) / 0.45
     else:
         return 0.1

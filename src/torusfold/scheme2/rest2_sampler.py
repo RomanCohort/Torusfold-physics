@@ -1,18 +1,19 @@
 """
-rest2_sampler.py — REST2 (Replica Exchange with Solute Tempering 2) sampler.
+rest2_sampler.py - REST2 (Replica Exchange with Solute Tempering 2) sampler.
 
-CG RNA 版 REST2: 无显式溶剂, 溶质项 = pair/stack/BSJ 引导力.
-副本 i 的有效缩放: λ_i = T_ref / T_i (势能项除以 λ, 等价于
-高温下溶质相互作用变弱, 增强构象采样).
+CG-RNA REST2: no explicit solvent; the solute terms are the pair/stack/BSJ guiding forces.
+Effective scaling of replica i: lambda_i = T_ref / T_i (the potential terms are divided by
+lambda, i.e. solute interactions weaken at high temperature, enhancing conformational sampling).
 
-实现: 每副本独立 system, 用 setBondParameters 缩放力常数
-(复用 _run_annealing.set_pair_k 的机制), 每 exchange_interval
-步做 Metropolis 交换.
+Implementation: each replica gets its own system; force constants are scaled via
+setBondParameters (reusing the mechanism of _run_annealing.set_pair_k), and a Metropolis
+exchange is attempted every exchange_interval steps.
 
-交换判据 (无显式溶剂的简化 REST2):
-    Δ = (β_i - β_j) · (λ_j·U_i^scaled - λ_i·U_j^scaled) / λ_scale
-其中 U^scaled 为该副本当前总势能. CG 全体系皆溶质项时退化为
-标准温度 REMD 判据, 但力场本身不随温度变化 → 更平滑的重叠.
+Exchange criterion (simplified REST2 without explicit solvent):
+    d = (beta_i - beta_j) * (lambda_j*U_i^scaled - lambda_i*U_j^scaled) / lambda_scale
+where U^scaled is the replica's current total potential energy. When every term in the CG
+system is a solute term this reduces to the standard temperature-REMD criterion, but since
+the force field itself does not change with temperature, the overlap is smoother.
 """
 import numpy as np
 from typing import List, Optional, Tuple
@@ -39,21 +40,22 @@ def _build_lambda_scaled_system(
     p_coords: np.ndarray,
     pairs: List[Tuple[int, int, float]],
 ):
-    """构建 3-bead system 并返回可缩放 force 句柄.
+    """Build the 3-bead system and return handles to the scalable forces.
 
     Returns:
         (system, coords_nm, scalables)
         scalables: [(force_obj, base_k, bond_index, p1_idx, p2_idx, r0), ...]
-                   所有可被 λ 缩放的键约束项
+                   all bond-restraint terms that can be scaled by lambda
     """
     from torusfold.scheme2.openmm_gpu_refiner import _build_3bead_system_gpu
 
     system, coords_nm, pf, sf, bf, bg = _build_3bead_system_gpu(
         p_coords, pairs, pair_scale=1.0, bsj_k_scale=1.0)
 
-    # 收集可缩放项 (REST2 溶质-溶质相互作用): pair/stack/BSJ 引导.
-    # 注意: clash 排斥项不缩放 — 排除体积是几何约束而非相互作用,
-    # 削弱它会让高温副本塌缩成高能团簇 (实测 λ=0.1 时 E 反升 7%).
+    # Collect the scalable terms (REST2 solute-solute interactions): pair/stack/BSJ guides.
+    # Note: the clash repulsion term is NOT scaled - excluded volume is a geometric restraint
+    # rather than an interaction; weakening it would collapse hot replicas into high-energy
+    # clusters (measured: at lambda=0.1, E rises ~7%).
     scalables = []
     for force in (pf, sf, bg):
         if force is None:
@@ -68,9 +70,9 @@ def _build_lambda_scaled_system(
 
 
 def apply_lambda(scalables, lam: float, context=None):
-    """把 λ 施加到所有可缩放键上.
+    """Apply lambda to all scalable bonds.
 
-    k_eff = k_base * λ  (λ<1 弱化相互作用 = 有效升温)
+    k_eff = k_base * lambda  (lambda<1 weakens interactions = effective heating)
     """
     for force, b, p1, p2, k_base, extra in scalables:
         new_params = list(extra)
@@ -118,7 +120,7 @@ def rest2_sample(
 
     L = len(coords)
 
-    # 温度阶梯 → λ 阶梯: λ_i = T_low / T_i (低温副本 λ=1, 高温副本 λ<1)
+    # temperature ladder -> lambda ladder: lambda_i = T_low / T_i (cold replicas lambda=1, hot replicas lambda<1)
     temps = np.linspace(temperature_range[0], temperature_range[1], n_replicas)
     lambdas = [float(temperature_range[0]) / t for t in temps]
 
@@ -151,7 +153,7 @@ def rest2_sample(
                     best_energy = msg[2]
                     best_pos = msg[3]
 
-            # 相邻副本 Metropolis 交换 (基于报告能量)
+            # Metropolis exchange between neighboring replicas (based on the reported energies)
             decisions = []
             for ri in range(n_replicas - 1):
                 u_i, u_j = msgs[ri][2], msgs[ri + 1][2]
@@ -161,7 +163,7 @@ def rest2_sample(
                 acc = exponent <= 0 or np.random.rand() < np.exp(-exponent)
                 decisions.append(acc)
 
-            # 应用交换: 把需要交换的坐标发给对应 worker
+            # apply the swaps: send coordinates to the workers that must exchange
             swap_map = {}
             for ri, acc in enumerate(decisions):
                 if not acc:
@@ -184,7 +186,7 @@ def rest2_sample(
                 if ri not in sent:
                     conns[ri].send(("keep",))
     finally:
-        # 结束所有 worker
+        # shut down all workers
         for c in conns:
             try:
                 c.send(("stop",))
@@ -211,7 +213,7 @@ def _rest2_worker(
     exchange_interval: int,
     conn,
 ):
-    """REST2 单副本 worker: λ 缩放力常数 + 定期报告能量."""
+    """REST2 single-replica worker: scales force constants by lambda and periodically reports energy."""
     try:
         import openmm as mm
         import openmm.unit as unit
@@ -232,7 +234,7 @@ def _rest2_worker(
         sim = Simulation(topo, system, integrator, plat, plat_props)
         sim.context.setPositions(coords_nm * unit.nanometer)
 
-        # 施加本副本的 λ
+        # apply this replica's lambda
         apply_lambda(scalables, lam, sim.context)
 
         sim.minimizeEnergy(maxIterations=1000)
@@ -275,11 +277,11 @@ def _rest2_worker(
 
 
 class REST2Sampler:
-    """REST2 wrapper compatible with isrnaclong.py call signature.
+    """REST2 wrapper compatible with the isrnaclong.py call signature.
 
-    标定默认值 (scripts/calib_rest2_exchange.py):
-      - exchange_interval=1000 → 平均交换接受率 33.3%
-      - 温度几何分布 300→550K, ≥6 副本保证冷端重叠
+    Calibrated defaults (scripts/calib_rest2_exchange.py):
+      - exchange_interval=1000 gives an average exchange acceptance of 33.3%
+      - geometrically spaced temperatures 300->550K, >=6 replicas to guarantee cold-end overlap
     """
 
     def __init__(self, temperatures=None, n_steps=50000,
@@ -308,13 +310,14 @@ class REST2Sampler:
         return best_coords, best_energy, snaps
 
 
-# ── 单副本验证 ──────────────────────────────────────────────────
+# ---- single-replica verification ---------------------------------
 
 if __name__ == "__main__":
-    """验证: λ 缩放真的改变力场能量响应.
+    """Verify that lambda scaling actually changes the force-field energy response.
 
-    同一坐标下, λ=1 vs λ=0.5 应给出不同能量; λ 越小配对项越弱,
-    违反配对的结构的能量差应缩小.
+    On identical coordinates, lambda=1 vs lambda=0.5 should give different energies;
+    the smaller the lambda, the weaker the pairing terms, so the energy gap of
+    mispaired structures should shrink.
     """
     import os
     import sys
@@ -329,7 +332,7 @@ if __name__ == "__main__":
     seq = "ACGU" * 10
     pairs = [(i, i + 20, 1.0) for i in range(5)]
     rng = np.random.default_rng(42)
-    coords = rng.random((L, 3)) * 50.0   # 随机散布 (违反大部分配对)
+    coords = rng.random((L, 3)) * 50.0   # random scatter (violates most pairs)
 
     print("=== REST2 lambda scaling verification ===")
     results = {}
@@ -340,21 +343,22 @@ if __name__ == "__main__":
             300 * unit.kelvin, 1.0 / unit.picosecond, 0.002 * unit.picosecond)
         sim = Simulation(topo, system, integ, mm.Platform.getPlatformByName("CPU"))
         sim.context.setPositions(coords_nm * unit.nanometer)
-        # 关键: 先施加 λ 再 minimize — 比较各 λ 下的极小值
+        # key: apply lambda before minimize - compare the minima reached at each lambda
         apply_lambda(scalables, lam, sim.context)
         sim.minimizeEnergy(maxIterations=500)
         st = sim.context.getState(getEnergy=True)
         e = st.getPotentialEnergy()._value
         results[lam] = e
-        print(f"  λ={lam:.1f}: E_min={e:.0f} kJ/mol")
+        print(f"  lambda={lam:.1f}: E_min={e:.0f} kJ/mol")
 
-    # 断言: λ 改变了能量
+    # assertion: lambda changes the energy
     assert abs(results[1.0] - results[0.5]) > 1.0, \
-        f"λ=1.0 与 λ=0.5 能量相同 ({results[1.0]} vs {results[0.5]}) — 缩放无效!"
-    print("[PASS] λ scaling changes energy response")
+        f"lambda=1.0 and lambda=0.5 give the same energy ({results[1.0]} vs {results[0.5]}) - scaling is ineffective!"
+    print("[PASS] lambda scaling changes energy response")
 
-    # 方向验证: REST2 的目的不是降能, 而是展宽采样分布.
-    # 用短 MD 的坐标波动 (RMSF) 判据: 高温等效 (λ小) 副本应探索更大.
+    # direction check: REST2 is not meant to lower the energy but to broaden the sampled distribution.
+    # Use the coordinate fluctuation (RMSF) over short MD as the criterion: replicas equivalent to
+    # high temperature (small lambda) should explore more.
     rmsfs = {}
     for lam in (1.0, 0.3):
         system, coords_nm, scalables = _build_lambda_scaled_system(coords, pairs)
@@ -372,8 +376,8 @@ if __name__ == "__main__":
             pos = sim.context.getState(getPositions=True).getPositions(asNumpy=True)._value
             devs.append(np.sqrt(((pos - ref) ** 2).sum(axis=1).mean()))
         rmsfs[lam] = float(np.mean(devs))
-        print(f"  λ={lam:.1f}: RMSF={rmsfs[lam]:.4f} nm")
+        print(f"  lambda={lam:.1f}: RMSF={rmsfs[lam]:.4f} nm")
 
     assert rmsfs[0.3] > rmsfs[1.0] * 0.8, \
-        f"λ=0.3 RMSF ({rmsfs[0.3]:.4f}) 应不小于 λ=1.0 ({rmsfs[1.0]:.4f}) 的 80% — 采样未展宽"
+        f"lambda=0.3 RMSF ({rmsfs[0.3]:.4f}) should be >=80% of lambda=1.0 ({rmsfs[1.0]:.4f}) - sampling was not broadened"
     print("[PASS] solute tempering broadens sampling")

@@ -1,33 +1,38 @@
 """
-amber_refine.py — 全原子 RNA 用 Amber14 OL3 力场精修。
+amber_refine.py - all-atom RNA refinement with the Amber14 OL3 force field.
 
-接 allatom_reconstruct 输出, 用 OpenMM + amber14-all.xml (RNA.OL3) +
-implicit/obc1.xml (OBC1 隐式溶剂) 做约束最小化, 让全原子在力场下落到
-A-form RNA 合理构象。
+Consumes the output of allatom_reconstruct and runs restrained minimization
+with OpenMM + amber14-all.xml (RNA.OL3) + implicit/obc1.xml (OBC1 implicit
+solvent), letting the all-atom structure settle into a reasonable A-form RNA
+conformation under the force field.
 
-激进精度提升 (相对原方案 3):
-  * P 原子 positional restraint 从 50 → 10 kJ/mol/nm²: 放开骨架走向,
-    让力场能调整 backbone 满足配对, 而不是把 CG 拓扑钉死。
-  * A-form 螺旋二面角约束 (CustomTorsionForce): backbone α/γ/δ/ζ +
-    sugar pucker C3'-endo, 这是 RNA 精度灵魂, 之前完全没有。
-  * ViennaRNA pairing CustomBond: r0=1.06nm (10.6Å C1'-C1'), 配对约束
-    让碱基在 stem 区靠拢成 Watson-Crick 几何。
-  * L-BFGS 最小化 3000 步, 长序列 (>200nt) 加 MD 退火跳出局部解。
-  * Modeller.addHydrogens 自动补 H (amber14 RNA 模板含 H)。
+Aggressive accuracy improvements (vs original scheme 3):
+  * P-atom positional restraint loosened 50 -> 10 kJ/mol/nm^2: frees the
+    backbone trajectory so the force field can adjust the backbone to satisfy
+    base pairing instead of pinning the CG topology in place.
+  * A-form helix dihedral restraints (CustomTorsionForce): backbone
+    alpha/gamma/delta/zeta + C3'-endo sugar pucker, the heart of RNA accuracy,
+    which was previously missing entirely.
+  * ViennaRNA pairing CustomBond: r0=1.06 nm (10.6 A C1'-C1'), pulling the
+    bases in stem regions together into Watson-Crick geometry.
+  * L-BFGS minimization for 3000 steps; long sequences (>200 nt) additionally
+    get MD annealing to escape local minima.
+  * Modeller.addHydrogens auto-adds H (the amber14 RNA templates include H).
 
-安全网: P 偏离 > 2Å 或能量炸 → 抛 RuntimeError, 上层 fallback CG。
+Safety net: if P drifts > 2 A or the energy blows up, raise RuntimeError and
+let the caller fall back to CG.
 """
 
 from __future__ import annotations
 
 import sys
 
-# Windows GBK 编码 workaround: print 含非 ASCII 字符（如 Å）时 GBK 打不出
+# Windows GBK-encoding workaround: printing non-ASCII text (e.g. Angstrom signs) fails under GBK
 if sys.stdout.encoding and sys.stdout.encoding.lower() != 'utf-8':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
     except Exception:
-        pass  # 忽略重配失败（某些环境不允许）
+        pass  # ignore reconfiguration failure (some environments disallow it)
 
 from typing import Dict, List, Optional, Tuple
 
@@ -38,7 +43,7 @@ from .allatom_reconstruct import AllAtomStructure, get_atom_xyzs
 
 
 def _detect_platform() -> str:
-    """自动检测最佳 OpenMM 平台: CUDA > OpenCL > CPU."""
+    """Auto-detect the best OpenMM platform: CUDA > OpenCL > CPU."""
     try:
         from openmm import Platform
         for name in ("CUDA", "OpenCL"):
@@ -51,31 +56,39 @@ def _detect_platform() -> str:
         pass
     return "CPU"
 
-# P 原子 positional restraint 力常数 (kJ/mol/nm²)。
-# 旧值 10 太软, amber 最小化时 P 跑 3.95Å (超 2.0 阈值)。
-# 实测: K=500 仍 3.95Å, K=5000 降到 1.41Å。P 是 CG 求解的骨架点,
-# 代表输入结构信息, 不该大幅跑 → 用 1000 (position restraint 文献常用值),
-# 既压住 P 让残基内部几何往 A-form 拉, 又不把 P 完全钉死让最小化无意义。
+# P-atom positional restraint force constant (kJ/mol/nm^2).
+# The old value of 10 was too soft: during amber minimization P drifted 3.95 A
+# (beyond the 2.0 threshold). Measured: K=500 still 3.95 A, K=5000 dropped to
+# 1.41 A. P is the backbone point solved by CG and carries the input structural
+# information, so it should not wander far -> use 1000 (a common literature
+# value for positional restraints). This both holds P so the intra-residue
+# geometry is pulled toward A-form, and still leaves P free enough for the
+# minimization to be meaningful.
 P_RESTRAINT_K = 1000.0
-# P 偏移阈值: 旧值 2.0 是 K=10 时设的。K 提到 1000 后:
-#   正多边形自测 P 偏 2.35Å, 真实 CG 求解坐标 P 偏 3.6Å
-#   (真实网络解比完美几何应力大)。3.6Å 在 circRNA 半径 28Å 尺度下 ~1.3%,
-#   物理可接受 (P 位置是 CG 求解的近似, 真值应是力场松弛后的构象)。
-#   阶段 1 松 P 约束后 P 会跑更多 (5-8Å), 但这是力场主动调整骨架走向,
-#   不是失败。阈值放到 10.0: 只要力场能量收敛到负就认成功。
+# P drift threshold: the old 2.0 was set when K=10. After raising K to 1000:
+#   a regular-polygon self-test drifted P by 2.35 A; real CG-solved P drifted
+#   3.6 A (real network solutions carry more strain than a perfect geometry).
+#   3.6 A is ~1.3% of a circRNA radius of ~28 A, physically acceptable
+#   (the P position from CG is an approximation; the truth is the relaxed
+#   force-field conformation). Stage 1 loosens the P restraint, so P drifts
+#   more (5-8 A), but that is the force field actively steering the backbone,
+#   not a failure. Threshold raised to 10.0: as long as the force-field energy
+#   converges to a negative value, treat it as a success.
 P_MAX_DRIFT_A = 10.0
 
-# A-form RNA 标准二面角 (弧度) — 用于 backbone torsion 约束
-# α: O3'-P-O5'-C5'  ~ -60° (gauche-)
-# γ: O5'-C5'-C4'-C3' ~ 60°  (gauche+)
-# δ: C5'-C4'-C3'-O3' ~ 84°  (anti, A-form)
-# ζ: C4'-C3'-O3'-P   ~ -90° (gauche-)
-# χ: O4'-C1'-N9-C4 (嘌呤) / O4'-C1'-N1-C2 (嘧啶) ~ -160° (anti)
+# Standard A-form RNA dihedrals (radians) - used for backbone torsion restraints
+# alpha: O3'-P-O5'-C5'   ~ -60 deg (gauche-)
+# gamma: O5'-C5'-C4'-C3' ~  60 deg (gauche+)
+# delta: C5'-C4'-C3'-O3' ~  84 deg (anti, A-form)
+# zeta:  C4'-C3'-O3'-P   ~ -90 deg (gauche-)
+# chi:   O4'-C1'-N9-C4 (purine) / O4'-C1'-N1-C2 (pyrimidine) ~ -160 deg (anti)
 _AFORM_TORSIONS = {
     "alpha": (-60.0, "O3'", "P",   "O5'", "C5'"),
-    # beta 不加: 诊断发现 beta 偏 A-form 51°, 但强加 beta 约束 (k=50) 跟 alpha 共享
-    # P/O5'/C5' 三原子, 约束耦合冲突, alpha/gamma 全崩 (16/18 离群). beta 偏差记为
-    # 已知盲区, 留以后用更弱 k 或 fragment 重建处理. (tests/torsion_stacking_diag.py)
+    # beta intentionally excluded: diagnostics show beta sits 51 deg off A-form,
+    # but adding a beta restraint (k=50) shares P/O5'/C5' atoms with alpha; the
+    # coupled restraints conflict and alpha/gamma collapse (16/18 outliers).
+    # The beta deviation is a known blind spot, deferred to a weaker k or to
+    # fragment rebuilding. (tests/torsion_stacking_diag.py)
     "gamma": (60.0,  "O5'", "C5'", "C4'", "C3'"),
     "delta": (84.0,  "C5'", "C4'", "C3'", "O3'"),
     "zeta":  (-90.0, "C4'", "C3'", "O3'", "P"),
@@ -87,11 +100,12 @@ class _TimeoutError(Exception):
 
 
 def _build_topology_and_modeller(structure: AllAtomStructure):
-    """建 Topology + Modeller, 手动加 H (绕开 amber addHydrogens 模板匹配)。
+    """Build the Topology + Modeller, adding H manually (bypassing amber addHydrogens template matching).
 
-    amber14 RNA.OL3 的 addHydrogens 在 circRNA 环形拓扑上失败 (首末残基
-    ExternalBond 与 A5/A3 模板对不上)。改: 手动按 RNA 标准加 H, 直接
-    createSystem(ignoreExternalBonds=True, residueTemplates=中间模板)。
+    amber14 RNA.OL3's addHydrogens fails on the circular circRNA topology (the
+    ExternalBonds of the first/last residues do not match the A5/A3 templates).
+    Fix: add H manually following RNA conventions, then call
+    createSystem(ignoreExternalBonds=True, residueTemplates=internal templates).
     """
     from openmm.app import Topology, Element, Modeller, ForceField
 
@@ -109,8 +123,9 @@ def _build_topology_and_modeller(structure: AllAtomStructure):
             name_to_atom[a.atom_name] = ta
         res_atoms.append(name_to_atom)
 
-    # --- 手动加 H (绕开 addHydrogens) ---
-    # OpenMM 要求每残基原子连续, 重建 Topology: 每残基重原子+H 一起加。
+    # --- Manually add H (bypassing addHydrogens) ---
+    # OpenMM requires contiguous atoms per residue, so we rebuild the Topology:
+    # each residue is added together with its heavy atoms and its H atoms.
     heavy_xyzs = get_atom_xyzs(structure)  # Å
     heavy_names = [a.atom_name for a in structure.atoms]
     heavy_res_idx = [a.res_seq - 1 for a in structure.atoms]
@@ -148,9 +163,10 @@ def _build_topology_and_modeller(structure: AllAtomStructure):
     modeller = Modeller(topo2, coords_arr)
     ff = ForceField("amber14-all.xml", "implicit/obc1.xml")
 
-    # 建 heavy_to_topo 映射: structure.atoms 重原子索引 -> topo2 原子索引。
-    # topo2 里每残基是 "重原子 + 该残基 H" 交替, H 夹在重原子中间,
-    # 不能用 serial 直接索引。遍历 topo2 原子, 跳过 H, 记重原子顺序。
+    # Build the heavy_to_topo map: structure.atoms heavy-atom index -> topo2 atom index.
+    # In topo2 each residue is "heavy atoms followed by that residue's H atoms",
+    # so H atoms sit between residues and serial numbers cannot index heavy atoms
+    # directly. Iterate over topo2 atoms, skip H, and record the heavy-atom order.
     heavy_to_topo = []
     for ta in topo2.atoms():
         if ta.element.symbol == "H":
@@ -160,40 +176,42 @@ def _build_topology_and_modeller(structure: AllAtomStructure):
 
 
 def _collect_bonds_global(topo):
-    """收集 Topology 里所有 bond 的 (atom1.index, atom2.index)。"""
+    """Collect all (atom1.index, atom2.index) bonds in the Topology."""
     bonds = []
     for b in topo.bonds():
         bonds.append((b[0].index, b[1].index))
     return bonds
 
 
-# RNA 标准 H 分布 (重原子 → {碱基: [(H名, 元素), ...]})。
-# 从 amber14 RNA.OL3.xml 模板 A/G/U/C 逐个核对得到, 不是猜的。
-# 骨架 H (C5'/C4'/C3'/C2'/C1'/O2'-HO2') 四种碱基都有, 公共。
-# 碱基 H 按碱基区分: H1→N1(G), H2→C2(A), H3→N3(U), H5→C5(U/C),
-# H6→C6(U/C), H8→C8(A/G), H21/H22→N2(G), H41/H42→N4(C), H61/H62→N6(A)。
-# circRNA 全用中间模板: O5' 连本残基 P, O3' 连下游 P, 都不加 H
-# (O5'/O3' 加 H 在 _add_hydrogens_manual 里按是否有外部 P 动态判)。
+# RNA standard H placement (heavy atom -> {base: [(H name, element), ...]}).
+# Cross-checked residue by residue against the amber14 RNA.OL3.xml A/G/U/C
+# templates, not guessed.
+# Backbone H (C5'/C4'/C3'/C2'/C1'/O2'-HO2') is common to all four bases.
+# Base H depends on the base: H1->N1(G), H2->C2(A), H3->N3(U), H5->C5(U/C),
+# H6->C6(U/C), H8->C8(A/G), H21/H22->N2(G), H41/H42->N4(C), H61/H62->N6(A).
+# circRNA always uses internal templates: O5' bonds to its own residue's P and
+# O3' to the downstream P, so neither gets an H. (Whether O5'/O3' take an H is
+# decided dynamically in _add_hydrogens_manual by the presence of an external P.)
 _RNA_H_MAP: Dict[str, Dict[str, List[Tuple[str, str]]]] = {
-    # 骨架 — 所有碱基通用
+    # Backbone - common to all bases
     "C5'": {"*": [("H5'", "H"), ("H5''", "H")]},
     "C4'": {"*": [("H4'", "H")]},
     "C3'": {"*": [("H3'", "H")]},
     "C2'": {"*": [("H2'", "H")]},
     "C1'": {"*": [("H1'", "H")]},
     "O2'": {"*": [("HO2'", "H")]},
-    # 嘌呤碱基 H
+    # Purine base H
     "C8":  {"A": [("H8", "H")], "G": [("H8", "H")]},
-    "C2":  {"A": [("H2", "H")]},          # 仅 A 的 C2 有 H2; G 的 C2 连 N2 不加 H
-    "N1":  {"G": [("H1", "H")]},          # G 的 N1-H1 (亚胺氢)
+    "C2":  {"A": [("H2", "H")]},          # only A's C2 carries H2; G's C2 bonds to N2 and takes no H
+    "N1":  {"G": [("H1", "H")]},          # G's N1-H1 (imino hydrogen)
     "N6":  {"A": [("H61", "H"), ("H62", "H")]},
     "N2":  {"G": [("H21", "H"), ("H22", "H")]},
-    # 嘧啶碱基 H
+    # Pyrimidine base H
     "C5":  {"U": [("H5", "H")], "C": [("H5", "H")]},
     "C6":  {"U": [("H6", "H")], "C": [("H6", "H")]},
-    "N3":  {"U": [("H3", "H")]},  # 仅 U 的 N3-H3; C 的 N3 是双键不能接 H
+    "N3":  {"U": [("H3", "H")]},  # only U's N3-H3; C's N3 is a double-bonded ring N and takes no H
     "N4":  {"C": [("H41", "H"), ("H42", "H")]},
-    # 这些重原子在任何碱基都不带 H
+    # These heavy atoms carry no H on any base
     "O5'": {}, "O3'": {}, "O6": {}, "O2": {}, "O4": {},
     "N9": {}, "N7": {}, "C4": {},
     "P": {}, "OP1": {}, "OP2": {},
@@ -204,7 +222,10 @@ _H_BOND_LEN = {"C": 1.09, "N": 1.01, "O": 0.97}
 def _add_hydrogens_manual(
     heavy_xyzs, heavy_names, heavy_res_idx, sequences, bonds
 ):
-    """手动加 H (位置: 重原子邻居质心反方向推)。返回 [(res_seq, name, xyz), ...]。"""
+    """Manually add H (placed by pushing out opposite the heavy-atom neighbor centroid).
+
+    Returns [(res_seq, name, xyz), ...].
+    """
     N = heavy_xyzs.shape[0]
     neighbors = [set() for _ in range(N)]
     for (i, j) in bonds:
@@ -217,7 +238,7 @@ def _add_hydrogens_manual(
         aname = heavy_names[i]
         res_idx = heavy_res_idx[i]
         base = sequences[res_idx]
-        # map 是 {重原子: {碱基: [(H名, 元素), ...]}}; "*" 表所有碱基通用
+        # map is {heavy_atom: {base: [(H name, element), ...]}}; "*" means all bases
         per_base = _RNA_H_MAP.get(aname)
         if not per_base:
             continue
@@ -268,21 +289,21 @@ def _add_hydrogens_manual(
     return hydrogens
 
 
-# 标准 RNA 残基内键 (name-name 对)。骨架 + 糖环 + 碱基。
+# Standard intra-residue RNA bonds (name-name pairs): backbone + sugar ring + base.
 _BACKBONE_BONDS = [
     ("P", "OP1"), ("P", "OP2"), ("P", "O5'"),
     ("O5'", "C5'"), ("C5'", "C4'"), ("C4'", "O4'"),
     ("C4'", "C3'"), ("C3'", "O3'"), ("C3'", "C2'"),
-    ("C2'", "O2'"), ("C2'", "C1'"), ("C1'", "O4'"),  # 糖环闭合 + 2'-OH
+    ("C2'", "O2'"), ("C2'", "C1'"), ("C1'", "O4'"),  # sugar-ring closure + 2'-OH
 ]
 _PURINE_BONDS = [  # A/G
     ("C1'", "N9"), ("N9", "C8"), ("N9", "C4"), ("C8", "N7"), ("N7", "C5"),
     ("C5", "C6"), ("C5", "C4"), ("C6", "N1"), ("N1", "C2"), ("C2", "N3"),
-    ("N3", "C4"),  # 双环闭合
+    ("N3", "C4"),  # bicyclic ring closure
 ]
 _PYRIMIDINE_BONDS = [  # C/U
     ("C1'", "N1"), ("N1", "C2"), ("C2", "N3"), ("N3", "C4"),
-    ("C4", "C5"), ("C5", "C6"), ("C6", "N1"),  # 六元环闭合
+    ("C4", "C5"), ("C5", "C6"), ("C6", "N1"),  # six-membered ring closure
 ]
 _BASE_EXTRA_BONDS = {
     "A": [("C6", "N6")],
@@ -293,9 +314,10 @@ _BASE_EXTRA_BONDS = {
 
 
 def _add_rna_bonds(topo, res_atoms, structure):
-    """给每个残基添加标准 RNA 共价键 (含 H) + 残基间磷酸二酯键。
+    """Add the standard RNA covalent bonds (incl. H) for every residue plus the inter-residue phosphodiester bonds.
 
-    H 键用 _RNA_H_MAP 反查: 每个 H 挂在哪个重原子上, 跟 map 加 H 那侧一致。
+    H bonds are resolved via _RNA_H_MAP: which heavy atom each H attaches to,
+    consistent with the side on which the map added the H.
     """
     L = len(res_atoms)
     for res_idx, name_to_atom in enumerate(res_atoms):
@@ -312,7 +334,8 @@ def _add_rna_bonds(topo, res_atoms, structure):
             if a1 is not None and a2 is not None:
                 topo.addBond(a1, a2)
 
-        # H 键: 遍历 map 里该重原子(本碱基或通用) 的 H, addBond(重原子, H)
+        # H bonds: for each heavy atom in the map (its own base or the "*" common
+        # entry), addBond(heavy_atom, H) for its H atoms
         for heavy_name, per_base in _RNA_H_MAP.items():
             h_list = per_base.get(base) or per_base.get("*")
             if not h_list:
@@ -325,10 +348,11 @@ def _add_rna_bonds(topo, res_atoms, structure):
                 if h_atom is not None:
                     topo.addBond(heavy_atom, h_atom)
 
-    # 残基间磷酸二酯键: O3'[i] ↔ P[i+1], i=0..L-2
-    # 不加 BSJ 拓扑键 — 用 ignoreExternalBonds=True 让首末残基匹配中间模板。
-    # BSJ 闭合由 amber_refine 里的 HarmonicBondForce 物理约束保证,
-    # 最小化后不影响配图 (BSJ 局部)。
+    # Inter-residue phosphodiester bonds: O3'[i] <-> P[i+1], i=0..L-2
+    # No BSJ topology bond is added - ignoreExternalBonds=True lets the first
+    # and last residues match the internal templates. BSJ closure is enforced by
+    # the HarmonicBondForce physical restraint inside amber_refine, and after
+    # minimization it does not affect the base pairing (BSJ is local).
     for i in range(L - 1):
         o3 = res_atoms[i].get("O3'")
         p_next = res_atoms[i + 1].get("P")
@@ -347,28 +371,36 @@ def amber_refine(
     coding_mask: Optional[np.ndarray] = None,
     cg_coords: Optional[np.ndarray] = None,
     coding_restraint_k: float = 10000.0,
-    cg_topology_weight: float = 0.0,  # 方案 F: 非 coding P 融合 CG 全局拓扑权重
+    cg_topology_weight: float = 0.0,  # scheme F: blend weight of CG global topology into non-coding P restraints
     use_o3p_bond: bool = False,
     use_o3p_angle: bool = False,
     pair_anneal_stages: Optional[List[Tuple[float, float]]] = None,
 ) -> Tuple[np.ndarray, float, float, Dict[str, int]]:
-    """Amber14 OL3 + OBC1 约束最小化。失败时返回重建坐标 (无精修)。
+    """Amber14 OL3 + OBC1 restrained minimization. On failure returns the reconstructed coordinates (unrefined).
 
-    coding_mask: bool 数组 (L,) True = coding 区残基。amber 精修时
-        coding 残基的 P/C1'/O3* 位置用高 k 钉死到 cg_coords, 保持真实结构。
-    cg_coords: (L, 3) nm, coding 钉死的目标坐标 (CG 原坐标)。
-        不传时用 structure 里的 P 坐标 (即 RL 优化后的位置, 等于没钉死)。
-    coding_restraint_k: coding 钉死力常数 (kJ/mol/nm²)。默认 10000 = 强钉死。
-    cg_topology_weight: 非 coding 残基 P restraint 目标融合 CG 全局拓扑的权重
-        (0.0=纯 1EHZ Kabsch 模板; 1.0=完全钉回 CG 拓扑)。默认 0.0 保持旧行为。
-        长序列下 >0 让全局拓扑信息进入 amber, 避免 1EHZ 局部模板覆盖全局配对位置。
-    use_o3p_bond: P2 键长约束 (O3'-P[i+1] 1.6Å k=10000). 默认关.
-    use_o3p_angle: P2.5 键角约束 (C3'-O3'-P / O3'-P-O5'). 默认关.
-        (两关 = P1 干净版, 纯 4 点 Kabsch 无额外约束, 用于 P3 对比基线)
-    pair_anneal_stages: 配对约束退火阶段列表 [(k, r0_nm), ...]。
-        每阶段用 k 为力常数、r0 为目标距离, 逐步收紧配对约束。
-        None 且 pairs 非空时默认 [(20,2.5), (50,2.0), (100,1.06)]。
-        空列表 = 不退火 (旧行为, 直接用 k=100 r0=1.06)。
+    coding_mask: bool array (L,); True = residue in a coding region. During amber
+        refinement the P/C1'/O3* positions of coding residues are pinned to
+        cg_coords with a high k, preserving the true structure.
+    cg_coords: (L, 3) nm; the target coordinates (original CG coordinates) coding
+        residues are pinned to. When omitted, the P coordinates in structure are
+        used (i.e. the RL-optimized positions, equivalent to no pinning).
+    coding_restraint_k: force constant for pinning coding residues (kJ/mol/nm^2).
+        Default 10000 = strongly pinned.
+    cg_topology_weight: blend weight for merging the CG global topology into the
+        P-restraint targets of non-coding residues (0.0 = pure 1EHZ Kabsch
+        template; 1.0 = fully pinned back to CG topology). Default 0.0 keeps old
+        behavior. On long sequences a value >0 lets global-topology information
+        reach amber, preventing the local 1EHZ template from overriding the
+        global pairing positions.
+    use_o3p_bond: P2 bond-length restraint (O3'-P[i+1] 1.6 A, k=10000). Off by default.
+    use_o3p_angle: P2.5 bond-angle restraint (C3'-O3'-P / O3'-P-O5'). Off by default.
+        (Both off = the clean P1 version: pure 4-point Kabsch with no extra
+        restraints, used as the P3 comparison baseline.)
+    pair_anneal_stages: list of pairing-restraint annealing stages [(k, r0_nm), ...].
+        Each stage tightens the pairing restraint with k as the force constant and
+        r0 as the target distance. When None and pairs is non-empty, defaults to
+        [(20,2.5), (50,2.0), (100,1.06)]. An empty list means no annealing (old
+        behavior: use k=100 r0=1.06 directly).
     """
     try:
         return _amber_refine_impl(
@@ -386,7 +418,7 @@ def amber_refine(
             pair_anneal_stages=pair_anneal_stages,
         )
     except Exception as exc:
-        print(f"[amber_refine] 精修失败, 返回重建坐标: {exc!r}")
+        print(f"[amber_refine] refinement failed, returning reconstructed coordinates: {exc!r}")
         coords_aa = get_atom_xyzs(structure)
         info = {
             "n_heavy": len(structure.atoms),
@@ -417,17 +449,19 @@ def _amber_refine_impl(
     use_o3p_angle: bool = False,
     pair_anneal_stages: Optional[List[Tuple[float, float]]] = None,
 ) -> Tuple[np.ndarray, float, float, Dict[str, int]]:
-    """Amber14 OL3 + OBC1 约束最小化全原子结构。
+    """Amber14 OL3 + OBC1 restrained minimization of the all-atom structure.
 
-    cg_topology_weight: 非 coding 残基 P restraint 目标融合 CG 全局拓扑的权重
-        (0.0=纯 1EHZ Kabsch 模板; 1.0=完全钉回 CG 拓扑)。默认 0.0 保持旧行为。
-        长序列 (>800nt) 下 >0 让全局配对位置信息进入 amber, 避免 1EHZ 局部
-        模板覆盖全局拓扑 (方案 F)。
+    cg_topology_weight: blend weight for merging the CG global topology into the
+        P-restraint targets of non-coding residues (0.0 = pure 1EHZ Kabsch
+        template; 1.0 = fully pinned back to CG topology). Default 0.0 keeps old
+        behavior. On long sequences (>800 nt) a value >0 lets global pairing
+        information reach amber, preventing the local 1EHZ template from
+        overriding the global topology (scheme F).
 
     Returns:
         (refined_coords, e0, e1, info)
-        refined_coords: (N, 3) Å (含 H, 与 Modeller 后的原子顺序一致)
-        e0/e1: 最小化前/后势能 (kJ/mol)
+        refined_coords: (N, 3) A (includes H, in the same atom order as after Modeller)
+        e0/e1: potential energy before/after minimization (kJ/mol)
         info: {'n_atoms': ..., 'n_h': ..., 'max_p_drift': ...}
     """
     from openmm import (
@@ -444,58 +478,65 @@ def _amber_refine_impl(
     n_heavy = len(structure.atoms)
     n_total = int(modeller.topology.getNumAtoms())
 
-    # 加 H 后原子索引重映射: 重建的 P/O3*/C1* 在新拓扑里位置可能变了,
-    # 需重新按 (res_seq, atom_name) 查找。
+    # After adding H the atom indices are remapped: the rebuilt P/O3'/C1' atoms
+    # may sit at different positions in the new topology, so they must be
+    # re-looked-up by (res_seq, atom_name).
     atom_lookup: Dict[Tuple[int, str], int] = {}  # (res_seq, atom_name) → new_idx
     for new_idx, atom in enumerate(topo.atoms()):
         atom_lookup[(atom.residue.index + 1, atom.name)] = new_idx
 
-    # ignoreExternalBonds: 跳过 ExternalBond 检查 (circRNA 环形拓扑会让 amber 困惑)
-    # 不用 residueTemplates: circRNA 所有残基都是内部的 (无 5'/3' 端点),
-    # 让 OpenMM 自动匹配内部模板 (A/U/G/C), 避免端点模板 (A5/A3/C5/C3) 干扰。
+    # ignoreExternalBonds: skip the ExternalBond check (the circular circRNA
+    # topology confuses amber). No residueTemplates are used: every circRNA
+    # residue is internal (no 5'/3' ends), so let OpenMM match the internal
+    # templates (A/U/G/C) automatically and avoid the end templates (A5/A3/C5/C3).
     system = ff.createSystem(
         topo, constraints=None, rigidWater=True,
         ignoreExternalBonds=True,
     )
 
-    # --- 力 1: P positional restraint (coding 区钉回 cg_coords, non-coding 钉自身) ---
-    # coding 残基: per-particle k=coding_restraint_k (默认 10000, 强钉死), 目标=cg_coords
-    #   (RL 之前的 CG 原坐标, 保真实结构)。RL 全序列可动, amber 把 coding 拉回。
-    # non-coding 残基: per-particle k=P_RESTRAINT_K (1000, 软约束), 目标=structure 自身 P
-    #   (amber 输入坐标 = RL 优化后的 CG P, 接受物理收敛微调)。
-    # 无 coding_mask 时全部 non-coding 处理 (等价旧行为, 不破现有调用)。
-    # 全局 k_scale 乘子: 多阶段退火用它放松/收紧 (阶段1松, 阶段3收紧到1.0),
-    #   per-particle k 保留 coding/non-coding 区分不被全局 setParameter 抹掉。
+    # --- Force 1: P positional restraint (coding pinned to cg_coords, non-coding pinned to itself) ---
+    # Coding residues: per-particle k=coding_restraint_k (default 10000, strongly
+    #   pinned), target=cg_coords (the original pre-RL CG coordinates, preserving
+    #   the true structure). RL moves the whole sequence; amber pulls coding back.
+    # Non-coding residues: per-particle k=P_RESTRAINT_K (1000, soft restraint),
+    #   target=structure's own P (amber input coords = RL-optimized CG P, allowing
+    #   a small physical convergence tweak).
+    # With no coding_mask everything is treated as non-coding (same as the old
+    # behavior, so existing calls keep working).
+    # Global k_scale multiplier: the multi-stage annealing loosens/tightens it
+    #   (stage 1 loose, stage 3 back to 1.0); per-particle k keeps the
+    #   coding/non-coding distinction from being erased by the global setParameter.
     restraint = CustomExternalForce("k_scale*k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
     restraint.addGlobalParameter("k_scale", 1.0)
     restraint.addPerParticleParameter("k")
     restraint.addPerParticleParameter("x0")
     restraint.addPerParticleParameter("y0")
     restraint.addPerParticleParameter("z0")
-    p_drift_refs = []  # (new_idx, original_xyz_nm) for 检查
+    p_drift_refs = []  # (new_idx, original_xyz_nm) for the drift check
     n_coding_pinned = 0
     n_topology_fused = 0
-    # 方案 F: 非 coding 区 P 的目标位置融合 CG 全局拓扑。
-    # cg_coords 是 nm, structure P 也是 nm (÷10.0 后)。
+    # Scheme F: the P target positions of non-coding regions blend in the CG
+    # global topology. cg_coords is in nm, and structure P is in nm as well
+    # (after dividing by 10.0).
     for res_idx in range(L):
         res_seq = res_idx + 1
         new_idx = atom_lookup.get((res_seq, "P"))
         if new_idx is None:
             continue
-        # 默认目标 = structure 自身 P (amber 输入坐标), 力常数 = P_RESTRAINT_K
+        # Default target = structure's own P (amber input coords), k = P_RESTRAINT_K
         p_xyz = structure.atoms[structure.residue_atom_index[res_idx]["P"]].xyz / 10.0
         k_val = P_RESTRAINT_K
-        # coding 残基: 钉回 cg_coords, 强约束
+        # Coding residue: pin back to cg_coords with a strong restraint
         if (coding_mask is not None and cg_coords is not None
                 and res_idx < len(coding_mask) and coding_mask[res_idx]
                 and res_idx < len(cg_coords)):
-            # cg_coords 是 nm (CG 求解的 P), coding 钉到 RL 之前的 CG 原坐标
+            # cg_coords is in nm (CG-solved P); coding is pinned to the original pre-RL CG coordinates
             p_xyz = np.asarray(cg_coords[res_idx], dtype=np.float64)
             k_val = coding_restraint_k
             n_coding_pinned += 1
         elif (cg_topology_weight > 0.0 and cg_coords is not None
                 and res_idx < len(cg_coords)):
-            # 方案 F: 非 coding 区 P 目标 = (1-w)·1EHZ模板 + w·CG拓扑
+            # Scheme F: non-coding P target = (1-w)*1EHZ template + w*CG topology
             cg_p = np.asarray(cg_coords[res_idx], dtype=np.float64)
             tmpl_p = np.asarray(p_xyz, dtype=np.float64)
             p_xyz = (1.0 - cg_topology_weight) * tmpl_p + cg_topology_weight * cg_p
@@ -504,7 +545,7 @@ def _amber_refine_impl(
         p_drift_refs.append((new_idx, p_xyz))
     system.addForce(restraint)
 
-    # --- 力 2: BSJ 闭环键 (O3*[L-1] ↔ P[0]) ---
+    # --- Force 2: BSJ closure bond (O3'[L-1] <-> P[0]) ---
     last_o3 = atom_lookup.get((L, "O3'"))
     first_p = atom_lookup.get((1, "P"))
     bsj_bond = HarmonicBondForce()
@@ -512,54 +553,60 @@ def _amber_refine_impl(
         bsj_bond.addBond(last_o3, first_p, 0.161, 50000.0)
     system.addForce(bsj_bond)
 
-    # --- 力 2.5: 相邻残基 O3'-P 键长硬约束 (P2, use_o3p_bond 开关) ---
-    # 1EHZ 模板 Kabsch 对齐只保 P/C1'/C4'/O3' 四点, 但相邻残基间 O3'[i]-P[i+1]
-    # 桥接几何会被拉坏 (amber 前 C3'-O3'-P 偏 70°). 加 HarmonicBondForce 把每条
-    # O3'[i]-P[i+1] 键长钉死到 1.6Å (A-form 真值), k=10000 全程紧约束 (不走 k_scale).
-    # 与 OL3 力场自带的 O3'-P 键长项不冲突 (都指向 1.6Å, 只是再钉死防最小化偏离).
-    # 默认关: 关掉 = P1 干净版 (纯 4 点 Kabsch), 用于 P3 对比基线.
+    # --- Force 2.5: hard O3'-P bond-length restraint between adjacent residues (P2, use_o3p_bond switch) ---
+    # The 1EHZ-template Kabsch alignment only preserves the four points
+    # P/C1'/C4'/O3'; the bridging geometry between adjacent residues
+    # (O3'[i]-P[i+1]) can be distorted (C3'-O3'-P was ~70 deg before amber). A
+    # HarmonicBondForce pins every O3'[i]-P[i+1] bond length to 1.6 A (the
+    # A-form value) with k=10000 throughout as a tight restraint (not scaled by
+    # k_scale). This does not conflict with the OL3 force field's own O3'-P bond
+    # term (both point to 1.6 A); it just re-pins the length to prevent drift
+    # during minimization. Off by default: off = clean P1 version (pure 4-point
+    # Kabsch), used as the P3 comparison baseline.
     n_o3p = 0
     if use_o3p_bond:
         o3p_bond = HarmonicBondForce()
         for i in range(L):
-            o3_idx = atom_lookup.get((i + 1, "O3'"))       # 残基 i 的 O3'
-            next_p_idx = atom_lookup.get(((i + 1) % L + 1, "P"))  # 残基 i+1 的 P (环形)
+            o3_idx = atom_lookup.get((i + 1, "O3'"))       # O3' of residue i
+            next_p_idx = atom_lookup.get(((i + 1) % L + 1, "P"))  # P of residue i+1 (circular)
             if o3_idx is not None and next_p_idx is not None:
                 o3p_bond.addBond(o3_idx, next_p_idx, 0.16, 10000.0)  # r0=1.6Å, k=10000
                 n_o3p += 1
         system.addForce(o3p_bond)
 
-    # --- 力 2.6: 磷酸桥键角硬约束 (P2.5, use_o3p_angle 开关) ---
-    # P2 键长约束救不了键角 (键长对 ≠ 键角对). 加 CustomAngleForce 直接约束两个
-    # 关键磷酸桥键角: C3'-O3'-P (119.5°), O3'-P-O5' (104.1°), OL3 A-form 真值.
-    # k_angle=500 kJ/mol/rad² 中等强度, 全程紧约束 (不走 k_scale).
-    # 跨残基: C3'[i]-O3'[i]-P[i+1] (顶点 O3'[i]) 和 O3'[i]-P[i+1]-O5'[i+1] (顶点 P[i+1]).
-    # CustomAngleForce.addAngle(p1, p2, p3, params): p2 是顶点.
-    # 默认关: 关掉 = P1 干净版.
+    # --- Force 2.6: hard phosphate-bridge bond-angle restraints (P2.5, use_o3p_angle switch) ---
+    # Bond-length restraints cannot fix bond angles (a correct length pair does
+    # not imply a correct angle pair). A CustomAngleForce directly restrains the
+    # two key phosphate-bridge angles, C3'-O3'-P (119.5 deg) and O3'-P-O5'
+    # (104.1 deg), the OL3 A-form values. k_angle=500 kJ/mol/rad^2 is moderate
+    # and stays tight throughout (not scaled by k_scale). Cross-residue:
+    # C3'[i]-O3'[i]-P[i+1] (vertex O3'[i]) and O3'[i]-P[i+1]-O5'[i+1] (vertex
+    # P[i+1]). CustomAngleForce.addAngle(p1, p2, p3, params): p2 is the vertex.
+    # Off by default: off = clean P1 version.
     n_angle = 0
     if use_o3p_angle:
         angle_force = CustomAngleForce("0.5*k_angle*(theta-theta0)^2")
         angle_force.addGlobalParameter("k_angle", 500.0)
         angle_force.addPerAngleParameter("theta0")
-        THETA_C3_O3_P = 119.5 * np.pi / 180.0  # C3'-O3'-P 平衡角 (rad)
-        THETA_O3_P_O5 = 104.1 * np.pi / 180.0  # O3'-P-O5' 平衡角 (rad)
+        THETA_C3_O3_P = 119.5 * np.pi / 180.0  # C3'-O3'-P equilibrium angle (rad)
+        THETA_O3_P_O5 = 104.1 * np.pi / 180.0  # O3'-P-O5' equilibrium angle (rad)
         for i in range(L):
-            j = (i + 1) % L  # 下一残基索引
+            j = (i + 1) % L  # next-residue index
             c3_i = atom_lookup.get((i + 1, "C3'"))
             o3_i = atom_lookup.get((i + 1, "O3'"))
             p_j = atom_lookup.get((j + 1, "P"))
             o5_j = atom_lookup.get((j + 1, "O5'"))
-            # C3'-O3'-P: 顶点 O3'[i] -> addAngle(C3, O3, P)
+            # C3'-O3'-P: vertex O3'[i] -> addAngle(C3, O3, P)
             if None not in (c3_i, o3_i, p_j):
                 angle_force.addAngle(c3_i, o3_i, p_j, [THETA_C3_O3_P])
                 n_angle += 1
-            # O3'-P-O5': 顶点 P[i+1] -> addAngle(O3, P, O5)
+            # O3'-P-O5': vertex P[i+1] -> addAngle(O3, P, O5)
             if None not in (o3_i, p_j, o5_j):
                 angle_force.addAngle(o3_i, p_j, o5_j, [THETA_O3_P_O5])
                 n_angle += 1
         system.addForce(angle_force)
 
-    # --- 力 3: ViennaRNA 配对距离约束 (C1*-C1* ~10.6Å) ---
+    # --- Force 3: ViennaRNA pairing distance restraint (C1'-C1' ~10.6 A) ---
     pair_force = CustomBondForce("0.5*k_pairdist*(r-r0)^2")
     pair_force.addGlobalParameter("k_pairdist", 100.0)
     pair_force.addPerBondParameter("r0")
@@ -574,35 +621,37 @@ def _amber_refine_impl(
         pair_force.addBond(ci, cj, [0.106])
     system.addForce(pair_force)
 
-    # --- 力 4: A-form 二面角约束 (backbone torsions) ---
-    # alpha = O3'[i-1]-P[i]-O5'[i]-C5'[i] (跨残基, O3' 来自前一残基)
-    # gamma = O5'[i]-C5'[i]-C4'[i]-C3'[i] (残基内)
-    # delta = C5'[i]-C4'[i]-C3'[i]-O3'[i] (残基内)
-    # zeta  = C4'[i]-C3'[i]-O3'[i]-P[i+1]  (跨残基, P 来自下一残基)
-    # 修 bug: 旧版 alpha/zeta 全用本残基原子 (假二面角, 约束了个不存在的角),
-    #   导致真实 alpha/zeta 偏 A-form 100-140°, 碱基堆积距离 7.9Å (真值 3.4Å)。
+    # --- Force 4: A-form dihedral restraints (backbone torsions) ---
+    # alpha = O3'[i-1]-P[i]-O5'[i]-C5'[i] (cross-residue; O3' comes from the previous residue)
+    # gamma = O5'[i]-C5'[i]-C4'[i]-C3'[i] (intra-residue)
+    # delta = C5'[i]-C4'[i]-C3'[i]-O3'[i] (intra-residue)
+    # zeta  = C4'[i]-C3'[i]-O3'[i]-P[i+1] (cross-residue; P comes from the next residue)
+    # Bug fix: the old version built alpha/zeta entirely from same-residue atoms
+    # (a fake dihedral restraining a nonexistent angle), leaving the real
+    # alpha/zeta 100-140 deg off A-form and the base-stacking distance at 7.9 A
+    # (true value 3.4 A).
     torsion = CustomTorsionForce("0.5*k_aform*(theta-theta0)^2")
     torsion.addGlobalParameter("k_aform", 50.0)  # kJ/mol/rad²
     torsion.addPerTorsionParameter("theta0")
     n_torsions = 0
     for res_idx in range(L):
         res_seq = res_idx + 1
-        prev_seq = ((res_idx - 1) % L) + 1  # 前一残基 res_seq (环形)
-        next_seq = ((res_idx + 1) % L) + 1  # 下一残基 res_seq (环形)
+        prev_seq = ((res_idx - 1) % L) + 1  # previous residue res_seq (circular)
+        next_seq = ((res_idx + 1) % L) + 1  # next residue res_seq (circular)
         for tname, (angle_deg, a1, a2, a3, a4) in _AFORM_TORSIONS.items():
-            # alpha: a1 (O3') 取前一残基, 其余本残基
+            # alpha: a1 (O3') comes from the previous residue, the rest from this residue
             if tname == "alpha":
                 i1 = atom_lookup.get((prev_seq, a1))
                 i2 = atom_lookup.get((res_seq, a2))
                 i3 = atom_lookup.get((res_seq, a3))
                 i4 = atom_lookup.get((res_seq, a4))
-            # zeta: a4 (P) 取下一残基, 其余本残基
+            # zeta: a4 (P) comes from the next residue, the rest from this residue
             elif tname == "zeta":
                 i1 = atom_lookup.get((res_seq, a1))
                 i2 = atom_lookup.get((res_seq, a2))
                 i3 = atom_lookup.get((res_seq, a3))
                 i4 = atom_lookup.get((next_seq, a4))
-            # gamma/delta: 全本残基
+            # gamma/delta: all atoms from this residue
             else:
                 i1 = atom_lookup.get((res_seq, a1))
                 i2 = atom_lookup.get((res_seq, a2))
@@ -615,9 +664,11 @@ def _amber_refine_impl(
             n_torsions += 1
     system.addForce(torsion)
 
-    # 约束项标 force group (最小化后分项量能量, 区分约束 vs amber 力场)。
-    # amber 自带力场 (createSystem 建的) 留 group 0; 约束项归 1..4。
-    # 必须在 Context (Simulation) 创建前 setForceGroup。
+    # Assign force groups to the restraint terms (so per-term energies can be
+    # read out after minimization, separating restraints from the amber field).
+    # The amber force field built by createSystem stays in group 0; the restraint
+    # terms go to groups 1..4. setForceGroup must be called before the Context
+    # (Simulation) is created.
     constraint_forces = [restraint, bsj_bond, pair_force, torsion]
     for gi, f in enumerate(constraint_forces, start=1):
         try:
@@ -625,17 +676,18 @@ def _amber_refine_impl(
         except Exception:
             pass
 
-    # --- 积分器 + 平台 ---
-    # 始终用 Langevin: 初始几何有原子冲突 (e0~1e14), 要靠 MD 退火打散再最小化。
-    # 旧逻辑只在 L>=200 时开 MD, 短序列用 Verlet 跑不了 step()。
+    # --- Integrator + platform ---
+    # Always use Langevin: the initial geometry has atomic clashes (e0 ~ 1e14),
+    # which need MD annealing to break apart before minimization. The old logic
+    # enabled MD only for L>=200, but a short sequence on Verlet cannot run step().
     use_md = True
     integrator = LangevinMiddleIntegrator(
         300 * unit.kelvin, 1 / unit.picosecond, 0.002 * unit.picosecond
     )
-    # 解析 "auto" 平台
+    # Resolve the "auto" platform
     if platform_name == "auto":
         resolved = _detect_platform()
-        print(f"  [amber_refine] 平台自动检测: {resolved}")
+        print(f"  [amber_refine] auto-detected platform: {resolved}")
     else:
         resolved = platform_name
     try:
@@ -643,27 +695,29 @@ def _amber_refine_impl(
         sim = Simulation(topo, system, integrator, platform)
     except Exception:
         fallback = _detect_platform()
-        print(f"  [amber_refine] 平台 {resolved} 不可用, 降级到 {fallback}")
+        print(f"  [amber_refine] platform {resolved} unavailable; falling back to {fallback}")
         try:
             platform = Platform.getPlatformByName(fallback)
             sim = Simulation(topo, system, integrator, platform)
         except Exception:
             sim = Simulation(topo, system, integrator)
 
-    # Modeller 加 H 后的坐标 (nm)
+    # Coordinates after Modeller adds H (nm)
     positions = modeller.getPositions()
     sim.context.setPositions(positions)
 
     state0 = sim.context.getState(getEnergy=True)
     e0 = state0.getPotentialEnergy()._value
 
-    # --- 方案 6: 配对约束退火 (pair restraints annealing) ---
-    # 在 P 松弛和 MD 退火之前, 先用渐进收紧的 k/r0 把 C1'-C1' 距离
-    # 从远端 (25Å) 逐步拉到 WC 几何 (10.6Å), 避免突然强约束导致结构畸变。
-    # 每阶段: setBondParameters → updateParametersInContext → minimizeEnergy。
+    # --- Scheme 6: pair-restraint annealing ---
+    # Before the P relaxation and MD annealing, progressively tighten k/r0 to
+    # pull the C1'-C1' distance from far apart (~25 A) toward Watson-Crick
+    # geometry (10.6 A), avoiding structural distortion from a sudden strong
+    # restraint. Each stage: setBondParameters -> updateParametersInContext ->
+    # minimizeEnergy.
     _n_bonds_in_pair = pair_force.getNumBonds()
     if _n_bonds_in_pair > 0 and pair_anneal_stages is None:
-        # 默认退火: 3 阶段渐进收紧
+        # Default annealing: 3 progressively tightening stages
         _pair_anneal_stages = [(20.0, 2.5), (50.0, 2.0), (100.0, 1.06)]
     elif pair_anneal_stages is not None:
         _pair_anneal_stages = pair_anneal_stages
@@ -672,15 +726,16 @@ def _amber_refine_impl(
 
     if _pair_anneal_stages:
         for _si, (_pk, _pr0) in enumerate(_pair_anneal_stages):
-            # 更新全局 k_pairdist + 每个 bond 的 r0
+            # Update the global k_pairdist plus each bond's r0
             sim.context.setParameter("k_pairdist", _pk)
             for _bi in range(_n_bonds_in_pair):
                 p1, p2, _old_params = pair_force.getBondParameters(_bi)
                 pair_force.setBondParameters(_bi, p1, p2, [_pr0])
             pair_force.updateParametersInContext(sim.context)
-            # 记录退火前能量
+            # Record the energy before annealing
             _pre_e = sim.context.getState(getEnergy=True).getPotentialEnergy()._value
-            # 最小化: 前两阶段各 1000 步, 最后阶段用 max_iterations
+            # Minimize: 1000 steps each for the first two stages, and
+            # max_iterations for the final stage
             _stage_iters = max_iterations if _si == len(_pair_anneal_stages) - 1 else 1000
             sim.minimizeEnergy(
                 tolerance=10.0 * unit.kilojoules_per_mole / unit.nanometer,
@@ -690,17 +745,19 @@ def _amber_refine_impl(
             print(f"  [amber_refine] pair anneal stage {_si+1}/{len(_pair_anneal_stages)}: "
                   f"k={_pk:.0f} r0={_pr0:.2f}nm  E={_pre_e:.0f} -> {_post_e:.0f} kJ/mol")
 
-    # --- 多阶段最小化 + 退火 ---
-    # 阶段 1: 松 P 约束 (k_scale=0.01, 放松 ~100 倍), 让 amber 力场主导把
-    # 键长/键角/VdW 降到最低。per-particle k 保留 coding/non-coding 区分。
+    # --- Multi-stage minimization + annealing ---
+    # Stage 1: loosen the P restraint (k_scale=0.01, ~100x softer) so the amber
+    # force field dominates and drives bond lengths/angles/VdW to a minimum.
+    # The per-particle k keeps the coding/non-coding distinction.
     sim.context.setParameter("k_scale", 0.01)
     sim.minimizeEnergy(
         tolerance=10.0 * unit.kilojoules_per_mole / unit.nanometer,
         maxIterations=max(3000, max_iterations),
     )
 
-    # 阶段 2: 温和退火 MD。1000K 会把初始畸变结构的原子甩飞 (NaN),
-    # 用 500K + 短步数, 每步后检查 NaN, 炸了就回退到松 P 最小化结果。
+    # Stage 2: gentle annealing MD. 1000K would fling the atoms of the initially
+    # distorted structure away (NaN); use 500K with a few steps and check for NaN
+    # after each stage, reverting to the loose-P minimization result on failure.
     pre_md_state = sim.context.getState(getPositions=True)
     pre_md_pos = pre_md_state.getPositions()
     try:
@@ -708,22 +765,24 @@ def _amber_refine_impl(
         sim.step(100)
         sim.integrator.setTemperature(300 * unit.kelvin)
         sim.step(50)
-        # 检查 MD 后有没有 NaN
+        # Check whether the MD produced any NaN
         chk = sim.context.getState(getPositions=True).getPositions(asNumpy=True)._value
         if not np.isfinite(chk).all():
-            raise RuntimeError("MD 产生 NaN, 回退到 MD 前状态")
-        # 松 P 下重最小化。
+            raise RuntimeError("MD produced NaN; reverting to the pre-MD state")
+        # Re-minimize under the loose P restraint.
         sim.minimizeEnergy(
             tolerance=10.0 * unit.kilojoules_per_mole / unit.nanometer,
             maxIterations=max(3000, max_iterations),
         )
     except Exception as md_exc:
-        # MD 炸了, 回退到 MD 前坐标, 跳过退火直接进阶段 3。
+        # MD failed; restore the pre-MD coordinates and skip straight to stage 3.
         sim.context.setPositions(pre_md_pos)
 
-    # 阶段 3: 收紧 P 约束到目标值 (k_scale=1.0), 保持骨架拓扑, 最终最小化。
-    # per-particle k 已在加粒子时定死 (coding=coding_restraint_k/non-coding=P_RESTRAINT_K),
-    # 全局 k_scale 从阶段1的 0.01 收回 1.0, 恢复完整钉死强度。
+    # Stage 3: tighten the P restraint back to its target value (k_scale=1.0),
+    # holding the backbone topology, and run the final minimization.
+    # The per-particle k was fixed when the particles were added (coding=
+    # coding_restraint_k / non-coding=P_RESTRAINT_K); the global k_scale returns
+    # from 0.01 (stage 1) to 1.0, restoring the full pinning strength.
     sim.context.setParameter("k_scale", 1.0)
     sim.minimizeEnergy(
         tolerance=10.0 * unit.kilojoules_per_mole / unit.nanometer,
@@ -734,11 +793,12 @@ def _amber_refine_impl(
     pos = state.getPositions(asNumpy=True)._value  # nm
     e1 = state.getPotentialEnergy()._value
 
-    # 分项能量诊断: setForceGroup 必须在 Context 创建前调, 这里只是占位,
-    # 真正的 setForceGroup 在 Simulation 创建前的 "约束项标组" 段落。
+    # Per-term energy diagnostic: setForceGroup must be called before the Context
+    # is created; this block only reads the energies, the actual setForceGroup
+    # happened in the "assign force groups" section before Simulation creation.
     force_energies = {}
     try:
-        # amber 力场本身 (group 0) - 不含约束
+        # The amber force field itself (group 0) - excludes the restraints
         s = sim.context.getState(getEnergy=True, groups={0})
         force_energies["amber_field"] = s.getPotentialEnergy()._value
         for gi, f in enumerate(constraint_forces, start=1):
@@ -747,37 +807,41 @@ def _amber_refine_impl(
                 s.getPotentialEnergy()._value
     except Exception:
         pass
-    refined_ang = pos * 10.0  # nm -> Å, 按 topo2 顺序 (重原子+H 交替)
+    refined_ang = pos * 10.0  # nm -> A, in topo2 order (heavy atoms + H alternating)
 
-    # 抽出只含重原子的坐标, 按 structure.atoms 顺序返回 (不含 H)。
-    # heavy_to_topo[i] = topo2 中第 i 个重原子的全局索引。
-    # 上层 (predictor/export/immune_heuristic) 用 structure.atoms[i] 索引取坐标,
-    # 不能含 H, 否则索引错位 -> BSJ/键长全错。
+    # Extract heavy-atom-only coordinates, returned in structure.atoms order
+    # (no H). heavy_to_topo[i] = the topo2 global index of the i-th heavy atom.
+    # Callers (predictor/export/immune_heuristic) index coordinates by
+    # structure.atoms[i]; H atoms must be excluded or the indices shift and the
+    # BSJ/bond-length calculations all break.
     if len(heavy_to_topo) == n_heavy:
         refined_heavy = refined_ang[heavy_to_topo]  # (n_heavy, 3) Å
     else:
-        # 映射对不上 (异常), 回退全数组上层自己处理
+        # The mapping does not line up (unexpected); fall back to the full array
+        # and let the caller deal with it
         refined_heavy = refined_ang
 
-    # --- 安全检查: P 偏离 ---
-    # P 在 structure.atoms 里的索引 = 该残基 "P" 原子的 serial (0-based 重原子序)。
-    # refined_heavy 按 structure.atoms 顺序, 所以 serial 直接索引。
+    # --- Safety check: P drift ---
+    # P's index in structure.atoms equals the serial (0-based heavy-atom order)
+    # of that residue's "P" atom. refined_heavy follows structure.atoms order, so
+    # the serial indexes it directly.
     max_drift = 0.0
     for res_idx in range(L):
         p_serial = structure.residue_atom_index[res_idx].get("P")
         if p_serial is None or p_serial >= len(refined_heavy):
             continue
-        # P 的原始坐标 (nm, 重建时 CG 求解值)
+        # P's original coordinates (nm, the CG-solved value at reconstruction)
         p_ref = structure.atoms[p_serial].xyz
         drift = np.linalg.norm(refined_heavy[p_serial] - p_ref)
         if drift > max_drift:
             max_drift = drift
     if max_drift > P_MAX_DRIFT_A:
         raise RuntimeError(
-            f"Amber 最小化后 P 偏离 {max_drift:.2f}Å > {P_MAX_DRIFT_A}Å 阈值, 回退 CG"
+            f"P drift {max_drift:.2f} A after amber minimization exceeds the "
+            f"{P_MAX_DRIFT_A} A threshold; falling back to CG"
         )
     if np.isnan(e1) or np.isinf(e1):
-        raise RuntimeError(f"Amber 最小化后能量异常 e1={e1}, 回退 CG")
+        raise RuntimeError(f"Abnormal energy e1={e1} after amber minimization; falling back to CG")
 
     info = {
         "n_heavy": n_heavy,
@@ -790,7 +854,7 @@ def _amber_refine_impl(
         "n_topology_fused": n_topology_fused,
         "n_o3p_bonds": n_o3p,
     }
-    # 返回重原子坐标 (按 structure.atoms 顺序, 不含 H)。上层直接用 serial 索引。
+    # Return the heavy-atom coordinates (in structure.atoms order, no H). Callers index directly by serial.
     return refined_heavy, e0, e1, info
 
 
@@ -804,7 +868,7 @@ if __name__ == "__main__":
     ps = np.stack([R * np.cos(angles), R * np.sin(angles),
                    np.zeros(L)], axis=1)
     s = reconstruct_all_atom(ps, seq)
-    print(f"重建: {len(s.atoms)} 重原子")
+    print(f"rebuilt: {len(s.atoms)} heavy atoms")
     pairs = [(i, L - 1 - i, 1.0) for i in range(L // 2)]
     coords, e0, e1, info = amber_refine(s, pairs, max_iterations=500)
     print(f"e0={e0:.0f} → e1={e1:.0f} kJ/mol")

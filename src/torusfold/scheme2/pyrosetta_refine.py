@@ -1,10 +1,11 @@
 """
-pyrosetta_refine.py — PyRosetta 全原子精修 (WSL, 条件触发)
+pyrosetta_refine.py — PyRosetta all-atom refinement (WSL, conditionally triggered)
 
-在 cg_to_allatom() 之后运行, 修复 clash / 优化局部几何。
-仅在 clashscore > threshold 时触发, 作为"保险丝"而非核心步骤。
+Runs after cg_to_allatom() to fix clashes and optimize local geometry.
+It only triggers when clashscore > threshold, acting as a fuse/fallback rather than
+a core step.
 
-运行环境: WSL (Linux), PyRosetta 4.2023
+Runtime environment: WSL (Linux), PyRosetta 4.2023
 """
 import os
 import subprocess
@@ -13,12 +14,12 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 
-# PyRosetta RNA 专用评分函数
+# PyRosetta RNA-specific scoring function
 _SCOREFN = None
 
 
 def _init_pyrosetta():
-    """延迟初始化 PyRosetta (import + init 耗时约2秒)."""
+    """Lazily initialize PyRosetta (import + init take about 2 seconds)."""
     global _SCOREFN
     if _SCOREFN is not None:
         return _SCOREFN
@@ -38,13 +39,13 @@ def _init_pyrosetta():
 
 
 def compute_clashscore(pdb_path: str) -> float:
-    """计算 PDB 的 clashscore (clashing atom pairs per 1000 atoms).
+    """Compute a PDB's clashscore (clashing atom pairs per 1000 atoms).
 
     Args:
-        pdb_path: PDB 文件路径
+        pdb_path: path to the PDB file
 
     Returns:
-        clashscore (float), 0 = 无碰撞
+        clashscore (float); 0 = no clashes
     """
     import pyrosetta
     from pyrosetta.rosetta.core.pose import Pose
@@ -54,11 +55,11 @@ def compute_clashscore(pdb_path: str) -> float:
     scorefxn = _init_pyrosetta()
     pose = pose_from_pdb(pdb_path)
 
-    # FA_REP 能量 = 碰撞项
+    # FA_REP energy = the clash term
     fa_rep = pose.energies().total_energies()[ScoreType.fa_rep]
-    # 碰撞原子对数 (粗估: fa_rep > 0.25 的原子对)
+    # number of clashing atom pairs (rough estimate: atom pairs with fa_rep > 0.25)
     n_atoms = pose.size()
-    clashscore = max(0, fa_rep / 25.0)  # 经验换算
+    clashscore = max(0, fa_rep / 25.0)  # empirical conversion
 
     return clashscore
 
@@ -71,13 +72,14 @@ def pyrosetta_refine(
     clash_threshold: float = 20.0,
     verbose: bool = True,
 ) -> Tuple[str, float]:
-    """PyRosetta RNA 全原子精修 (算法优化版).
+    """PyRosetta RNA all-atom refinement (algorithmically optimized version).
 
-    算法优化:
-        1. 跳过 canonical RNA 恢复 (cg_to_allatom 输出已是标准 RNA)
-        2. 跳过手动扰动 (L-BFGS line search 自带探索)
-        3. 两阶段 minimize: steepest_descent(打散 clash) → L-BFGS(精修)
-           比纯 L-BFGS 快 2-3×, 因为 SD 对远离平衡的大梯度更高效
+    Algorithmic optimizations:
+        1. Skip canonical RNA restoration (cg_to_allatom already outputs standard RNA)
+        2. Skip manual perturbation (L-BFGS line search explores on its own)
+        3. Two-stage minimization: steepest_descent (breaks up clashes) -> L-BFGS (refines).
+           2-3x faster than pure L-BFGS, because SD is more efficient on the large
+           off-equilibrium gradients.
     """
     import pyrosetta
     from pyrosetta.rosetta.core.scoring import ScoreType
@@ -87,13 +89,13 @@ def pyrosetta_refine(
 
     scorefxn = _init_pyrosetta()
 
-    # 1. 加载 PDB
+    # 1. load the PDB
     try:
         pose = pose_from_pdb(pdb_path)
     except (SystemExit, Exception) as e:
         if verbose:
             _msg = str(e)[:200] if str(e) else type(e).__name__
-            print(f"  [WARN] PDB 加载失败 ({_msg})")
+            print(f"  [WARN] failed to load PDB ({_msg})")
         import shutil
         shutil.copy2(pdb_path, output_path)
         return output_path, float("inf")
@@ -107,12 +109,12 @@ def pyrosetta_refine(
 
     if clashscore_init <= clash_threshold:
         if verbose:
-            print(f"  Clashscore {clashscore_init:.1f} <= {clash_threshold}, 跳过")
+            print(f"  Clashscore {clashscore_init:.1f} <= {clash_threshold}, skipping")
         pose.dump_pdb(output_path)
         return output_path, e_init
 
     if verbose:
-        print(f"  Clashscore {clashscore_init:.1f} > {clash_threshold}, 精修中...")
+        print(f"  Clashscore {clashscore_init:.1f} > {clash_threshold}, refining...")
 
     # 3. MoveMap
     mm = MoveMap()
@@ -120,8 +122,8 @@ def pyrosetta_refine(
     mm.set_chi(True)
     mm.set_jump(False)
 
-    # 4. 两阶段 minimize
-    # Stage 1: steepest_descent — 对大梯度(clash)收敛快, 打散严重碰撞
+    # 4. two-stage minimization
+    # Stage 1: steepest_descent — converges fast on large gradients (clashes), breaking up severe clashes
     sd_steps = max(30, max_iter // 4)
     sd_mover = MinMover(mm, scorefxn, "steepest_descent", 1.0, sd_steps)
     sd_mover.cartesian(False)
@@ -130,7 +132,7 @@ def pyrosetta_refine(
     except Exception:
         pass
 
-    # Stage 2: L-BFGS — 二阶信息加速局部精修
+    # Stage 2: L-BFGS — second-order information accelerates the local refinement
     lbfgs_steps = max(50, max_iter * 3 // 4)
     lbfgs_mover = MinMover(mm, scorefxn, "lbfgs", 0.1, lbfgs_steps)
     lbfgs_mover.cartesian(False)
@@ -138,60 +140,61 @@ def pyrosetta_refine(
         lbfgs_mover.apply(pose)
     except Exception as e:
         if verbose:
-            print(f"  [WARN] L-BFGS 异常: {e}")
+            print(f"  [WARN] L-BFGS error: {e}")
 
-    # 5. 输出
+    # 5. output
     e_final = scorefxn(pose)
     clashscore_final = max(0, pose.energies().total_energies()[ScoreType.fa_rep] / 25.0)
     pose.dump_pdb(output_path)
 
     if verbose:
-        print(f"  E: {e_init:.0f} → {e_final:.0f}, clash: {clashscore_init:.0f} → {clashscore_final:.0f}")
+        print(f"  E: {e_init:.0f} -> {e_final:.0f}, clash: {clashscore_init:.0f} -> {clashscore_final:.0f}")
 
     return output_path, e_final
 
 
 def _server_main():
-    """PyRosetta 长驻服务: Unix socket 接收精修请求, 避免反复 init.
+    """Long-running PyRosetta service: receive refinement requests on a Unix socket
+    so that PyRosetta is not repeatedly re-initialized.
 
-    协议 (JSON lines):
-      请求: {"pdb": "<abs_path>", "output": "<abs_path>", "max_iter": 200}
-      响应: {"ok": true, "output": "...", "energy": 123.4}
-             {"ok": false, "error": "..."}
-      退出: {"shutdown": true}
+    Protocol (JSON lines):
+      request: {"pdb": "<abs_path>", "output": "<abs_path>", "max_iter": 200}
+      response: {"ok": true, "output": "...", "energy": 123.4}
+                {"ok": false, "error": "..."}
+      shutdown: {"shutdown": true}
     """
     import socket
     import json
 
     SOCK_PATH = "/tmp/torusfold_pyrosetta.sock"
 
-    # 清理残留 socket
+    # remove a leftover socket
     try:
         os.unlink(SOCK_PATH)
     except OSError:
         pass
 
-    # 预初始化 PyRosetta (只做一次)
-    print("[pyrosetta-server] 初始化 PyRosetta...")
+    # pre-initialize PyRosetta (only once)
+    print("[pyrosetta-server] initializing PyRosetta...")
     t0 = __import__("time").time()
     scorefxn = _init_pyrosetta()
-    print(f"[pyrosetta-server] 初始化完成 ({__import__('time').time() - t0:.1f}s), 监听 {SOCK_PATH}")
+    print(f"[pyrosetta-server] initialization done in {__import__('time').time() - t0:.1f}s, listening on {SOCK_PATH}")
 
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.bind(SOCK_PATH)
     sock.listen(1)
-    sock.settimeout(600)  # 10 分钟无请求自动退出
+    sock.settimeout(600)  # exit automatically after 10 minutes without a request
 
     try:
         while True:
             try:
                 conn, _ = sock.accept()
             except socket.timeout:
-                print("[pyrosetta-server] 超时无请求, 退出")
+                print("[pyrosetta-server] timed out with no request, exiting")
                 break
 
             try:
-                # 读取请求 (长度前缀: 4 字节 little-endian)
+                # read the request (length prefix: 4-byte little-endian)
                 raw_len = b""
                 while len(raw_len) < 4:
                     chunk = conn.recv(4 - len(raw_len))
@@ -215,7 +218,7 @@ def _server_main():
 
                 if req.get("shutdown"):
                     conn.sendall(b'{"ok":true}')
-                    print("[pyrosetta-server] 收到 shutdown, 退出")
+                    print("[pyrosetta-server] received shutdown, exiting")
                     return
 
                 pdb_path = req["pdb"]
@@ -246,7 +249,7 @@ def _server_main():
             pass
 
 
-# WSL 入口: 允许从命令行调用
+# WSL entry point: allows invocation from the command line
 if __name__ == "__main__":
     import sys
     if len(sys.argv) >= 2 and sys.argv[1] == "--server":

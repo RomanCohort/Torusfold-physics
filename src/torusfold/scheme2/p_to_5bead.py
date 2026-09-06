@@ -1,40 +1,40 @@
-"""p_to_5bead.py — 从 P-only CG 坐标重建 IsRNAcirc 式 5-bead CG 表示。
+"""p_to_5bead.py — Rebuild an IsRNAcirc-style 5-bead CG representation from P-only CG coordinates.
 
-输入: (L, 3) P-only 坐标
-输出: (5L, 3) 5-bead CG 坐标 [P, S, B1, B2, B3] per nucleotide
+Input: (L, 3) P-only coordinates
+Output: (5L, 3) 5-bead CG coordinates [P, S, B1, B2, B3] per nucleotide
 
-IsRNAcirc 式 5-bead 定义:
-  P  — 磷酸基 (phosphate), 直接用输入坐标
-  S  — sugar ring 中心 (C4' 位置)
-  B1 — base ring major groove 侧 (C5'/C6 对于嘧啶, C4/C5 对于嘌呤)
-  B2 — base ring minor groove 侧 (C2 对于嘧啶, C2/C3 对于嘌呤)
-  B3 — base ring中心 / glycosidic N (N1 for pyrimidine, N9 for purine)
+IsRNAcirc-style 5-bead definition:
+  P  — phosphate group, taken directly from the input coordinates
+  S  — sugar ring center (C4' position)
+  B1 — base ring major-groove side (C5'/C6 for pyrimidines, C4/C5 for purines)
+  B2 — base ring minor-groove side (C2 for pyrimidines, C2/C3 for purines)
+  B3 — base ring center / glycosidic N (N1 for pyrimidine, N9 for purine)
 
-偏移基于 A-form RNA 晶体结构 (1EHZ/1M3N 平均值)。
+Offsets are based on A-form RNA crystal structures (average of 1EHZ/1M3N).
 """
 from __future__ import annotations
 
 import numpy as np
 
 # A-form RNA canonical offsets (Å): P at origin
-# 基于 1EHZ tRNA^Phe 晶体结构的 5-bead 平均偏移
-# P → S (C4' sugar center): 沿骨架切线偏移
+# Average 5-bead offsets from the 1EHZ tRNA^Phe crystal structure
+# P → S (C4' sugar center): offset along the backbone tangent
 _OFFSET_P_TO_S = np.array([1.85, 0.60, 0.30], dtype=np.float64)
 
-# S → B3 (glycosidic N): 从 sugar 指向 base
+# S → B3 (glycosidic N): points from the sugar toward the base
 _OFFSET_S_TO_B3 = np.array([-0.20, -0.85, 0.65], dtype=np.float64)
 
-# B3 → B1 (major groove): 从 N 指向 C5/C6 侧
+# B3 → B1 (major groove): points from N toward the C5/C6 side
 _OFFSET_B3_TO_B1 = np.array([0.50, -0.60, 0.30], dtype=np.float64)
 
-# B3 → B2 (minor groove): 从 N 指向 C2 侧
+# B3 → B2 (minor groove): points from N toward the C2 side
 _OFFSET_B3_TO_B2 = np.array([-0.40, 0.50, 0.25], dtype=np.float64)
 
 
 def _kabsch_rotation(v1: np.ndarray, v2: np.ndarray) -> np.ndarray:
-    """返回把 unit vector v1 旋转到 unit vector v2 方向的 3x3 旋转矩阵。
+    """Return the 3x3 rotation matrix mapping unit vector v1 onto unit vector v2.
 
-    用 Rodrigues 旋转: axis = v1 × v2, angle = arccos(v1·v2)。
+    Uses Rodrigues rotation: axis = v1 × v2, angle = arccos(v1·v2).
     """
     a = v1 / (np.linalg.norm(v1) + 1e-8)
     b = v2 / (np.linalg.norm(v2) + 1e-8)
@@ -65,7 +65,7 @@ def _kabsch_rotation(v1: np.ndarray, v2: np.ndarray) -> np.ndarray:
 
 
 def p_to_5bead(p_coords: np.ndarray) -> np.ndarray:
-    """P-only CG → 5-bead CG (IsRNAcirc 格式)。
+    """P-only CG → 5-bead CG (IsRNAcirc format).
 
     Args:
         p_coords: (L, 3) P atom coordinates (Å)
@@ -99,15 +99,15 @@ def p_to_5bead(p_coords: np.ndarray) -> np.ndarray:
         s = p + R @ _OFFSET_P_TO_S
         coords_5bead[5 * i + 1] = s
 
-        # B3 (glycosidic N) bead: S → B3 (序贯偏移)
+        # B3 (glycosidic N) bead: S → B3 (sequential offset)
         b3 = s + R @ _OFFSET_S_TO_B3
         coords_5bead[5 * i + 4] = b3
 
-        # B1 (major groove) bead: B3 → B1 (序贯偏移)
+        # B1 (major groove) bead: B3 → B1 (sequential offset)
         b1 = b3 + R @ _OFFSET_B3_TO_B1
         coords_5bead[5 * i + 2] = b1
 
-        # B2 (minor groove) bead: B3 → B2 (序贯偏移)
+        # B2 (minor groove) bead: B3 → B2 (sequential offset)
         b2 = b3 + R @ _OFFSET_B3_TO_B2
         coords_5bead[5 * i + 3] = b2
 

@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """TorusFold Web Server — SSE streaming + Predict API + static files
 
-用法: python serve.py [port]
-默认端口: 8877
+Usage: python serve.py [port]
+Default port: 8877
 """
 import os
 import sys
@@ -19,8 +19,8 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(ROOT, "src")
 WEB_DIR = os.path.join(SRC, "torusfold", "web")
 
-# 可选: env TF_SCHEME2_SRC 指向额外的 scheme2 源码目录
-# 本仓库 src/ 已含大部分 scheme2 模块; 需要时再注入扩展路径
+# Optional: env TF_SCHEME2_SRC points to an additional scheme2 source directory.
+# This repo's src/ already contains most scheme2 modules; inject an extra path only when needed.
 SCHEME2_SRC = os.environ.get("TF_SCHEME2_SRC", "")
 
 # ── SSE log buffer (thread-safe) ────────────────────────────────
@@ -81,7 +81,7 @@ _predict_state = {
 
 
 class TorusFoldHandler(SimpleHTTPRequestHandler):
-    """处理静态文件 + POST /predict + GET /status + SSE streaming"""
+    """Serves static files + POST /predict + GET /status + SSE streaming"""
 
     def _set_cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -144,7 +144,7 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             self._handle_score_pdb_sse(path)
             return
 
-        # 静态文件: 从 WEB_DIR 或 ROOT 提供
+        # Static files: served from WEB_DIR or ROOT
         if path.startswith("/web/"):
             file_path = os.path.join(WEB_DIR, path[5:])
         elif path == "" or path == "/":
@@ -187,12 +187,12 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         self._send_json(_predict_state)
 
     def _handle_job_status(self, path):
-        """GET /api/jobs/{jid} — 返回任务状态"""
+        """GET /api/jobs/{jid} — return task status"""
         jid = path.split("/")[-1]
         self._send_json(_predict_state)
 
     def _handle_job_result(self, path):
-        """GET /api/result/{jid} — 返回预测结果"""
+        """GET /api/result/{jid} — return prediction result"""
         jid = path.split("/")[-1]
         if _predict_state["status"] == "done" and _predict_state["result"]:
             self._send_json(_predict_state["result"])
@@ -259,7 +259,7 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             pass  # Client disconnected
 
     def _handle_score_pdb(self):
-        """POST /api/score-pdb — 上传 PDB, 启动分析, 返回 session_id"""
+        """POST /api/score-pdb — upload a PDB, start analysis, return a session_id"""
         body = self._read_body()
         if not body:
             self._send_json({"error": "Empty body"}, 400)
@@ -420,7 +420,7 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             pass  # Client disconnected
 
     def _handle_feedback(self):
-        """POST /api/feedback — 保存用户反馈"""
+        """POST /api/feedback — save user feedback"""
         body = self._read_body()
         try:
             feedback = json.loads(body)

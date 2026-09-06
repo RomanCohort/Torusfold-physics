@@ -1,11 +1,11 @@
 """
-multitask_loss.py — circRNA 多任务损失 (structRFM 启发)
+multitask_loss.py — circRNA multi-task loss (structRFM-inspired)
 
 Loss = w_ss * L_ss + w_pair * L_pair + w_bsj * L_bsj + w_clash * L_clash
 
 structRFM pattern:
-  - L_ss: 只在 SS 未知位置算 (struct == -1)
-  - weight_mask: chunk 重叠区域降权
+  - L_ss: only computed at positions where the SS is unknown (struct == -1)
+  - weight_mask: down-weights overlapping chunk regions
 """
 from __future__ import annotations
 
@@ -17,15 +17,15 @@ import torch.nn.functional as F
 
 
 class CircRNAMultiTaskLoss(nn.Module):
-    """circRNA 多任务损失函数.
+    """circRNA multi-task loss function.
 
-    四个子损失:
-      1. SS loss: CrossEntropy, 只在已知 SS 位置计算
-      2. Pair loss: BCE, 配对预测
-      3. BSJ loss: BCE, 环化闭合预测
-      4. Clash loss: BCE, 碰撞预测
+    Four sub-losses:
+      1. SS loss: CrossEntropy, computed only at positions with known SS
+      2. Pair loss: BCE, base-pairing prediction
+      3. BSJ loss: BCE, back-spliced junction prediction
+      4. Clash loss: BCE, clash prediction
 
-    structRFM pattern: weight_mask 用于 chunk 重叠区域降权
+    structRFM pattern: weight_mask down-weights overlapping chunk regions
     """
 
     def __init__(
@@ -49,26 +49,26 @@ class CircRNAMultiTaskLoss(nn.Module):
         labels: Dict[str, torch.Tensor],
         weight_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
-        """计算多任务损失.
+        """Compute the multi-task loss.
 
         Args:
-            predictions: 模型输出 dict
+            predictions: dict of model outputs
               ss_logits: (L, 2) SS logits
-              pair_probs: (N,) 配对概率
-              bsj_logit: scalar BSJ 概率
-              clash_scores: (L,) 碰撞概率
-            labels: 标签 dict
-              ss: (L,) SS 标签 (-1=未知, 0=unpaired, 1=paired)
-              pair_labels: (N,) 配对标签 (0/1)
+              pair_probs: (N,) base-pairing probabilities
+              bsj_logit: scalar BSJ probability
+              clash_scores: (L,) clash probabilities
+            labels: dict of labels
+              ss: (L,) SS labels (-1=unknown, 0=unpaired, 1=paired)
+              pair_labels: (N,) base-pairing labels (0/1)
               bsj_label: scalar (0/1)
-              clash_labels: (L,) 碰撞标签 (0/1)
-            weight_mask: (L,) 可选, chunk 重叠区域降权
+              clash_labels: (L,) clash labels (0/1)
+            weight_mask: (L,) optional, down-weights overlapping chunk regions
 
         Returns:
-            dict with 'total_loss' + 每个子损失
+            dict with 'total_loss' plus each sub-loss
         """
         losses = {}
-        # 获取 device: 从 predictions 中任意 tensor
+        # Determine the device from any tensor in predictions
         _dev = torch.device("cpu")
         for v in predictions.values():
             if isinstance(v, torch.Tensor):
@@ -76,19 +76,19 @@ class CircRNAMultiTaskLoss(nn.Module):
                 break
         total = torch.tensor(0.0, device=_dev)
 
-        # ── SS Loss: 只在已知位置计算 (structRFM pattern) ──
+        # ── SS Loss: computed only at known positions (structRFM pattern) ──
         if "ss_logits" in predictions and "ss" in labels:
             ss_logits = predictions["ss_logits"]  # (L, 2)
             ss_labels = labels["ss"]  # (L,)
 
-            # 只在非 -1 位置计算 (structRFM: struct == -1 的位置跳过)
+            # Only compute where the label is not -1 (structRFM: skip struct == -1)
             known_mask = ss_labels != self.ss_mask_value
             if known_mask.any():
                 loss_ss = F.cross_entropy(
                     ss_logits[known_mask], ss_labels[known_mask].long()
                 )
                 if weight_mask is not None:
-                    # 对已知位置用 weight_mask 加权
+                    # Weight the known positions by weight_mask
                     w = weight_mask[known_mask]
                     loss_ss = (loss_ss * w).sum() / w.sum().clamp(min=1.0)
                 losses["loss_ss"] = loss_ss
@@ -136,14 +136,14 @@ def compute_ss_labels_from_dotbracket(
     dotbracket: str,
     unknown_value: float = -1.0,
 ) -> torch.Tensor:
-    """从 dot-bracket 字符串生成 SS 标签.
+    """Generate SS labels from a dot-bracket string.
 
     Args:
         dotbracket: e.g. "(((...)))"
-        unknown_value: 未知位置的值
+        unknown_value: value used for unknown positions
 
     Returns:
-        (L,) tensor: 1=paired, 0=unpaired, unknown_value=未知
+        (L,) tensor: 1=paired, 0=unpaired, unknown_value=unknown
     """
     labels = []
     for ch in dotbracket:
@@ -160,14 +160,14 @@ def compute_clash_labels_from_coords(
     coords: np.ndarray,
     threshold: float = 3.0,
 ) -> np.ndarray:
-    """从坐标计算碰撞标签.
+    """Compute clash labels from coordinates.
 
     Args:
-        coords: (L, 3) P 坐标
-        threshold: 碰撞阈值 (A)
+        coords: (L, 3) P coordinates
+        threshold: clash threshold (A)
 
     Returns:
-        (L,) float: 1.0 = 有碰撞, 0.0 = 无碰撞
+        (L,) float: 1.0 = has clash, 0.0 = no clash
     """
     L = len(coords)
     labels = np.zeros(L, dtype=np.float32)
@@ -185,13 +185,13 @@ def compute_pair_labels(
     all_possible: bool = False,
     max_neg_ratio: float = 3.0,
 ) -> tuple:
-    """生成配对预测的正负样本标签.
+    """Generate positive/negative sample labels for base-pairing prediction.
 
     Args:
-        n_positions: 序列长度
-        pairs: [(i, j), ...] 已知配对
-        all_possible: 是否生成所有可能对 (O(L^2), 太大时不推荐)
-        max_neg_ratio: 负样本/正样本最大比例
+        n_positions: sequence length
+        pairs: [(i, j), ...] known base pairs
+        all_possible: whether to generate every possible pair (O(L^2); not recommended when large)
+        max_neg_ratio: maximum ratio of negative to positive samples
 
     Returns:
         (pair_indices (N, 2), pair_labels (N,))
@@ -199,7 +199,7 @@ def compute_pair_labels(
     pos_pairs = [(i, j) for (i, j) in pairs if i < n_positions and j < n_positions]
 
     if all_possible:
-        # 生成所有 (i, j) 对
+        # Generate every (i, j) pair
         indices = []
         labels = []
         pair_set = set((min(i, j), max(i, j)) for i, j in pos_pairs)
@@ -212,7 +212,7 @@ def compute_pair_labels(
             torch.tensor(labels, dtype=torch.float32),
         )
 
-    # 负采样: 随机选不配对的位置对
+    # Negative sampling: randomly choose position pairs that do not pair
     n_pos = len(pos_pairs)
     n_neg = min(int(n_pos * max_neg_ratio), n_positions * (n_positions - 1) // 2 - n_pos)
 

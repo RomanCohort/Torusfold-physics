@@ -1,20 +1,21 @@
 """
-rcm.py — Reverse Complementary Match (RCM) 计算模块.
+rcm.py - Reverse Complementary Match (RCM) computation module.
 
-基于 CircCNNs (Wang & Liang, 2024) 的复数累计和快速算法,
-用于检测 circRNA BSJ 侧翼内含子间的反向互补匹配.
+Fast complex cumulative-sum algorithm based on CircCNNs
+(Wang & Liang, 2024) for detecting reverse complementary matches between
+introns flanking the BSJ of a circRNA.
 
-核心思想:
-  核苷酸→复数映射 (A=1, T=-1, C=1j, G=-1j)
-  累计和向量快速求所有 kmer 的分数
-  外积广播检测两条序列间的 RCM kmer 对
+Core idea:
+  nucleotide -> complex mapping (A=1, T=-1, C=1j, G=-1j)
+  cumulative-sum vectors to score all kmers quickly
+  outer-product broadcasting to detect RCM kmer pairs between two sequences
 
-应用场景:
-  - crossing RCM: BSJ 上游 vs 下游内含子 → 促进 back-splicing
-  - within RCM: 单侧内含子内 → 促进 linear splicing (竞争)
-  - RCM score 作为配对置信度权重注入管线
+Applications:
+  - crossing RCM: upstream vs downstream introns around the BSJ -> promotes back-splicing
+  - within RCM: within a single intron -> promotes linear splicing (competing)
+  - RCM score injected into the pipeline as a base-pair confidence weight
 
-参考: Wang & Liang, Scientific Reports 14:18982 (2024)
+Reference: Wang & Liang, Scientific Reports 14:18982 (2024)
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ import numpy as np
 from typing import List, Optional, Tuple
 
 
-# ── 核苷酸→复数映射 ──
+# ── nucleotide -> complex mapping ──
 _BASE_MAP = {
     'A': 1.0,   'a': 1.0,
     'T': -1.0,  't': -1.0,  'U': -1.0, 'u': -1.0,
@@ -31,37 +32,38 @@ _BASE_MAP = {
     'N': 0.0,   'n': 0.0,
 }
 
-# Watson-Crick 互补
+# Watson-Crick complement
 _COMPLEMENT = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'U': 'A',
                'a': 't', 't': 'a', 'c': 'g', 'g': 'c', 'u': 'a',
                'N': 'N', 'n': 'n'}
 
 
 def _seq_to_complex(seq: str) -> np.ndarray:
-    """序列→复数向量. O(L)."""
+    """Convert a sequence to a complex vector. O(L)."""
     return np.array([_BASE_MAP.get(c, 0.0) for c in seq], dtype=np.complex64)
 
 
 def _kmer_scores(seq: str, k: int) -> np.ndarray:
-    """计算序列中所有长度 k 的 kmer 的累计分数. O(L).
+    """Compute cumulative scores of all length-k kmers in a sequence. O(L).
 
-    利用累计和: score[i] = sum(seq[i:i+k]) 通过 cumsum 差分快速求得.
-    返回 (L-k+1,) 复数向量, 每个元素是一个 kmer 的累计分数.
+    Uses a cumulative sum so that score[i] = sum(seq[i:i+k]) is obtained
+    quickly via a cumsum difference. Returns a (L-k+1,) complex vector in
+    which each element is the cumulative score of one kmer.
     """
-    # 增广序列: 前面加 'N' (值为 0), 使得 cumsum[0] = 0
+    # Pad the sequence with a leading 'N' (value 0) so that cumsum[0] = 0
     aug = np.concatenate([[0.0 + 0j], _seq_to_complex(seq)])
     cum = aug.cumsum()
-    # score[i] = cum[i+k] - cum[i], 即长度 k 的窗口和
+    # score[i] = cum[i+k] - cum[i], i.e. the sum over a length-k window
     return cum[k:] - cum[:-k]
 
 
 def _validate_rcm(seq1: str, seq2: str, i: int, j: int, k: int) -> int:
-    """逐碱基验证位置 i 和 j 的 kmer 是否反向互补. 返回错配数."""
+    """Base-by-base check of whether the kmers at positions i and j are reverse complements. Returns the mismatch count."""
     mismatches = 0
     for t in range(k):
         if seq1[i + t] != _COMPLEMENT.get(seq2[j + k - 1 - t], 'N'):
             mismatches += 1
-            if mismatches > 0:  # 一旦有错配就提前返回 (原版逻辑)
+            if mismatches > 0:  # return as soon as a mismatch is found (original logic)
                 return mismatches
     return mismatches
 
@@ -72,17 +74,17 @@ def rcm_crossing(
     k: int = 7,
     max_mismatch: int = 0,
 ) -> Tuple[int, np.ndarray]:
-    """检测两条序列间的 RCM kmer 对 (crossing RCM).
+    """Detect RCM kmer pairs between two sequences (crossing RCM).
 
-    原版 CircCNNs 两步算法:
-      1. 累计和外积快速预筛选 (|real|+|imag| ≤ threshold)
-      2. 逐碱基验证 (精确检查反向互补)
+    Original CircCNNs two-step algorithm:
+      1. cumulative-sum outer-product fast prefilter (|real|+|imag| <= threshold)
+      2. base-by-base validation (exact reverse-complement check)
 
     Args:
-        seq_upstream: BSJ 上游内含子序列
-        seq_downstream: BSJ 下游内含子序列
-        k: kmer 长度
-        max_mismatch: 允许的错配数 (0=完全互补)
+        seq_upstream: intron sequence upstream of the BSJ
+        seq_downstream: intron sequence downstream of the BSJ
+        k: kmer length
+        max_mismatch: allowed mismatches (0 = fully complementary)
 
     Returns:
         (n_rcm_pairs, distribution_5x5)
@@ -91,14 +93,14 @@ def rcm_crossing(
     if L1 < k or L2 < k:
         return 0, np.zeros((5, 5), dtype=np.float64)
 
-    # Step 1: 累计和外积快速预筛选
+    # Step 1: cumulative-sum outer-product fast prefilter
     s1 = _kmer_scores(seq_upstream, k)
     s2 = _kmer_scores(seq_downstream, k)
     combo = s1.reshape(-1, 1) + s2.reshape(1, -1)
     score_mat = np.abs(combo.real) + np.abs(combo.imag)
     candidates = np.where(score_mat <= max_mismatch)
 
-    # Step 2: 逐碱基验证
+    # Step 2: base-by-base validation
     valid_rows, valid_cols = [], []
     for r, c in zip(candidates[0], candidates[1]):
         if _validate_rcm(seq_upstream, seq_downstream, int(r), int(c), k) <= max_mismatch:
@@ -107,7 +109,7 @@ def rcm_crossing(
 
     n_pairs = len(valid_rows)
 
-    # 5×5 分布矩阵
+    # 5x5 distribution matrix
     dist = np.zeros((5, 5), dtype=np.float64)
     if n_pairs > 0:
         r_bins = np.clip((np.array(valid_rows) / max(1, len(s1) - 1) * 5).astype(int), 0, 4)
@@ -123,14 +125,14 @@ def rcm_within(
     k: int = 7,
     max_mismatch: int = 0,
 ) -> Tuple[int, np.ndarray]:
-    """检测单条序列内的 RCM kmer 对 (within RCM).
+    """Detect RCM kmer pairs within a single sequence (within RCM).
 
-    原版 CircCNNs 两步算法 + 上三角去重.
+    Original CircCNNs two-step algorithm + upper-triangle dedup.
 
     Args:
-        seq: 内含子序列
-        k: kmer 长度
-        max_mismatch: 允许的错配数
+        seq: intron sequence
+        k: kmer length
+        max_mismatch: allowed mismatches
 
     Returns:
         (n_rcm_pairs, distribution_5x5)
@@ -141,12 +143,12 @@ def rcm_within(
 
     s = _kmer_scores(seq, k)
 
-    # Step 1: 累计和外积预筛选 (只取上三角 i < j)
+    # Step 1: cumulative-sum outer-product prefilter (upper triangle only, i < j)
     combo = s.reshape(-1, 1) + s.reshape(1, -1)
     score_mat = np.abs(combo.real) + np.abs(combo.imag)
     candidates = np.where(np.triu(score_mat <= max_mismatch, k=1))
 
-    # Step 2: 逐碱基验证
+    # Step 2: base-by-base validation
     valid_rows, valid_cols = [], []
     for r, c in zip(candidates[0], candidates[1]):
         if _validate_rcm(seq, seq, int(r), int(c), k) <= max_mismatch:
@@ -171,25 +173,25 @@ def compute_rcm_score(
     kmer_lengths: Optional[List[int]] = None,
     max_mismatch: int = 0,
 ) -> dict:
-    """计算综合 RCM 得分: crossing + within(upstream) + within(downstream).
+    """Compute the composite RCM score: crossing + within(upstream) + within(downstream).
 
-    对应论文中 RCM_triCNN 的输入特征.
+    Corresponds to the input features of RCM_triCNN in the paper.
 
     Args:
-        seq_upstream: BSJ 上游内含子序列
-        seq_downstream: BSJ 下游内含子序列
-        kmer_lengths: k 值列表, 默认 [5, 7, 9, 11, 13]
-        max_mismatch: 允许的错配数
+        seq_upstream: intron sequence upstream of the BSJ
+        seq_downstream: intron sequence downstream of the BSJ
+        kmer_lengths: list of k values, default [5, 7, 9, 11, 13]
+        max_mismatch: allowed mismatches
 
     Returns:
         dict with keys:
-            'crossing_total': int, crossing RCM kmer 对总数 (所有 k 之和)
-            'within_up_total': int, upstream within RCM 总数
-            'within_down_total': int, downstream within RCM 总数
-            'crossing_dists': list of (k, 5x5 matrix), 各 k 的 crossing 分布
+            'crossing_total': int, total number of crossing RCM kmer pairs (sum over all k)
+            'within_up_total': int, total upstream within-RCM count
+            'within_down_total': int, total downstream within-RCM count
+            'crossing_dists': list of (k, 5x5 matrix), crossing distribution per k
             'within_up_dists': list of (k, 5x5 matrix)
             'within_down_dists': list of (k, 5x5 matrix)
-            'confidence': float, 综合置信度 [0, 1]
+            'confidence': float, composite confidence [0, 1]
     """
     if kmer_lengths is None:
         kmer_lengths = [5, 7, 9, 11, 13]
@@ -213,7 +215,7 @@ def compute_rcm_score(
         within_up_dists.append((k, d_up))
         within_down_dists.append((k, d_down))
 
-    # 综合置信度: crossing 越多越好, within 越多越差 (竞争)
+    # Composite confidence: more crossing is better, more within is worse (competing)
     # confidence = crossing / (crossing + within_up + within_down + 1)
     total = crossing_total + within_up_total + within_down_total
     confidence = crossing_total / max(1, total)
@@ -235,47 +237,48 @@ def rcm_pair_weight(
     base_weight: float = 1.0,
     kmer_lengths: Optional[List[int]] = None,
 ) -> float:
-    """计算单对配对的 RCM 加权权重.
+    """Compute the RCM-weighted weight for a single base pair.
 
-    用于注入管线: 替代或补充 ViennaRNA BPP 的置信度.
+    Used to inject into the pipeline as a replacement for, or a supplement to,
+    the ViennaRNA BPP confidence.
 
     Args:
-        seq_upstream: BSJ 上游内含子
-        seq_downstream: BSJ 下游内含子
-        base_weight: 基础权重
-        kmer_lengths: k 值列表
+        seq_upstream: intron upstream of the BSJ
+        seq_downstream: intron downstream of the BSJ
+        base_weight: base weight
+        kmer_lengths: list of k values
 
     Returns:
-        加权权重 = base_weight × (1 + crossing_confidence)
+        weighted weight = base_weight x (1 + crossing_confidence)
     """
     result = compute_rcm_score(seq_upstream, seq_downstream, kmer_lengths)
     return base_weight * (1.0 + result['confidence'])
 
 
-# ── 自测 ──
+# ── Self-test ──
 if __name__ == "__main__":
     import time
 
-    # 完全互补的两条序列
+    # Two fully complementary sequences
     seq1 = "AUCGAUCGAUCGAUCG"
-    seq2 = "CGAUCGAUCGAUCGAU"  # seq1 的反向互补
+    seq2 = "CGAUCGAUCGAUCGAU"  # reverse complement of seq1
 
-    print("=== RCM 自测 ===")
+    print("=== RCM self-test ===")
     print(f"seq1: {seq1}")
-    print(f"seq2: {seq2} (seq1 的反向互补)")
+    print(f"seq2: {seq2} (reverse complement of seq1)")
 
     t0 = time.time()
     result = compute_rcm_score(seq1, seq2)
     t1 = time.time()
 
-    print(f"\n结果:")
-    print(f"  crossing RCM 对数: {result['crossing_total']}")
-    print(f"  within(up) 对数:   {result['within_up_total']}")
-    print(f"  within(down) 对数: {result['within_down_total']}")
-    print(f"  置信度: {result['confidence']:.3f}")
-    print(f"  耗时: {(t1-t0)*1000:.1f}ms")
+    print(f"\nResults:")
+    print(f"  crossing RCM pairs: {result['crossing_total']}")
+    print(f"  within(up) pairs:   {result['within_up_total']}")
+    print(f"  within(down) pairs: {result['within_down_total']}")
+    print(f"  confidence: {result['confidence']:.3f}")
+    print(f"  elapsed: {(t1-t0)*1000:.1f}ms")
 
-    # 随机序列 (应有少量 RCM)
+    # Random sequences (should have few RCMs)
     rng = np.random.default_rng(42)
     bases = "AUCG"
     rand_seq1 = "".join(rng.choice(list(bases), 1000))
@@ -285,9 +288,9 @@ if __name__ == "__main__":
     result_rand = compute_rcm_score(rand_seq1, rand_seq2)
     t1 = time.time()
 
-    print(f"\n随机序列 (L=1000):")
-    print(f"  crossing RCM 对数: {result_rand['crossing_total']}")
-    print(f"  within(up) 对数:   {result_rand['within_up_total']}")
-    print(f"  within(down) 对数: {result_rand['within_down_total']}")
-    print(f"  置信度: {result_rand['confidence']:.3f}")
-    print(f"  耗时: {(t1-t0)*1000:.1f}ms")
+    print(f"\nRandom sequences (L=1000):")
+    print(f"  crossing RCM pairs: {result_rand['crossing_total']}")
+    print(f"  within(up) pairs:   {result_rand['within_up_total']}")
+    print(f"  within(down) pairs: {result_rand['within_down_total']}")
+    print(f"  confidence: {result_rand['confidence']:.3f}")
+    print(f"  elapsed: {(t1-t0)*1000:.1f}ms")

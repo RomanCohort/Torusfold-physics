@@ -1,22 +1,22 @@
 """
-isrnaclong.py — isRNAcircLong 主管线
+isrnaclong.py — isRNAcircLong main pipeline
 
-长链 circRNA 3D 结构预测:
-  Level 0: ViennaRNA 粗筛
-  Level 1: 分段 Vfold3D/RhoFold+ + Kabsch 拼装
-  Level 2: RL-guided isRNAcirc close + 迭代弛豫
-  Level 3: RL-MCTS 拓扑搜索
-  Level 4: REST2 精修
-  Level 5: 全原子 + Amber
+Long circRNA 3D structure prediction:
+  Level 0: ViennaRNA coarse screen
+  Level 1: segmented Vfold3D/RhoFold+ + Kabsch assembly
+  Level 2: RL-guided isRNAcirc close + iterative relaxation
+  Level 3: RL-MCTS topology search
+  Level 4: REST2 refinement
+  Level 5: all-atom + Amber
 
-Level 2 细节:
-  - 第 1 轮: isRNAcirc Type=1 close_ends + MD (闭合 BSJ)
-  - 后续轮: RL agent 指导 pair_weights + MD 参数 (替代启发式)
-  - RL state: 配对距离 + 能量 + clash + 收敛指标
+Level 2 details:
+  - Round 1: isRNAcirc Type=1 close_ends + MD (closes the BSJ)
+  - Later rounds: the RL agent guides pair_weights + MD parameters (replaces heuristics)
+  - RL state: pairing distance + energy + clash + convergence indicators
   - RL action: pair_weights (N_far_pairs,) + md_nstep (scalar)
   - RL reward: energy_delta + pair_rate_delta - clash_penalty
 
-参考: isRNAcircLong_design.md
+Reference: isRNAcircLong_design.md
 """
 from __future__ import annotations
 
@@ -35,24 +35,24 @@ import numpy as np
 import torch
 
 
-# ── WSL 预热 + PyRosetta 长驻服务 ──────────────────────────────────────
+# ── WSL preheat + PyRosetta long-lived server ─────────────────────────
 _PYROSETTA_SOCK = "/tmp/torusfold_pyrosetta.sock"
-_PYROSETTA_SERVER_PROC = None  # 本进程启动的 server 引用
+_PYROSETTA_SERVER_PROC = None  # reference to the server started by this process
 
 
 def _preheat_wsl():
-    """异步预热 WSL 实例, 消除后续 subprocess 冷启动延迟."""
+    """Preheat the WSL instance asynchronously to avoid subprocess cold-start latency."""
     try:
         subprocess.Popen(
             ["wsl", "echo", "ok"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception:
-        pass  # 预热失败不影响后续
+        pass  # failed preheat does not affect the rest
 
 
 def _win_to_wsl(p) -> str:
-    """Windows 路径 → WSL 路径 (/mnt/c/...)."""
+    """Convert a Windows path to a WSL path (/mnt/c/...)."""
     s = str(p).replace("\\", "/")
     if len(s) >= 2 and s[1] == ":":
         return "/mnt/" + s[0].lower() + s[2:]
@@ -60,7 +60,7 @@ def _win_to_wsl(p) -> str:
 
 
 def _pyrosetta_server_running() -> bool:
-    """检查 PyRosetta server 是否已在运行."""
+    """Check whether the PyRosetta server is already running."""
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(1)
@@ -72,11 +72,11 @@ def _pyrosetta_server_running() -> bool:
 
 
 def _pyrosetta_start_server(verbose: bool = True) -> bool:
-    """启动 PyRosetta 长驻服务 (WSL 后台), 等待 ready 信号."""
+    """Start the long-lived PyRosetta server (WSL background) and wait for the ready signal."""
     global _PYROSETTA_SERVER_PROC
     if _pyrosetta_server_running():
         if verbose:
-            print("    [PyR-server] 已在运行")
+            print("    [PyR-server] already running")
         return True
 
     src_dir = _win_to_wsl(Path(__file__).resolve().parent)
@@ -90,31 +90,31 @@ def _pyrosetta_start_server(verbose: bool = True) -> bool:
         text=True, encoding="utf-8", errors="replace",
     )
 
-    # 等待 socket 就绪 (最多 30s)
+    # wait for the socket to be ready (up to 30s)
     if verbose:
-        print("    [PyR-server] 启动中 (等待 PyRosetta init)...")
+        print("    [PyR-server] starting (waiting for PyRosetta init)...")
     for _ in range(300):
         time.sleep(0.1)
         if _pyrosetta_server_running():
             if verbose:
-                print("    [PyR-server] 就绪 ✓")
+                print("    [PyR-server] ready [ok]")
             return True
         if _PYROSETTA_SERVER_PROC.poll() is not None:
             if verbose:
-                print("    [PyR-server] 进程已退出, 回退到 subprocess 模式")
+                print("    [PyR-server] process exited; falling back to subprocess mode")
             return False
 
     if verbose:
-        print("    [PyR-server] 启动超时, 回退到 subprocess 模式")
+        print("    [PyR-server] startup timed out; falling back to subprocess mode")
     return False
 
 
 def _pyrosetta_socket_refine(
     pdb_path: str, output_path: str, max_iter: int = 200, verbose: bool = True,
 ) -> Optional[Tuple[str, float]]:
-    """通过 Unix socket 调用 PyRosetta 长驻服务精修.
+    """Refine via the long-lived PyRosetta server over a Unix socket.
 
-    Returns: (output_path, energy) 或 None (服务不可用时).
+    Returns: (output_path, energy), or None when the service is unavailable.
     """
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -129,10 +129,10 @@ def _pyrosetta_socket_refine(
             "output": output_path,
             "max_iter": max_iter,
         }).encode("utf-8")
-        # 长度前缀 (4 字节 little-endian)
+        # length prefix (4-byte little-endian)
         s.sendall(len(req).to_bytes(4, "little") + req)
 
-        # 读响应
+        # read the response
         raw_len = b""
         while len(raw_len) < 4:
             chunk = s.recv(4 - len(raw_len))
@@ -153,19 +153,20 @@ def _pyrosetta_socket_refine(
             return (resp["output"], resp.get("energy", float("inf")))
         else:
             if verbose:
-                print(f"    [PyR-server] 错误: {resp.get('error', '?')}")
+                print(f"    [PyR-server] error: {resp.get('error', '?')}")
             return None
     finally:
         s.close()
 
 
 def _save_checkpoint(ckpt_path: Path, data: dict):
-    """保存 checkpoint (JSON + numpy arrays → .npy).
+    """Save a checkpoint (JSON + numpy arrays as .npy).
 
-    原子写: 先写临时文件再 rename, 防止崩溃时半写损坏 JSON.
-    numpy arrays 也用临时文件, 写完再 rename, 避免 JSON 引用不存在的 .npy.
+    Atomic write: write a temp file first, then rename, so a crash cannot leave a
+    half-written JSON. numpy arrays also go through a temp file and are renamed only
+    after saving, so the JSON never references a missing .npy.
     """
-    # numpy arrays 单独存为 .npy 文件 (原子写)
+    # store numpy arrays separately as .npy files (atomic write)
     arrays = {}
     clean = {}
     for k, v in data.items():
@@ -181,39 +182,39 @@ def _save_checkpoint(ckpt_path: Path, data: dict):
     tmp_path = str(ckpt_path) + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         f.write(json.dumps(clean, default=str, ensure_ascii=False))
-    os.replace(tmp_path, str(ckpt_path))  # 原子替换
+    os.replace(tmp_path, str(ckpt_path))  # atomic replace
 
 
 def _load_checkpoint(ckpt_path: Path) -> dict:
-    """加载 checkpoint (容错: .npy 文件缺失/损坏时跳过, 不影响其余字段)."""
+    """Load a checkpoint (fault-tolerant: missing/corrupt .npy files are skipped without affecting the rest)."""
     if not ckpt_path.exists():
         return {}
     try:
         data = json.loads(ckpt_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
-        print(f"  [checkpoint] JSON 加载失败: {e}")
+        print(f"  [checkpoint] JSON load failed: {e}")
         return {}
     arrays = data.pop("_npy_refs", {})
     for k, npy_path in arrays.items():
         try:
             data[k] = np.load(npy_path)
         except Exception as e:
-            print(f"  [checkpoint] .npy 加载失败: {k} ({npy_path}): {e}")
+            print(f"  [checkpoint] .npy load failed: {k} ({npy_path}): {e}")
     return data
 
 
 def _cleanup_checkpoints(output_path: Path, keep_final: bool = True):
-    """清理中间 checkpoint 文件, 只保留最终结果.
+    """Clean up intermediate checkpoint files, keeping only the final results.
 
-    删除:
-      - _checkpoint.json (checkpoint 元数据)
-      - _checkpoint_*.npy (numpy 数组)
-      - _tmp_* (临时文件)
+    Deletes:
+      - _checkpoint.json (checkpoint metadata)
+      - _checkpoint_*.npy (numpy arrays)
+      - _tmp_* (temporary files)
 
-    保留:
-      - *.pdb (所有 PDB 输出)
-      - *.json (结果文件, 非 checkpoint)
-      - _final_*.npz (最终数据)
+    Keeps:
+      - *.pdb (all PDB outputs)
+      - *.json (result files, not checkpoints)
+      - _final_*.npz (final data)
     """
     removed = 0
     for f in output_path.glob("_checkpoint*"):
@@ -222,28 +223,28 @@ def _cleanup_checkpoints(output_path: Path, keep_final: bool = True):
 
 
 def _delete_checkpoint_from_level(output_path: Path, from_level: float = 2.0):
-    """删除指定 level 及之后的 checkpoint 字段, 回退到该 level 之前的状态.
+    """Delete checkpoint fields for the given level onward, rolling back to the state before that level.
 
-    例: _delete_checkpoint_from_level(path, 2.0) 删除 Level 2/2.5/2.6/3/... 的字段,
-    checkpoint 回退到 Level 1.5, 下次 resume 从 Level 2 重新开始.
+    Example: _delete_checkpoint_from_level(path, 2.0) removes the Level 2/2.5/2.6/3/... fields,
+    the checkpoint rolls back to Level 1.5, and the next resume starts over from Level 2.
 
     Args:
-        output_path: 输出目录
-        from_level: 从哪个 level 开始删除 (包含该 level)
+        output_path: output directory
+        from_level: the level from which to start deleting (inclusive)
     """
     ckpt_path = output_path / "_checkpoint.json"
     if not ckpt_path.exists():
-        print(f"  [checkpoint] 无 checkpoint 文件, 跳过删除")
+        print(f"  [checkpoint] no checkpoint file found, skipping deletion")
         return
 
     ckpt = _load_checkpoint(ckpt_path)
     current_level = float(ckpt.get("level", -1))
 
-    # Level 2+ 的字段列表 (从 _save_ckpt 调用中收集)
+    # field list for Level 2+ (collected from the _save_ckpt calls)
     _LEVEL2_PLUS_FIELDS = {
         "remd_round", "best_coords", "best_energy", "pair_rate",
         "cross_segment_ok_rate", "energy", "clash_count",
-        # Level 2.5/2.6/3/3.5/4/5/5.5 的字段
+        # fields for Level 2.5/2.6/3/3.5/4/5/5.5
         "p5_refined", "pyrosetta_out", "l26_ok",
         "coords_rl", "rl_info",
         "coords_metad", "meta_e",
@@ -252,10 +253,10 @@ def _delete_checkpoint_from_level(output_path: Path, from_level: float = 2.0):
         "ppr_repaired", "ppr_rate",
     }
 
-    # 检查是否有 Level 2+ 的字段残留 (即使 level 数值已回退)
+    # check whether Level 2+ fields are still present (even if the level value was rolled back)
     has_level2_fields = bool(set(ckpt.keys()) & _LEVEL2_PLUS_FIELDS)
     if current_level < from_level and not has_level2_fields:
-        print(f"  [checkpoint] 当前 level={current_level}, 无 Level {from_level}+ 字段, 无需删除")
+        print(f"  [checkpoint] current level={current_level}, no Level {from_level}+ fields, nothing to delete")
         return
 
     removed_fields = []
@@ -264,47 +265,48 @@ def _delete_checkpoint_from_level(output_path: Path, from_level: float = 2.0):
         if field in ckpt:
             del ckpt[field]
             removed_fields.append(field)
-            # 删除关联的 .npy 文件
+            # delete the associated .npy files
             npy_path = output_path / f"ckpt_{field}.npy"
             if npy_path.exists():
                 npy_path.unlink()
                 removed_npy += 1
 
-    # 回退 level 到 from_level 之前
+    # roll the level back to before from_level
     _rollback_levels = {2.0: 1.5, 2.5: 2.0, 2.6: 2.5, 3.0: 2.6,
                         3.5: 3.0, 4.0: 3.5, 5.0: 4.0, 5.5: 5.0}
     new_level = _rollback_levels.get(from_level, from_level - 0.5)
     ckpt["level"] = new_level
 
-    # 保存修改后的 checkpoint
+    # save the modified checkpoint
     _save_checkpoint(ckpt_path, ckpt)
-    print(f"  [checkpoint] 已删除 Level {from_level}+ 字段: {removed_fields}")
-    print(f"  [checkpoint] 已删除 {removed_npy} 个 .npy 文件")
-    print(f"  [checkpoint] level 回退到 {new_level}, 下次从 Level {new_level} 之后继续")
+    print(f"  [checkpoint] deleted Level {from_level}+ fields: {removed_fields}")
+    print(f"  [checkpoint] deleted {removed_npy} .npy files")
+    print(f"  [checkpoint] level rolled back to {new_level}, resuming after Level {new_level} next time")
 
 
 @dataclass
 class RelaxationMetrics:
-    """迭代弛豫监控指标 (4 指标联合)."""
-    cross_segment_ok: float = 0.0    # 跨片段配对距离 < 15Å 比例
-    clash_count: int = 0             # P-P 距离 < 3Å 的碰撞数
-    rmsd_change: float = 0.0         # 相对上一轮 RMSD 变化
-    pair_rate: float = 0.0           # 总配对率
-    energy_delta: float = 0.0        # 能量变化
+    """Joint metrics for monitoring iterative relaxation (4 indicators)."""
+    cross_segment_ok: float = 0.0    # fraction of cross-segment pairs < 15Å
+    clash_count: int = 0             # number of clashes with P-P distance < 3Å
+    rmsd_change: float = 0.0         # RMSD change relative to the previous round
+    pair_rate: float = 0.0           # overall base-pairing rate
+    energy_delta: float = 0.0        # energy change
 
     @property
     def is_converged(self) -> bool:
-        """多指标收敛判据."""
+        """Multi-metric convergence criterion."""
         return (self.cross_segment_ok > 0.8
                 and self.clash_count == 0
                 and abs(self.rmsd_change) < 0.5)
 
 
 class RelaxationRL:
-    """RL agent: 用 MCTS + GNN PolicyNetwork 指导 isRNAcirc 每轮弛豫.
+    """RL agent that uses MCTS + a GNN PolicyNetwork to guide each isRNAcirc relaxation round.
 
-    支持在线学习: decide() 时收集轨迹, 周期性触发 PPO 更新.
-    复用 rl_optimizer.py 的 PolicyNetwork + MCTS + ReplayBuffer + OnlineLearner.
+    Supports online learning: trajectories are collected during decide(), and PPO updates
+    are triggered periodically. Reuses PolicyNetwork + MCTS + ReplayBuffer + OnlineLearner
+    from rl_optimizer.py.
     """
 
     def __init__(
@@ -323,7 +325,7 @@ class RelaxationRL:
         self.policy_path = policy_path
         self.md_step_scale = md_step_scale
 
-        # 加载 PolicyNetwork + MCTS
+        # load PolicyNetwork + MCTS
         from torusfold.scheme2.rl_optimizer import PolicyNetwork, MCTS, build_rl_state, compute_reward
         self._build_rl_state = build_rl_state
         self._compute_reward = compute_reward
@@ -333,20 +335,20 @@ class RelaxationRL:
             self.policy = PolicyNetwork()
             self.policy.load(policy_path)
         else:
-            # 无预训练权重: 创建随机策略, MCTS 用启发式 rollout
+            # no pretrained weights: create a random policy; MCTS uses heuristic rollouts
             self.policy = PolicyNetwork()
 
         self.mcts = MCTS(
-            policy=None,  # 纯启发式 MCTS (不依赖策略先验)
+            policy=None,  # pure-heuristic MCTS (no policy prior)
             c_puct=1.5,
             n_simulations=max(n_simulations, 20),
             rollout_depth=3,
             use_rollout=True,
         )
 
-        # 在线学习 (延迟启用)
+        # online learning (lazily enabled)
         self._online_learner = None
-        self._last_rmsd = 0.0  # 最近一次 decide() 的 MCTS 偏差 (诊断用)
+        self._last_rmsd = 0.0  # deviation of the last decide() from MCTS (diagnostics)
 
     def enable_online_learning(
         self,
@@ -354,15 +356,15 @@ class RelaxationRL:
         update_every: int = 5,
         capacity: int = 500,
     ):
-        """启用在线学习."""
+        """Enable online learning."""
         from torusfold.scheme2.rl_optimizer import ReplayBuffer, OnlineLearner, ContinuousAssemblyPolicy
 
         buffer = ReplayBuffer(capacity=capacity)
         if buffer_path:
             buffer.load(buffer_path)
-            print(f"  [RL] 从 {buffer_path} 加载 {len(buffer)} 条历史轨迹")
+            print(f"  [RL] loaded {len(buffer)} past trajectories from {buffer_path}")
 
-        # 用 ContinuousAssemblyPolicy (PPO 训练用)
+        # use ContinuousAssemblyPolicy (for PPO training)
         cont_policy = ContinuousAssemblyPolicy()
         self._online_learner = OnlineLearner(
             policy=cont_policy,
@@ -380,16 +382,16 @@ class RelaxationRL:
         round_idx: int,
         n_relax_rounds: int,
     ) -> Tuple[dict, int]:
-        """MCTS 搜索决定 pair_weights + MD 步数.
+        """Decide pair_weights + MD step count via MCTS search.
 
-        在线学习: 每次 decide() 记录轨迹, 周期性重训练.
+        Online learning: every decide() records a trajectory and periodically retrains.
 
         Returns:
             (pair_weights, n_steps)
         """
-        # 构建 RL state
+        # build the RL state
         if len(coords) == 0:
-            # 坐标为空, 跳过 RL, 返回默认参数
+            # empty coordinates: skip RL and return default parameters
             scale = self.md_step_scale
             if metrics.pair_rate < 0.3:
                 return {}, max(1000, int(50000 * scale))
@@ -402,10 +404,10 @@ class RelaxationRL:
             coords, self.sequence, far_pairs, self.stem_blocks,
         )
 
-        # MCTS 搜索: 返回 best P 坐标
+        # MCTS search: returns the best P coordinates
         best_coords = self.mcts.search(state, far_pairs)
 
-        # 在线学习: 记录轨迹
+        # online learning: record a trajectory
         if self._online_learner is not None:
             reward = self._compute_reward(best_coords, far_pairs)
             traj = {
@@ -419,7 +421,7 @@ class RelaxationRL:
             }
             self._online_learner.observe(traj)
 
-        # 从最优坐标与原始坐标的偏差 → pair_weights
+        # derive pair_weights from the shift between the optimal and original coordinates
         pair_weights = {}
         L = len(coords)
         for k, (i, j) in enumerate(far_pairs):
@@ -427,28 +429,30 @@ class RelaxationRL:
                 continue
             dist_before = float(np.linalg.norm(coords[i] - coords[j]))
             dist_after = float(np.linalg.norm(best_coords[i] - best_coords[j]))
-            # 距离缩短的配对加权
+            # weight pairs whose distance shrank
             if dist_after < dist_before:
                 ratio = dist_before / max(dist_after, 0.1)
                 pair_weights[(i, j)] = min(5.0, max(0.1, ratio))
             else:
                 pair_weights[(i, j)] = 1.0
 
-        # MD 步数: 由 RL 的 MCTS 搜索偏差驱动 (替代硬编码 pair_rate 阈值).
-        # MCTS 搜索出的 best_coords 若与当前坐标偏差大, 说明 RL 认为构象还需
-        # 大调整 → 多跑 MD; 偏差小 → 接近收敛, 少跑. 这是 RL 内部真实信号.
+        # MD step count: driven by the deviation found by RL's MCTS search (replaces the
+        # hard-coded pair_rate threshold). If MCTS best_coords deviate strongly from the
+        # current coordinates, RL thinks the conformation still needs large adjustments ->
+        # run more MD; small deviation -> near convergence, run less. This is RL's internal
+        # real signal.
         rmsd = 0.0
         if len(best_coords) == L and L > 0:
             diff = np.asarray(best_coords) - np.asarray(coords)
             rmsd = float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
         scale = self.md_step_scale
         if rmsd > 3.0:
-            n_steps = 1000000   # 大调整: 1M
+            n_steps = 1000000   # large adjustment: 1M
         elif rmsd > 1.5:
-            n_steps = 500000    # 中等: 500K
+            n_steps = 500000    # medium: 500K
         else:
-            n_steps = 200000    # 接近收敛: 200K
-        # 长度缩放: L>500 时步数减半, L>1000 时再减半
+            n_steps = 200000    # near convergence: 200K
+        # length scaling: halve the steps when L>500, halve again when L>1000
         l_scale = 1.0
         if L > 1000:
             l_scale = 0.25
@@ -460,18 +464,18 @@ class RelaxationRL:
         return pair_weights, n_steps
 
     def save_online_state(self):
-        """保存在线学习状态 (策略 + buffer)."""
+        """Save the online-learning state (policy + buffer)."""
         if self._online_learner and self._online_buffer_path:
             self._online_learner.save(self._online_buffer_path)
 
 
 @dataclass
 class LongPipelineResult:
-    """长链管线结果."""
+    """Result of the long-chain pipeline."""
     sequence: str
     secondary_structure: str
-    coords_cg: np.ndarray              # (L, 3) CG P 坐标
-    coords_aa: Optional[np.ndarray]    # (N_atoms, 3) 全原子坐标
+    coords_cg: np.ndarray              # (L, 3) CG P coordinates
+    coords_aa: Optional[np.ndarray]    # (N_atoms, 3) all-atom coordinates
     energy_cg: float
     energy_aa: float
     rmsd_to_native: Optional[float]
@@ -481,7 +485,7 @@ class LongPipelineResult:
     n_candidates: int
     runtime_seconds: float
     fidelity_history: List[Dict]
-    hbond_rate: float = 0.0  # 真氢键满足率 (全原子级, <3.6Å)
+    hbond_rate: float = 0.0  # real hydrogen-bond satisfaction rate (all-atom level, <3.6Å)
     details: Dict = field(default_factory=dict)
 
 
@@ -503,27 +507,27 @@ def isrnaclong_pipeline(
     nrep: int = 1,
     platform: str = "auto",
     verbose: bool = True,
-    # 分段拼装参数
+    # segmented assembly parameters
     use_rhofold: bool = False,
     n_candidates: int = 1,
-    # 自适应 MSA (避免 RhoFold 单序列塌缩)
+    # adaptive MSA (avoids RhoFold collapse on a single sequence)
     use_msa: bool = True,
     rfam_cm: str = "",
     rfam_dir: str = "",
     msa_blocks: Optional[List[Dict]] = None,
-    # 5-bead CG 精修
+    # 5-bead CG refinement
     use_5bead: bool = True,
-    # Metadynamics 增强采样
+    # Metadynamics enhanced sampling
     use_metad: bool = True,
     metad_n_steps: int = 200000,
-    # PyRosetta 条件式精修 (Level 2.6, WSL)
+    # PyRosetta conditional refinement (Level 2.6, WSL)
     use_pyrosetta: bool = True,
-    # PPR 碱基对氢键修复 (Level 5.5)
+    # PPR base-pair hydrogen-bond repair (Level 5.5)
     use_ppr: bool = True,
     ppr_max_rounds: int = 5,
-    # 断点续跑
+    # checkpoint resume
     resume: bool = True,
-    # structRFM 多任务预测头 (opt-in)
+    # structRFM multi-task prediction heads (opt-in)
     use_multi_task_heads: bool = False,
     multitask_head_weights: Optional[str] = None,
     use_structrfm: bool = False,
@@ -532,68 +536,74 @@ def isrnaclong_pipeline(
     bsj_head_weight: float = 0.5,
     clash_head_weight: float = 0.3,
 ) -> LongPipelineResult:
-    """isRNAcircLong 完整管线.
+    """Full isRNAcircLong pipeline.
 
     Args:
-        sequence: RNA 序列
-        secondary_structure: 二级结构 (dot-bracket)
-        output_dir: 输出目录
-        max_seg_len: 分段最大长度
-        overlap: 重叠区长度
-        n_relax_rounds: 迭代弛豫轮数 (默认 6, 大多数情况够用; 早停机制会提前结束)
-        n_rest2_replicas: REST2 副本数
-        rest2_nsteps: REST2 步数
-        use_rl_relax: Level 2 是否用 RL guidance (False=消融, 用固定参数)
-        use_rl_mcts: Level 3 是否用 RL-MCTS (False=消融)
-        rl_n_simulations: RL 模拟次数
-        md_step_scale: Level 2 每轮 MD 步数缩放因子. 默认 0.1 (步数减到 1/10,
-            1M→100K / 500K→50K / 200K→20K). 控制 Level 2 总耗时;
-            构象收敛不足时可调回 0.3~0.5
-        use_5bead: Level 2.3 是否用 5-bead CG 精修 (默认 True).
-            5-bead: P/S/B1/B2/B3 每核苷酸, 比 3-bead 更精确的 stacking/H-bond 几何.
-        use_metad: Level 3.5 是否用 Metadynamics 增强采样 (默认 True).
-            沿 CV (BSJ距离/配对接触/回旋半径) 加 Gaussian hill, 跨越自由能垒.
-        metad_n_steps: Metadynamics 总 MD 步数, 默认 50000.
-        nrep: Level 2 REMD 副本数 (IsRNAcirc 并发跑多副本, 多核并行).
-            >1 时每个副本独立温度/种子, 并发 lmp 进程; 需要足够 CPU 核.
-            默认 1 (单副本, 与旧版一致).
-        platform: OpenMM/LAMMPS 平台
-        verbose: 是否打印详细信息
-        use_rhofold: True 用 RhoFold+ 预测每 chunk, False 用 isRNAcirc Type=0
-        n_candidates: 每 chunk 候选数
-        use_msa: True 启用自适应 MSA (真 MSA 优先, 伪 MSA 兜底),
-            避免 RhoFold+ 单序列在工程序列上塌缩. 默认 True.
-        rfam_cm: Rfam CM 库路径 (cmsearch 搜真 MSA 用, WSL 内路径)
-        rfam_dir: Rfam 数据目录 (含已知家族 MSA, 复用真 MSA)
-        msa_blocks: 可选, MSA-aware 分块锚定区间
+        sequence: RNA sequence
+        secondary_structure: secondary structure (dot-bracket)
+        output_dir: output directory
+        max_seg_len: maximum segment length
+        overlap: overlap length
+        n_relax_rounds: number of iterative relaxation rounds (default 6, enough in most
+            cases; the early-stop mechanism may end sooner)
+        n_rest2_replicas: number of REST2 replicas
+        rest2_nsteps: REST2 step count
+        use_rl_relax: whether Level 2 uses RL guidance (False = ablation, fixed parameters)
+        use_rl_mcts: whether Level 3 uses RL-MCTS (False = ablation)
+        rl_n_simulations: number of RL simulations
+        md_step_scale: step-count scaling factor for each Level 2 MD round. Default 0.1
+            (reduces steps to 1/10: 1M->100K / 500K->50K / 200K->20K). Controls total Level 2
+            runtime; raise back to 0.3~0.5 when the conformation is not converging well.
+        use_5bead: whether Level 2.3 uses 5-bead CG refinement (default True).
+            5-bead: P/S/B1/B2/B3 per nucleotide, giving more accurate stacking/H-bond
+            geometry than 3-bead.
+        use_metad: whether Level 3.5 uses Metadynamics enhanced sampling (default True).
+            Gaussian hills are added along the CVs (BSJ distance / pairing contacts /
+            radius of gyration) to cross free-energy barriers.
+        metad_n_steps: total Metadynamics MD steps, default 50000.
+        nrep: number of Level 2 REMD replicas (IsRNAcirc runs replicas concurrently on
+            multiple cores). When >1 each replica has its own temperature/seed and a
+            concurrent LAMMPS process; enough CPU cores are required. Default 1
+            (single replica, consistent with the legacy version).
+        platform: OpenMM/LAMMPS platform
+        verbose: whether to print detailed information
+        use_rhofold: True predicts each chunk with RhoFold+, False uses isRNAcirc Type=0
+        n_candidates: candidate count per chunk
+        use_msa: True enables adaptive MSA (real MSA preferred, pseudo MSA as fallback),
+            preventing RhoFold+ from collapsing on engineered single sequences. Default True.
+        rfam_cm: path to the Rfam CM library (used by cmsearch to find real MSAs; WSL path)
+        rfam_dir: Rfam data directory (contains known-family MSAs, reused as real MSAs)
+        msa_blocks: optional, MSA-aware anchored blocking intervals
             [{"start","end","msa_path","source"}, ...].
-            提供时按锚定区间分块 (真MSA chunk 用对应 MSA)
+            When provided, blocks are split along the anchored intervals (each real-MSA
+            chunk uses its corresponding MSA).
 
     Returns:
         LongPipelineResult
     """
     t0 = time.time()
 
-    # 异步预热 WSL (消除后续冷启动延迟)
+    # preheat WSL asynchronously (avoids later cold-start latency)
     if use_pyrosetta:
         _preheat_wsl()
 
-    # 序列标准化: 大小写统一 + T→U (RNA)
+    # sequence normalization: unify case + T->U (RNA)
     sequence = sequence.upper().replace("T", "U")
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # 断点续跑: checkpoint 文件
+    # checkpoint resume: checkpoint file
     _ckpt_path = output_path / "_checkpoint.json"
     ckpt = _load_checkpoint(_ckpt_path) if resume else {}
     _raw_level = ckpt.get("level", -1)
     ckpt_level = float(_raw_level) if _raw_level is not None else -1
-    # 累加 checkpoint: 每个 Level 追加字段, 存盘时写完整 dict (防覆盖丢字段)
+    # cumulative checkpoint: each Level appends fields; the full dict is written on save
+    # (prevents field loss by overwriting)
     _ckpt_data = dict(ckpt)
 
     def _save_ckpt(level: float, **extra):
-        """累加字段到 _ckpt_data 并存盘."""
+        """Append fields to _ckpt_data and save it."""
         _ckpt_data["level"] = level
         _ckpt_data.update(extra)
         _save_checkpoint(_ckpt_path, _ckpt_data)
@@ -603,10 +613,10 @@ def isrnaclong_pipeline(
     if verbose:
         print(f"=== isRNAcircLong: {L}nt ===")
         if ckpt_level >= 0:
-            print(f"  [续跑] 从 Level {ckpt_level} 之后继续")
+            print(f"  [resume] resuming after Level {ckpt_level}")
 
-    # ── Level 0: Partition Function BPP + 置信度分层约束 ──
-    # 只要 JSON 里有完整字段就恢复, 不依赖 ckpt_level 数值
+    # ── Level 0: Partition Function BPP + confidence-tiered restraints ──
+    # restore as long as the JSON has the complete fields, independent of the ckpt_level value
     _l0_from_ckpt = ("pairs" in ckpt and "far_pairs" in ckpt and "stem_blocks" in ckpt
                      and "bpp" in ckpt and ckpt["bpp"] is not None)
     if _l0_from_ckpt:
@@ -618,40 +628,40 @@ def isrnaclong_pipeline(
         bpp_high = ckpt.get("bpp_high", [])
         bpp_mid = ckpt.get("bpp_mid", [])
         if verbose:
-            print(f"\n[Level 0] 从 checkpoint 恢复: 近程{len(pairs)}, 远端{len(far_pairs)}")
+            print(f"\n[Level 0] restored from checkpoint: short-range {len(pairs)}, far {len(far_pairs)}")
     else:
         if ckpt_level >= 0 and verbose:
-            print(f"\n[Level 0] checkpoint 不完整, 重新计算配对...")
+            print(f"\n[Level 0] checkpoint incomplete, recomputing pairs...")
         if verbose:
-            print("\n[Level 0] Partition Function BPP + 置信度分层...")
+            print("\n[Level 0] Partition Function BPP + confidence tiering...")
 
         # ── 1. ViennaRNA Partition Function ──
         import RNA as _RNA
         md_pf = _RNA.md()
-        md_pf.circ = 1  # 环化模式
+        md_pf.circ = 1  # circular mode
         fc_pf = _RNA.fold_compound(sequence, md_pf)
         ss_pf, pf_energy = fc_pf.pf()
 
-        # 提取全概率配对列表
+        # extract the full-probability pairing list
         plist = fc_pf.plist_from_probs(0.01)  # P > 1%
 
-        # 置信度分层
+        # confidence tiering
         bpp_high = [(ep.i - 1, ep.j - 1, ep.p) for ep in plist if ep.p > 0.9]
         bpp_mid = [(ep.i - 1, ep.j - 1, ep.p) for ep in plist if 0.5 < ep.p <= 0.9]
         bpp_low = [(ep.i - 1, ep.j - 1, ep.p) for ep in plist if 0.1 < ep.p <= 0.5]
 
         if verbose:
             print(f"  PF energy: {pf_energy:.2f}")
-            print(f"  高置信 (P>0.9):   {len(bpp_high)} 对")
-            print(f"  中置信 (0.5-0.9): {len(bpp_mid)} 对")
-            print(f"  低置信 (0.1-0.5): {len(bpp_low)} 对")
+            print(f"  high-confidence (P>0.9):     {len(bpp_high)} pairs")
+            print(f"  medium-confidence (0.5-0.9): {len(bpp_mid)} pairs")
+            print(f"  low-confidence (0.1-0.5):    {len(bpp_low)} pairs")
 
-        # ── 2. BPP 矩阵 + MFE (复用 fc_pf: 省一次 O(L^3) PF, 且 circ=1 一致) ──
+        # ── 2. BPP matrix + MFE (reuse fc_pf: saves one O(L^3) PF and stays consistent with circ=1) ──
         try:
             _bpp_raw = np.array(fc_pf.bpp(), dtype=np.float64)
             bpp = _bpp_raw[1:, 1:] if _bpp_raw.shape[0] > len(sequence) else _bpp_raw.copy()
             if verbose:
-                print(f"  BPP 矩阵: {bpp.shape}, max P={float(bpp.max()):.3f}")
+                print(f"  BPP matrix: {bpp.shape}, max P={float(bpp.max()):.3f}")
         except Exception:
             bpp = None
         try:
@@ -667,7 +677,7 @@ def isrnaclong_pipeline(
         except Exception:
             pairs_mfe = [(i, j) for i, j, _ in bpp_high + bpp_mid]
 
-        # DivideFold: 递归分块预测独立结构
+        # DivideFold: recursively split into blocks and predict independent structures
         ss_divide = None
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "DivideFold-main" / "src"))
@@ -675,7 +685,7 @@ def isrnaclong_pipeline(
             def _rnafold_api(seq):
                 md = _RNA_DL.md(); fc = _RNA_DL.fold_compound(seq, md)
                 ss, _ = fc.mfe(); return ss
-            # DivideFold 需要纯 CPU 子进程 (ROCm 在 import 时编译 MIOpen kernel)
+            # DivideFold needs a pure-CPU subprocess (ROCm compiles MIOpen kernels on import)
             _dd_runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "scripts", "_dd_runner.py")
             _sys_python = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Python", "bin", "python3.exe")
             if not os.path.exists(_sys_python):
@@ -692,24 +702,24 @@ def isrnaclong_pipeline(
                 else:
                     ss_divide = None
                     if verbose:
-                        print(f"  DivideFold 子进程失败: {_dd_result.stderr[:200]}")
+                        print(f"  DivideFold subprocess failed: {_dd_result.stderr[:200]}")
             except Exception as _dd_err:
                 ss_divide = None
                 if verbose:
-                    print(f"  DivideFold 子进程异常: {_dd_err}")
+                    print(f"  DivideFold subprocess error: {_dd_err}")
             if ss_divide is not None:
                 if verbose:
                     print(f"  DivideFold: {ss_divide.count('(')} pairs")
         except Exception as e:
             if verbose:
-                print(f"  DivideFold 不可用: {e}")
+                print(f"  DivideFold unavailable: {e}")
 
-        # ── 3. 多源约束融合 ──
+        # ── 3. fuse restraints from multiple sources ──
         mfe_set = set((i, j) for i, j in pairs_mfe)
         pf_high_set = set((i, j) for i, j, _ in bpp_high)
         pf_mid_set = set((i, j) for i, j, _ in bpp_mid)
 
-        # DivideFold 配对集
+        # DivideFold pairing set
         divide_set = set()
         if ss_divide:
             stack = []
@@ -718,7 +728,7 @@ def isrnaclong_pipeline(
                 elif c == ")" and stack:
                     divide_set.add((stack.pop(), i))
 
-        # ── 硬约束: 多方法一致 (≥2个方法支持) ──
+        # ── hard restraints: consistent across methods (>=2 sources) ──
         all_sources = [pf_high_set, mfe_set, divide_set]
         pair_votes = {}
         for src in all_sources:
@@ -732,7 +742,7 @@ def isrnaclong_pipeline(
                 hard_pairs.append(p)
                 hard_set.add(p)
 
-        # ── 软约束: MFE + PF中置信 + DivideFold (不截断) ──
+        # ── soft restraints: MFE + PF medium-confidence + DivideFold (not truncated) ──
         soft_pairs = []
         for i, j in mfe_set:
             if (i, j) not in hard_set:
@@ -749,44 +759,45 @@ def isrnaclong_pipeline(
         pairs = [(i, j, 1.0) for i, j in hard_pairs]
         pairs += soft_pairs
 
-        # ── RCM 重加权: 用反向互补匹配替代 BPP 概率 ──
+        # ── RCM reweighting: replace BPP probabilities with reverse-complement matching ──
         try:
             from torusfold.scheme2.rcm import compute_rcm_score
-            _flank = min(200, len(sequence) // 4)  # 侧翼窗口 200bp
+            _flank = min(200, len(sequence) // 4)  # flanking window 200bp
             _rcm_pairs = []
             for i, j, w in pairs:
-                # 提取侧翼序列 (circRNA 环形: 取 i 上游 + j 下游)
+                # extract flanking sequence (circular RNA: upstream of i + downstream of j)
                 seq_up = sequence[max(0, i - _flank):i]
                 seq_down = sequence[j:min(len(sequence), j + _flank)]
                 if len(seq_up) >= 5 and len(seq_down) >= 5:
                     rcm = compute_rcm_score(seq_up, seq_down)
                     _rcm_pairs.append((i, j, rcm['confidence']))
                 else:
-                    _rcm_pairs.append((i, j, w))  # 太短保持原权重
+                    _rcm_pairs.append((i, j, w))  # too short: keep the original weight
             pairs = _rcm_pairs
             if verbose:
                 _rcm_vals = [w for _, _, w in pairs]
-                print(f"  RCM 重加权: mean={np.mean(_rcm_vals):.3f}, "
+                print(f"  RCM reweighting: mean={np.mean(_rcm_vals):.3f}, "
                       f"min={min(_rcm_vals):.3f}, max={max(_rcm_vals):.3f}")
         except Exception as e:
             if verbose:
-                print(f"  RCM 重加权跳过: {e}")
+                print(f"  RCM reweighting skipped: {e}")
 
         if verbose:
             n_multi = sum(1 for v in pair_votes.values() if v >= 2)
-            print(f"  PF高置信: {len(pf_high_set)}, MFE: {len(mfe_set)}, DivideFold: {len(divide_set)}")
-            print(f"  多方法一致(≥2): {n_multi}")
-            print(f"  硬约束: {len(hard_pairs)}, 软约束: {len(soft_pairs)}")
-            print(f"  总约束: {len(pairs)}")
+            print(f"  PF high-confidence: {len(pf_high_set)}, MFE: {len(mfe_set)}, DivideFold: {len(divide_set)}")
+            print(f"  multi-method consistent (>=2): {n_multi}")
+            print(f"  hard restraints: {len(hard_pairs)}, soft restraints: {len(soft_pairs)}")
+            print(f"  total restraints: {len(pairs)}")
 
-        # ── 3b. NCM 非典型配对检测 (P0) ──
-        # 传入 Level 0 已算好的 BPP 矩阵, 避免 NCM 内部重复跑 ViennaRNA PF
-        ncm_type_map = {}  # (i,j) -> type, 下游 CG 力场按类型分配目标距离
+        # ── 3b. NCM non-canonical pairing detection (P0) ──
+        # pass in the BPP matrix already computed at Level 0 so NCM does not rerun
+        # ViennaRNA PF
+        ncm_type_map = {}  # (i,j) -> type; the downstream CG force field assigns a target distance per type
         ncm_type_target = {
-            "HOOGSTEEN": 10.5,  # Hoogsteen: 与 WC 类似距离
-            "SUGAR":     10.5,  # Sugar: 类似 WC
-            "SHEAR":     11.5,  # Shear: 稍远
-            "STACK":     10.0,  # Stacking: 接近平行距离
+            "HOOGSTEEN": 10.5,  # Hoogsteen: distance similar to WC
+            "SUGAR":     10.5,  # Sugar: similar to WC
+            "SHEAR":     11.5,  # Shear: slightly farther
+            "STACK":     10.0,  # Stacking: near-parallel stacking distance
         }
         try:
             from torusfold.scheme2.ncm_detector import detect_ncms_from_bpp
@@ -795,27 +806,27 @@ def isrnaclong_pipeline(
             for _i, _j, _w, _etype in ncm_raw:
                 ncm_type_map[(_i, _j)] = _etype
                 _target = ncm_type_target.get(_etype, 10.5)
-                # 用 weight 和类型标记做软约束
+                # use the weight and the type label as a soft restraint
                 pairs.append((_i, _j, _w))
             if verbose:
                 _ncm_type_counts = {}
                 for _, etype in ncm_type_map.items():
                     _ncm_type_counts[etype] = _ncm_type_counts.get(etype, 0) + 1
-                print(f"  NCM 非典型对: {len(ncm_raw)}  "
-                      f"类型分布: {_ncm_type_counts}")
+                print(f"  NCM non-canonical pairs: {len(ncm_raw)}  "
+                      f"type distribution: {_ncm_type_counts}")
         except Exception as e:
             if verbose:
-                print(f"  NCM 检测跳过: {e}")
+                print(f"  NCM detection skipped: {e}")
 
-        # ── 4. pair_graph 扫描远端配对 ──
+        # ── 4. scan far/long-range pairs via pair_graph ──
         from torusfold.scheme2.pair_graph import build_full_pair_graph, extract_stem_blocks
-        # pairs 已经是 (i, j, w) 三元组
+        # pairs are already (i, j, w) triples
         _, scan_pairs, far_pairs = build_full_pair_graph(
             sequence, pairs, do_scan=True,
         )
         stem_blocks = extract_stem_blocks(pairs, scan_pairs)
 
-        # ── 4b. 假结检测 (circRNA 关键) ──
+        # ── 4b. pseudoknot detection (critical for circRNA) ──
         try:
             from torusfold.scheme2.pair_graph import detect_pseudoknots_from_bpp
             pk_pairs = detect_pseudoknots_from_bpp(
@@ -823,24 +834,24 @@ def isrnaclong_pipeline(
                 pk_threshold=0.1, min_confidence=0.3,
                 is_circular=True,
             )
-            # 假结配对加入约束: 作为软约束 (weight 由 confidence 决定)
+            # add pseudoknot pairs as soft restraints (weight determined by confidence)
             for pk_i, pk_j, pk_conf in pk_pairs:
                 pairs.append((pk_i, pk_j, pk_conf))
-                # 假结配对天然跨越远端 → 加入 far_pairs
+                # pseudoknot pairs inherently span long range -> add to far_pairs
                 _topo_dist = min(abs(pk_i - pk_j), len(sequence) - abs(pk_i - pk_j))
                 if _topo_dist > 100:
                     far_pairs.append((pk_i, pk_j))
             if verbose and pk_pairs:
-                print(f"  假结候选: {len(pk_pairs)} 对 (已加入约束)")
+                print(f"  pseudoknot candidates: {len(pk_pairs)} pairs (added to restraints)")
         except Exception as e:
             if verbose:
-                print(f"  假结检测失败: {e}")
+                print(f"  pseudoknot detection failed: {e}")
 
-        # NCM 类型映射写入 checkpoint 供下游 CG 力场使用
-        # (ncm_type_map 在上方 3b 里已定义)
+        # write the NCM type map into the checkpoint for the downstream CG force field
+        # (ncm_type_map is defined in 3b above)
 
         if verbose:
-            print(f"  近程配对: {len(pairs)}, 远端配对: {len(far_pairs)}")
+            print(f"  short-range pairs: {len(pairs)}, far pairs: {len(far_pairs)}")
 
         _save_ckpt(0,
             pairs=pairs, far_pairs=far_pairs, stem_blocks=stem_blocks,
@@ -849,7 +860,7 @@ def isrnaclong_pipeline(
             pf_energy=pf_energy,
         )
 
-        # Level 0 完整诊断
+        # full Level 0 diagnostics
         try:
             _n_mfe = len(pairs_mfe) if 'pairs_mfe' in dir() else 0
             _n_divide = len(divide_set) if 'divide_set' in dir() else 0
@@ -873,7 +884,7 @@ def isrnaclong_pipeline(
         except Exception as _err:
             raise
 
-    # ── Level 0 数据导出 ──
+    # ── Level 0 data export ──
     try:
         from torusfold.scheme2.data_exporter import export_level0_bpp, export_level0_ncm
         _ncm_pairs_for_export = ncm_pairs if 'ncm_pairs' in dir() else []
@@ -882,23 +893,24 @@ def isrnaclong_pipeline(
     except Exception as _err:
         raise
 
-    # ── Level 1: 分段 Vfold3D + 拼装 ──
-    # Level 1 只有在 Level 0 也从 checkpoint 恢复时才能复用, 否则 pairs 不一致
+    # ── Level 1: segmented Vfold3D + assembly ──
+    # Level 1 can only be reused when Level 0 was also restored from the checkpoint;
+    # otherwise the pairs are inconsistent
     _l1_from_ckpt = (_l0_from_ckpt and "coords_vfold" in ckpt and "n_segments" in ckpt)
     if _l1_from_ckpt:
         coords_vfold = ckpt["coords_vfold"]
         n_segments = ckpt["n_segments"]
         segments = ckpt.get("segments", [])
-        chunk_confidences = [0.5] * n_segments  # checkpoint 未保存, 用默认值
+        chunk_confidences = [0.5] * n_segments  # not saved in the checkpoint; use defaults
         _chunk_unc = [0.5] * n_segments
         if verbose:
-            print(f"\n[Level 1] 从 checkpoint 恢复: {n_segments} 段")
+            print(f"\n[Level 1] restored from checkpoint: {n_segments} segments")
     else:
         if verbose:
-            print("\n[Level 1] 分段 Vfold3D + 拼装...")
+            print("\n[Level 1] segmented Vfold3D + assembly...")
         from torusfold.scheme2.segmented_vfold3d import segmented_vfold3d_pipeline, split_sequence
 
-        # 分段信息 (MSA-aware 分块可选)
+        # segment info (MSA-aware blocking is optional)
         segments = split_sequence(
             sequence, secondary_structure, max_seg_len, overlap,
             msa_blocks=msa_blocks,
@@ -906,7 +918,7 @@ def isrnaclong_pipeline(
         n_segments = len(segments)
 
         if verbose:
-            print(f"  分段模式: {'RhoFold+' if use_rhofold else 'isRNAcirc Type=0'}, "
+            print(f"  segmentation mode: {'RhoFold+' if use_rhofold else 'isRNAcirc Type=0'}, "
                   f"{n_segments} chunks, candidates={n_candidates}")
 
         _l1_ok = False
@@ -925,26 +937,26 @@ def isrnaclong_pipeline(
                 msa_blocks=msa_blocks,
                 far_pairs=far_pairs,
             )
-            # ── NCM ensemble 距离反推合并进 pairs (软约束) ──
+            # ── merge NCM ensemble distance evidence into pairs (soft restraints) ──
             if ncm_ens_pairs:
                 _ncm_dist = [(gi, gj, conf) for gi, gj, _t, conf in ncm_ens_pairs]
                 pairs += _ncm_dist
                 if verbose:
-                    print(f"  NCM ensemble 距离证据: +{len(_ncm_dist)} 对软约束")
+                    print(f"  NCM ensemble distance evidence: +{len(_ncm_dist)} soft restraints")
             _l1_ok = True
         except Exception as e:
             if verbose:
-                print(f"  3D 预测失败: {e}, 用默认螺旋坐标")
+                print(f"  3D prediction failed: {e}, using default helix coordinates")
             coords_vfold = _default_helix_coords(L)
             chunk_confidences = [0.0] * n_segments
             ncm_ens_pairs = []
 
         if verbose:
-            print(f"  分段数: {n_segments}, 初始 RMSD 估算: ~30-40A")
+            print(f"  segments: {n_segments}, estimated initial RMSD: ~30-40A")
 
-        # Level 1 验证 (通过后才存 checkpoint)
+        # Level 1 validation (only store the checkpoint once it passes)
         v1 = _validate_structure(coords_vfold, pairs, bpp, sequence, "Level 1")
-        print(f"  [验证 Level 1] clash={v1['clash_count']}, pair_rate={v1['pair_rate']:.2f}, "
+        print(f"  [validate Level 1] clash={v1['clash_count']}, pair_rate={v1['pair_rate']:.2f}, "
               f"bond_q={v1['bond_quality']:.2f}, valid={v1['is_valid']}")
 
         if _l1_ok:
@@ -954,9 +966,9 @@ def isrnaclong_pipeline(
                 segments=segments,
             )
         if not v1["is_valid"]:
-            print(f"  [警告] Level 1 输出质量不佳: {v1['warnings']}")
+            print(f"  [warn] Level 1 output quality is poor: {v1['warnings']}")
 
-        # ── P2: 重叠区置信度评估 ──
+        # ── P2: overlap-region confidence assessment ──
         try:
             from torusfold.scheme2.overlap_confidence import OverlapConfidence
             if chunk_confidences and len(chunk_confidences) == len(segments):
@@ -967,12 +979,12 @@ def isrnaclong_pipeline(
                 if verbose:
                     mean_conf = float(np.mean(per_res_conf))
                     low_conf = int(np.sum(per_res_conf < 0.3))
-                    print(f"  [P2] 逐残基置信度: mean={mean_conf:.3f}, low={low_conf}/{L}")
+                    print(f"  [P2] per-residue confidence: mean={mean_conf:.3f}, low={low_conf}/{L}")
         except Exception as e:
             if verbose:
-                print(f"  [P2] 置信度评估跳过: {e}")
+                print(f"  [P2] confidence assessment skipped: {e}")
 
-    # Level 1 逐 chunk 诊断
+    # per-chunk Level 1 diagnostics
     try:
         if 'chunk_confidences' in dir() and chunk_confidences and segments:
             _diag_chunks = []
@@ -997,7 +1009,7 @@ def isrnaclong_pipeline(
             _chunk_diag_path = output_path / "_plots" / "01_level1_chunks_diag.json"
             _chunk_diag_path.parent.mkdir(parents=True, exist_ok=True)
             _chunk_diag_path.write_text(json.dumps(_diag_chunks, indent=2))
-            # 逐 chunk 保存到各自目录
+            # save each chunk to its own directory
             for _diag_c in _diag_chunks:
                 _seg_dir = output_path / "vfold3d" / f"chunk_{_diag_c['chunk_id']}"
                 _seg_dir.mkdir(parents=True, exist_ok=True)
@@ -1005,7 +1017,7 @@ def isrnaclong_pipeline(
     except Exception as _err:
         raise
 
-    # ── Level 1 数据导出 ──
+    # ── Level 1 data export ──
     try:
         from torusfold.scheme2.data_exporter import export_level1_chunks, export_level1_weights
         _chunk_unc = [1.0] * len(segments) if segments else []
@@ -1015,16 +1027,16 @@ def isrnaclong_pipeline(
     except Exception as _err:
         raise
 
-    # ── Level 1.5: CG 全局约束弛豫 (平滑 Vfold3D 分块拼装接缝) ──
+    # ── Level 1.5: CG global restraint relaxation (smooths the seams of Vfold3D block assembly) ──
     # Level 1.5 depends on Level 1 output; only restore if Level 1 was also restored
     _l15_from_ckpt = (_l1_from_ckpt and "coords_relaxed" in ckpt)
     if _l15_from_ckpt:
         coords_vfold = ckpt["coords_relaxed"]
         if verbose:
-            print(f"\n[Level 1.5] 从 checkpoint 恢复全局弛豫坐标")
+            print(f"\n[Level 1.5] restored globally relaxed coordinates from checkpoint")
     else:
         if verbose:
-            print(f"\n[Level 1.5] CG 全局约束弛豫...")
+            print(f"\n[Level 1.5] CG global restraint relaxation...")
     _l15_ok = False
     try:
         from torusfold.scheme2.openmm_gpu_refiner import (
@@ -1041,7 +1053,7 @@ def isrnaclong_pipeline(
         if (not np.isfinite(_avg_pp)) or _avg_pp > 20.0 or _avg_pp < 1.0:
             _relax_coords = _generate_compact_coords(L, pairs)
 
-        # torch GPU 弛豫 (完整 CG 力场, 替代 OpenMM CPU)
+        # torch GPU relaxation (full CG force field, replaces OpenMM CPU)
         _pairs_for_relax = [(i, j, w) for (i, j, w) in pairs
                             if 0 <= i < L and 0 <= j < L]
         _relaxed_l15, _metrics_l15 = relax_structure(
@@ -1051,42 +1063,42 @@ def isrnaclong_pipeline(
             pairs_all=_pairs_for_relax if _pairs_for_relax else None)
         _coords_relaxed = _relaxed_l15
 
-        # torch GPU 弛豫完成, 提取结果
+        # torch GPU relaxation finished; extract the result
         _p_coords_relaxed = _coords_relaxed
-        _e = 0.0  # torch GPU 版不输出 OpenMM 能量
+        _e = 0.0  # the torch GPU version does not output an OpenMM energy
 
         if len(_p_coords_relaxed) == L:
             coords_vfold = _p_coords_relaxed
             if verbose:
-                print(f"    全局弛豫 (torch GPU): bond_viol={_metrics_l15['final']['bond_violations']}")
+                print(f"    global relaxation (torch GPU): bond_viol={_metrics_l15['final']['bond_violations']}")
         else:
             if verbose:
-                print(f"    输出维度不匹配 ({len(_p_coords_relaxed)} vs {L}), 跳过")
+                print(f"    output dimension mismatch ({len(_p_coords_relaxed)} vs {L}), skipping")
         _l15_ok = True
     except Exception as e:
         if verbose:
-            print(f"    CG 弛豫失败: {e}, 用原始坐标")
+            print(f"    CG relaxation failed: {e}, using the original coordinates")
 
-    # Level 1.5 验证
+    # Level 1.5 validation
     v15 = _validate_structure(coords_vfold, pairs, bpp, sequence, "Level 1.5")
-    print(f"  [验证 Level 1.5] clash={v15['clash_count']}, bond_q={v15['bond_quality']:.2f}, valid={v15['is_valid']}")
+    print(f"  [validate Level 1.5] clash={v15['clash_count']}, bond_q={v15['bond_quality']:.2f}, valid={v15['is_valid']}")
     if 'v1' in dir() and v15["clash_count"] < v1["clash_count"]:
-        print(f"  [OK] 弛豫减少 clash: {v1['clash_count']} → {v15['clash_count']}")
+        print(f"  [OK] relaxation reduced clashes: {v1['clash_count']} -> {v15['clash_count']}")
 
-    # 保存 Level 1.5 弛豫后 PDB
+    # save the PDB after Level 1.5 relaxation
     _l15_pdb = str(output_path / "level1_5_relaxed.pdb")
     _write_coords_pdb(coords_vfold, sequence, _l15_pdb)
     if verbose:
         print(f"  [PDB] Level 1.5: {_l15_pdb}")
 
-    # ── Level 1.5 数据导出 ──
+    # ── Level 1.5 data export ──
     try:
         from torusfold.scheme2.data_exporter import export_level15_trajectory
         export_level15_trajectory([], str(output_path))
     except Exception as _err:
         raise
 
-    # Level 1.5 强制 checkpoint (每 2 个 Level 存一次)
+    # forced Level 1.5 checkpoint (saved every 2 levels)
     if _l15_ok:
         try:
             _save_ckpt(1.5,
@@ -1096,7 +1108,7 @@ def isrnaclong_pipeline(
         except Exception as _err:
             raise
 
-    # ── structRFM 多任务预测头 (opt-in) ──
+    # ── structRFM multi-task prediction heads (opt-in) ──
     multitask_heads = None
     if use_multi_task_heads:
         try:
@@ -1115,21 +1127,21 @@ def isrnaclong_pipeline(
                 print(f"  [MultiTask] heads loaded: {n_params} params")
         except Exception as e_mt:
             if verbose:
-                print(f"  [MultiTask] heads 初始化失败: {e_mt}")
+                print(f"  [MultiTask] head initialization failed: {e_mt}")
             multitask_heads = None
 
-    remd_history = []  # Level 2 REMD 收敛数据
+    remd_history = []  # Level 2 REMD convergence data
 
-    # ── Level 2: 分段并行 CG→全原子 + RL 调度 REMD ──
+    # ── Level 2: parallel segmented CG->all-atom + RL-scheduled REMD ──
     _l2_from_ckpt = ("best_coords" in ckpt and "best_energy" in ckpt)
     if _l2_from_ckpt:
         best_coords = ckpt["best_coords"]
         best_energy = ckpt["best_energy"]
         segments = ckpt.get("segments", [])
-        # 检查坐标是否有效 (可能是空数组)
+        # check whether the coordinates are valid (they may be an empty array)
         if len(best_coords) == 0:
             if verbose:
-                print(f"  [警告] checkpoint 坐标为空, 用 Level 1 坐标")
+                print(f"  [warn] checkpoint coordinates are empty; using Level 1 coordinates")
             best_coords = coords_vfold.copy()
             best_energy = _estimate_energy(best_coords, pairs, sequence)
         from torusfold.scheme2.multifidelity_scheduler import RuleScheduler, SimulationState
@@ -1138,29 +1150,29 @@ def isrnaclong_pipeline(
         state.cross_segment_ok_rate = ckpt.get("cross_segment_ok_rate", 0.0)
         state.energy = ckpt.get("energy", 0.0)
         state.clash_count = ckpt.get("clash_count", 0)
-        # scheduler 在 checkpoint 续跑路径也需要定义 (return 语句引用)
+        # scheduler must also be defined on the checkpoint-resume path (referenced by the return statement)
         scheduler = RuleScheduler()
-        # 续跑时需要初始化这些变量 (循环内后续轮次引用)
+        # these variables need initialization when resuming (referenced by later loop rounds)
         coords_prev = best_coords.copy()
         prev_energy = best_energy
         no_improve_count = 0
         inject_frac = 0.3
         metrics = RelaxationMetrics()
         if verbose:
-            print(f"\n[Level 2] 从 checkpoint 恢复: E={best_energy:.0f}")
+            print(f"\n[Level 2] restored from checkpoint: E={best_energy:.0f}")
     else:
         if verbose:
-            print(f"\n[Level 2] 分段并行 CG→全原子 + {'RL 调度 REMD' if use_rl_relax else '固定 REMD'}...")
+            print(f"\n[Level 2] parallel segmented CG->all-atom + {'RL-scheduled REMD' if use_rl_relax else 'fixed REMD'}...")
 
-        # 解析 OpenMM 平台 (Level 2 OpenMM GPU 精修需要)
+        # resolve the OpenMM platform (needed by the Level 2 OpenMM GPU refinement)
         if platform == "auto":
             from torusfold.scheme2.rest2_sampler import detect_openmm_platform
             resolved_platform = detect_openmm_platform()
         else:
             resolved_platform = platform
 
-        # 检测 GPU 用于 REMD 加速
-        _remd_platform_name = resolved_platform  # 默认用 auto 解析的平台
+        # detect a GPU for REMD acceleration
+        _remd_platform_name = resolved_platform  # default to the platform resolved by auto
         try:
             import openmm as _omm
             for _try_gpu in ["CUDA", "OpenCL"]:
@@ -1168,7 +1180,7 @@ def isrnaclong_pipeline(
                     _omm.Platform.getPlatformByName(_try_gpu)
                     _remd_platform_name = _try_gpu
                     if verbose:
-                        print(f"  [Level 2] GPU 检测: {_try_gpu} 可用, REMD 使用 GPU 加速")
+                        print(f"  [Level 2] GPU detection: {_try_gpu} available, using GPU acceleration for REMD")
                     break
                 except Exception:
                     pass
@@ -1178,7 +1190,7 @@ def isrnaclong_pipeline(
         from torusfold.scheme2.multifidelity_scheduler import RuleScheduler, SimulationState, FidelityLevel
         scheduler = RuleScheduler()
         state = SimulationState()
-        # 加载训练好的 RL 策略 (Level 2 RelaxationRL)
+        # load the trained RL policy (Level 2 RelaxationRL)
         _rl_policy_path = str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "rl_policy_b0.pth")
         if not Path(_rl_policy_path).exists():
             _rl_policy_path = str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "rl_policy_bootstrap.pth")
@@ -1198,11 +1210,11 @@ def isrnaclong_pipeline(
         coords_prev = None
         prev_energy = float("inf")
         no_improve_count = 0
-        inject_frac = 0.3  # 远端配对动态注入比例
+        inject_frac = 0.3  # dynamic far-pair injection ratio
         metrics = RelaxationMetrics()
 
         def _segmented_cg_to_allatom(cg_coords_full, seg_list, out_dir, seq):
-            """分段并行 CG→全原子, 拼装成完整全原子 PDB."""
+            """Convert segmented CG to all-atom in parallel, assembling a complete all-atom PDB."""
             from torusfold.scheme2.isrnacirc_wrapper import cg_to_allatom
             from concurrent.futures import ThreadPoolExecutor, as_completed
             Path(out_dir).mkdir(parents=True, exist_ok=True)
@@ -1217,7 +1229,8 @@ def isrnaclong_pipeline(
 
             aa_pdbs = [None] * len(seg_pdbs)
 
-            # 分段 CG→全原子 并行执行 (每个 exe 调用独立进程, 可并行)
+            # run segmented CG->all-atom in parallel (each exe call is an independent
+            # process, so they can run concurrently)
             def _convert_segment(cg_path, aa_path, seq_chunk):
                 cg_to_allatom(cg_path, aa_path, seq_chunk)
                 return aa_path
@@ -1235,40 +1248,40 @@ def isrnaclong_pipeline(
                         aa_pdbs[seg_idx] = str(Path(out_dir) / f"seg_{seg_idx}_aa.pdb")
                     except Exception as e:
                         if verbose:
-                            print(f"    段 {seg_idx}: 失败: {e}")
+                            print(f"    segment {seg_idx}: failed: {e}")
 
             merged_pdb = str(Path(out_dir) / "merged_aa.pdb")
             _merge_allatom_pdbs(aa_pdbs, seg_list, merged_pdb, seq)
             return merged_pdb
 
-        # 分段 CG→全原子 (只做一次, 后续轮复用)
+        # segmented CG->all-atom (done once, reused by later rounds)
         try:
             merged_aa = _segmented_cg_to_allatom(
                 coords_current, segments, str(output_path / "cg2aa"), sequence,
             )
             if verbose:
-                print(f"    分段 CG→全原子完成: {merged_aa}")
+                print(f"    segmented CG->all-atom done: {merged_aa}")
         except Exception as e:
             if verbose:
-                print(f"    CG→全原子失败: {e}, 用 Level 1 坐标")
+                print(f"    CG->all-atom failed: {e}, using Level 1 coordinates")
             energy = _estimate_energy(coords_current, pairs, sequence)
             best_coords = coords_current
             best_energy = energy
             merged_aa = None
 
-        # 迭代 REMD (RL 调度或固定)
+        # iterative REMD (RL-scheduled or fixed)
         n_remd_rounds = n_relax_rounds if use_rl_relax else 1
-        prev_pdb_out = None  # 上一轮的精修 PDB 路径
-        round_idx = 0  # 初始化, 确保循环外可用
-        metrics = RelaxationMetrics()  # 初始化
-        energy = 0.0  # 初始化
+        prev_pdb_out = None  # refined PDB path from the previous round
+        round_idx = 0  # initialize so it is usable outside the loop
+        metrics = RelaxationMetrics()  # initialize
+        energy = 0.0  # initialize
         for round_idx in range(n_remd_rounds):
             if merged_aa is None:
                 break
             if verbose:
-                print(f"  REMD 轮 {round_idx + 1}/{n_remd_rounds}:")
+                print(f"  REMD round {round_idx + 1}/{n_remd_rounds}:")
 
-            # 决定 REMD 参数
+            # decide the REMD parameters
             if use_rl_relax and rl_agent is not None:
                 pw, n_steps = rl_agent.decide(
                     coords_current, far_pairs, prev_energy, metrics,
@@ -1284,66 +1297,69 @@ def isrnaclong_pipeline(
                     else:
                         print(f"    RL: nstep={n_steps} (rmsd={rmsd:.2f}Å), nstep_close={nstep_close}")
             else:
-                # 固定参数 (IsRNAcirc 推荐: nstep=1M, nstep_close=500K, nstru=500)
-                # 乘 md_step_scale 缩小 Level 2 单轮步数 (默认 0.1)
+                # fixed parameters (IsRNAcirc recommended: nstep=1M, nstep_close=500K, nstru=500)
+                # multiply by md_step_scale to shrink per-round Level 2 steps (default 0.1)
                 n_steps = max(1000, int(1000000 * md_step_scale))
                 nstep_close = max(1000, int(500000 * md_step_scale))
                 if verbose:
-                    print(f"    固定: nstep={n_steps}, nstep_close={nstep_close}")
+                    print(f"    fixed: nstep={n_steps}, nstep_close={nstep_close}")
 
-            # structRFM: learned pair predictions 融合到 RL weights
+            # structRFM: fuse learned pair predictions into the RL weights
             if (multitask_heads is not None and pw
                     and len(coords_current) == L):
                 try:
                     from torusfold.scheme2.multitask_heads import build_struct_condition_from_coords
-                    # 构建结构条件
+                    # build the structure condition
                     struct_cond = build_struct_condition_from_coords(
                         coords_current, far_pairs, L)
                     struct_t = torch.tensor(struct_cond, dtype=torch.float32)
-                    # 获取 bpp 矩阵
-                    # Bug 9 修复: 使用正确的变量名 (bpp 而不是 bpp_matrix)
+                    # get the bpp matrix
+                    # Bug 9 fix: use the correct variable name (bpp rather than bpp_matrix)
                     bpp_tensor = None
                     if bpp is not None:
                         bpp_tensor = torch.tensor(bpp, dtype=torch.float32)
-                    # 预测
+                    # predict
                     with torch.no_grad():
                         mt_out = multitask_heads(
                             SEQUENCE,
                             struct_condition=struct_t,
                             bpp_matrix=bpp_tensor,
                         )
-                    # 融合 pair weights: 50% MCTS + 50% learned
+                    # fuse pair weights: 50% MCTS + 50% learned
                     if "pair_probs" in mt_out and "clash_scores" in mt_out:
                         clash_scores = mt_out["clash_scores"].numpy()
                         for (i, j) in pw:
                             if i < L and j < L:
-                                # 碰撞高发位置降低权重
+                                # lower the weight at clash-prone positions
                                 clash_penalty = 0.5 * (clash_scores[i] + clash_scores[j])
                                 pw[(i, j)] *= max(0.1, 1.0 - clash_penalty)
                         if verbose:
-                            print(f"    [MultiTask] clash scores 融合完成")
+                            print(f"    [MultiTask] clash-score fusion done")
                 except Exception as e_mt:
                     if verbose:
-                        print(f"    [MultiTask] 融合失败: {e_mt}")
+                        print(f"    [MultiTask] fusion failed: {e_mt}")
 
             try:
                 round_dir = str(output_path / f"remd_r{round_idx}")
                 pdb_out = None
                 energy = float("inf")
 
-                # Level 2 精修: 只用 IsRNAcirc.exe (IsRNA2 力场, 无任何 fallback)
-                # 第 0 轮用 RhoFold+ 拼装坐标 (配对已折叠~28A, 键长校正到 5.9A),
-                #   而不是分段重建的 merged_aa (分段会丢失全局折叠, 配对退化到 46A).
-                # 后续轮用上一轮的精修结果.
+                # Level 2 refinement: only use IsRNAcirc.exe (IsRNA2 force field, no
+                # fallback at all). Round 0 starts from the RhoFold+ assembled coordinates
+                # (pairs already folded to ~28A, bond lengths corrected to 5.9A), rather
+                # than the segmentally rebuilt merged_aa (segmentation loses the global
+                # fold and pairs regress to 46A). Later rounds start from the previous
+                # round's refinement result.
                 if round_idx == 0:
-                    # 优先用已有 merged_aa.pdb (已含全原子, 跳过 20min CG→allatom 重建).
-                    # merged_aa 是分段拼装结果, 保留了全局折叠 + 全原子坐标.
-                    # 只有 merged_aa 不存在时才 fallback 到 RhoFold+ P-only 路径.
+                    # Prefer the existing merged_aa.pdb (already all-atom, skips the
+                    # 20-min CG->allatom rebuild). merged_aa is the segmented-assembly
+                    # result and retains the global fold + all-atom coordinates. Only fall
+                    # back to the RhoFold+ P-only path when merged_aa is absent.
                     _merged_aa = str(output_path / "cg2aa" / "merged_aa.pdb")
                     if Path(_merged_aa).exists():
                         refine_input = _merged_aa
                         if verbose:
-                            print(f"    round 0: 直接用 merged_aa.pdb (已有全原子, 跳过 CG→allatom)")
+                            print(f"    round 0: using merged_aa.pdb directly (already all-atom, skipping CG->allatom)")
                     else:
                         _start_pdb = str(output_path / "start_rhofold.pdb")
                         _coords_start = coords_vfold.copy()
@@ -1356,14 +1372,15 @@ def isrnaclong_pipeline(
                         _write_coords_pdb(_coords_start, sequence, _start_pdb)
                         refine_input = _start_pdb
                 else:
-                    # 用上轮 best_coords 写临时 PDB 作为输入 (不依赖 prev_pdb_out)
+                    # write last round's best_coords to a temporary PDB as input
+                    # (independent of prev_pdb_out)
                     if best_coords is not None and len(best_coords) == L:
                         _prev_cg = str(output_path / f"_prev_round_cg.pdb")
                         _write_coords_pdb(best_coords, sequence, _prev_cg)
                         refine_input = _prev_cg
                     else:
                         refine_input = prev_pdb_out or merged_aa
-                # 优先 torch GPU 路径 (ROCm/HIP 兼容), OpenMM 作为 fallback
+                # prefer the torch GPU path (ROCm/HIP compatible); OpenMM is the fallback
                 try:
                     from torusfold.scheme2.torch_gpu_refine import torch_gpu_refine as _refine_fn
                     _refine_name = "Torch GPU"
@@ -1371,20 +1388,20 @@ def isrnaclong_pipeline(
                     from torusfold.scheme2.openmm_gpu_refiner import openmm_gpu_refine as _refine_fn
                     _refine_name = "OpenMM CPU (fallback)"
                     if verbose:
-                        print(f"    ⚠ Torch GPU 不可用: {_e}, 回退到 OpenMM CPU")
+                        print(f"    [!] Torch GPU unavailable: {_e}, falling back to OpenMM CPU")
                 if verbose:
-                    print(f"    {_refine_name} 精修 (输入: {'RhoFold+起点' if round_idx == 0 else '上轮结果'})...")
-                # 动态远端配对注入: 根据 pair_rate 调整注入比例
-                # (OpenMM 路径暂不支持 far_pair_ratio, 保留接口兼容)
+                    print(f"    {_refine_name} refinement (input: {'RhoFold+ start' if round_idx == 0 else 'previous round result'})...")
+                # dynamic far-pair injection: adjust the injection ratio according to pair_rate
+                # (the OpenMM path does not yet support far_pair_ratio; the interface is kept for compatibility)
                 if round_idx > 0:
                     if metrics.pair_rate > 0.6:
-                        inject_frac = min(1.0, inject_frac + 0.2)  # 配对好, 加速注入
+                        inject_frac = min(1.0, inject_frac + 0.2)  # pairing is good, speed up injection
                     elif metrics.pair_rate < 0.3:
-                        inject_frac = max(0.3, inject_frac - 0.1)  # 配对差, 减速注入
+                        inject_frac = max(0.3, inject_frac - 0.1)  # pairing is poor, slow down injection
                 n_rounds_total = max(1, n_remd_rounds)
                 far_ratio = 1.0 if n_rounds_total == 1 else inject_frac
                 if verbose and far_pairs and far_ratio > 0:
-                    print(f"    远端配对注入: {len(far_pairs)} 对 ({_refine_name} 模式)")
+                    print(f"    far-pair injection: {len(far_pairs)} pairs ({_refine_name} mode)")
                 _remd_reps = (64 if L > 1000
                               else max(nrep if nrep else 6, n_rest2_replicas))
                 _remd_steps = (max(60000, n_steps // 2) if L > 1000
@@ -1401,11 +1418,11 @@ def isrnaclong_pipeline(
                         verbose=verbose,
                         use_physical_relax=True,
                         skip_minimal_fold=(round_idx > 0),
-                        use_trirnasp=False,  # 完全禁用 TriRNASP, 只用 CG 力场
+                        use_trirnasp=False,  # fully disable TriRNASP, use only the CG force field
                         use_trirnasp_force=False,
-                        trirnasp_scale=0.002,  # 最优: Tri/CG ≈ 11%, 平衡点
+                        trirnasp_scale=0.002,  # optimal: Tri/CG ≈ 11%, the balance point
                         trirnasp_update_freq=1000,
-                        # 新增: 分阶段 TriRNASP 策略 (适配每轮 5000 步)
+                        # new: staged TriRNASP strategy (adapted to 5000 steps per round)
                         use_staged_tri=True,
                         tri_stage_config={
                             "stages": [
@@ -1429,11 +1446,11 @@ def isrnaclong_pipeline(
                         verbose=verbose,
                         use_physical_relax=True,
                         skip_minimal_fold=(round_idx > 0),
-                        use_trirnasp=False,  # 完全禁用 TriRNASP, 只用 CG 力场
+                        use_trirnasp=False,  # fully disable TriRNASP, use only the CG force field
                         use_trirnasp_force=False,
-                        trirnasp_scale=0.002,  # 最优: Tri/CG ≈ 11%, 平衡点
+                        trirnasp_scale=0.002,  # optimal: Tri/CG ≈ 11%, the balance point
                         trirnasp_update_freq=1000,
-                        # 新增: 分阶段 TriRNASP 策略 (适配每轮 5000 步)
+                        # new: staged TriRNASP strategy (adapted to 5000 steps per round)
                         use_staged_tri=True,
                         tri_stage_config={
                             "stages": [
@@ -1444,8 +1461,8 @@ def isrnaclong_pipeline(
                         },
                         use_adaptive_tri_weight=True,
                     )
-                # openmm_gpu_refine 返回 (pdb, energy, diag)
-                # torch_gpu_refine 返回 (pdb, energy, diag) — 已对齐
+                # openmm_gpu_refine returns (pdb, energy, diag)
+                # torch_gpu_refine returns (pdb, energy, diag) — aligned
                 if len(_refine_result) == 3:
                     pdb_out, energy, _refine_diag = _refine_result
                 else:
@@ -1455,25 +1472,25 @@ def isrnaclong_pipeline(
                 coords_relaxed = _read_pdb_p_coords(pdb_out)
                 if len(coords_relaxed) == 0:
                     if verbose:
-                        print(f"    PDB 读取为空, 用输入坐标")
+                        print(f"    PDB read is empty, using the input coordinates")
                     coords_relaxed = coords_current
                 elif np.any(np.isnan(coords_relaxed)):
                     if verbose:
-                        print(f"    PDB 含 NaN 坐标, 用输入坐标")
+                        print(f"    PDB contains NaN coordinates, using the input coordinates")
                     coords_relaxed = coords_current
                 else:
-                    prev_pdb_out = pdb_out  # 记录本轮输出, 下轮复用
+                    prev_pdb_out = pdb_out  # record this round's output for reuse next round
                 if verbose:
                     print(f"    E={energy:.0f}")
             except Exception as e:
                 if verbose:
-                    print(f"    REMD 失败: {e}, 跳过")
+                    print(f"    REMD failed: {e}, skipping")
                     import traceback
                     traceback.print_exc()
                 energy = _estimate_energy(coords_current, pairs, sequence)
                 coords_relaxed = coords_current
 
-            # 4 指标监控
+            # monitor the 4 metrics
             metrics = _compute_relaxation_metrics(
                 coords_relaxed, coords_prev, pairs, far_pairs, segments,
                 energy, prev_energy,
@@ -1485,7 +1502,7 @@ def isrnaclong_pipeline(
             remd_history.append([round_idx, best_energy, metrics.pair_rate,
                                  metrics.clash_count, metrics.rmsd_change, inject_frac])
 
-            # 每轮 REMD 完成后保存 checkpoint
+            # save a checkpoint after each REMD round
             _save_ckpt(2, remd_round=round_idx + 1,
                 pairs=pairs, far_pairs=far_pairs, stem_blocks=stem_blocks,
                 coords_vfold=coords_vfold, n_segments=n_segments,
@@ -1497,7 +1514,7 @@ def isrnaclong_pipeline(
                 clash_count=metrics.clash_count,
             )
 
-            # Level 2 per-REMD round 诊断
+            # per-REMD-round Level 2 diagnostics
             try:
                 _rl_action_summary = {}
                 if use_rl_relax and rl_agent is not None:
@@ -1512,7 +1529,7 @@ def isrnaclong_pipeline(
                             "w_max": float(np.max(_w_vals)),
                             "nstep": n_steps,
                         }
-                _round_t0 = time.time()  # 粗略轮时间
+                _round_t0 = time.time()  # rough round timing
                 remd_diag = {
                     "round": round_idx,
                     "best_energy": float(best_energy),
@@ -1535,12 +1552,12 @@ def isrnaclong_pipeline(
             except Exception:
                 pass
 
-            prev_best_energy = best_energy  # 早停对比用
+            prev_best_energy = best_energy  # used for the early-stop comparison
             if energy < best_energy and len(coords_relaxed) > 0:
-                # NaN 安全检查: 如果输出坐标有 NaN, 跳过本轮
+                # NaN safety check: if the output coordinates contain NaN, skip this round
                 if np.any(np.isnan(coords_relaxed)):
                     if verbose:
-                        print(f"    [WARN] REMD 输出有 NaN, 跳过本轮更新")
+                        print(f"    [WARN] REMD output contains NaN, skipping this round's update")
                 else:
                     best_energy = energy
                     best_coords = coords_relaxed.copy()
@@ -1551,24 +1568,24 @@ def isrnaclong_pipeline(
 
             if metrics.is_converged:
                 if verbose:
-                    print(f"    收敛!")
+                    print(f"    converged!")
                 break
 
-            # 早停: 连续 3 轮 best_energy 无 >1% 改善则停止
+            # early stop: halt when best_energy has not improved by >1% for 3 consecutive rounds
             if best_energy < prev_best_energy * 0.99:
                 no_improve_count = 0
             else:
                 no_improve_count += 1
             if no_improve_count >= 3:
                 if verbose:
-                    print(f"  [Level 2] 早停: 连续 3 轮无显著改善 (E={best_energy:.0f})")
+                    print(f"  [Level 2] early stop: no significant improvement for 3 rounds (E={best_energy:.0f})")
                 break
 
-        # Level 2 验证
+        # Level 2 validation
         v2 = _validate_structure(best_coords, pairs, bpp, sequence, "Level 2")
-        print(f"  [验证 Level 2] clash={v2['clash_count']}, pair_rate={v2['pair_rate']:.2f}, valid={v2['is_valid']}")
+        print(f"  [validate Level 2] clash={v2['clash_count']}, pair_rate={v2['pair_rate']:.2f}, valid={v2['is_valid']}")
 
-    # ── Level 2 数据导出 ──
+    # ── Level 2 data export ──
     try:
         from torusfold.scheme2.data_exporter import export_level2_remd, export_validation
         export_level2_remd(remd_history, str(output_path))
@@ -1579,38 +1596,38 @@ def isrnaclong_pipeline(
     except Exception as _err:
         raise
 
-    # ── Level 2.3: 5-bead CG 精修 (比 3-bead 更精确的 stacking/H-bond 几何) ──
+    # ── Level 2.3: 5-bead CG refinement (more accurate stacking/H-bond geometry than 3-bead) ──
     _skip_5bead = False
     if use_5bead and best_coords is not None and len(best_coords) == len(sequence):
-        # 快速筛选: 如果 Level 2 输出已够好, 跳过 2.3
+        # fast filter: skip 2.3 if the Level 2 output is already good enough
         if metrics.clash_count == 0 and metrics.pair_rate > 0.8:
             _skip_5bead = True
             if verbose:
-                print(f"\n[Level 2.3] 跳过: Level 2 输出已够好 (clash=0, pair_rate={metrics.pair_rate:.2f}>0.8)")
+                print(f"\n[Level 2.3] skipping: Level 2 output is already good (clash=0, pair_rate={metrics.pair_rate:.2f}>0.8)")
     if not _skip_5bead and use_5bead and best_coords is not None and len(best_coords) == len(sequence):
-        # 检查输入坐标是否有 NaN
+        # check whether the input coordinates contain NaN
         _has_nan = np.any(np.isnan(best_coords))
         _has_inf = np.any(np.isinf(best_coords))
         if _has_nan or _has_inf:
             if verbose:
-                print(f"\n[Level 2.3] 5-bead 跳过: 输入坐标含 NaN/Inf (nan={_has_nan}, inf={_has_inf})")
+                print(f"\n[Level 2.3] 5-bead skipped: input coordinates contain NaN/Inf (nan={_has_nan}, inf={_has_inf})")
         elif verbose:
-            print(f"\n[Level 2.3] 5-bead CG 精修...")
+            print(f"\n[Level 2.3] 5-bead CG refinement...")
         try:
             from torusfold.scheme2.fivebead_folding import refine_5bead
-            _resolved_platform = "CPU"  # 5-bead 用 CPU (粒子数 5x)
+            _resolved_platform = "CPU"  # 5-bead uses CPU (5x the particle count)
 
-            # 生成 DL 距离约束: 从 PF BPP + DivideFold 融合
+            # build DL distance restraints: fused from the PF BPP + DivideFold
             _dl_constraints = []
             if bpp_high or bpp_mid:
-                # 高置信 PF 配对 → 强约束 (d≈10Å B1-B1 WC 距离)
+                # high-confidence PF pairs -> strong restraints (d≈10Å B1-B1 WC distance)
                 for i, j, p in bpp_high:
                     _dl_constraints.append((i, j, 10.0, p))
-                # 中置信 → 弱约束
-                for i, j, p in bpp_mid[:50]:  # 限制数量
+                # medium-confidence -> weak restraints
+                for i, j, p in bpp_mid[:50]:  # cap the number
                     _dl_constraints.append((i, j, 10.0, p * 0.5))
                 if verbose:
-                    print(f"    DL 约束: {len(_dl_constraints)} 对 (PF)")
+                    print(f"    DL restraints: {len(_dl_constraints)} pairs (PF)")
 
             p5_refined, e5_0, e5_1 = refine_5bead(
                 best_coords, pairs,
@@ -1618,31 +1635,32 @@ def isrnaclong_pipeline(
                 n_anneal=3000,
                 sequence=sequence,
                 dl_constraints=_dl_constraints if _dl_constraints else None)
-            # 5-bead 输出含 NaN 时丢弃
+            # discard when the 5-bead output contains NaN
             if np.any(np.isnan(p5_refined)) or np.any(np.isinf(p5_refined)):
                 if verbose:
-                    print(f"    5-bead 输出含 NaN/Inf, 保留当前坐标")
+                    print(f"    5-bead output contains NaN/Inf, keeping the current coordinates")
             elif e5_1 < e5_0:
-                # 5-bead 自身有改善 → 接受 (不同力场尺度, 不和3-bead 比能量)
+                # 5-bead improved on its own -> accept (different force-field scale; not
+                # compared against 3-bead energies)
                 best_coords = p5_refined.copy()
                 if verbose:
-                    print(f"    5-bead: E={e5_0:.0f} -> {e5_1:.0f} kJ/mol (改善, 接受)")
+                    print(f"    5-bead: E={e5_0:.0f} -> {e5_1:.0f} kJ/mol (improved, accepting)")
             elif verbose:
-                print(f"    5-bead: E={e5_0:.0f} -> {e5_1:.0f} (未改善, 保留3bead坐标)")
+                print(f"    5-bead: E={e5_0:.0f} -> {e5_1:.0f} (not improved, keeping the 3-bead coordinates)")
         except Exception as e:
             if verbose:
-                print(f"    5-bead 精修跳过: {e}")
+                print(f"    5-bead refinement skipped: {e}")
 
-    # ── Level 2.5: REMD 后 CG→allatom (把最终 CG 坐标转成全原子) ──
+    # ── Level 2.5: CG->allatom after REMD (convert the final CG coordinates to all-atom) ──
     if "final_aa_pdb" in ckpt:
         _final_aa_path = ckpt.get("final_aa_pdb", str(output_path / "final_allatom.pdb"))
         if verbose:
-            print(f"\n[Level 2.5] 从 checkpoint 恢复: {_final_aa_path}")
+            print(f"\n[Level 2.5] restored from checkpoint: {_final_aa_path}")
     elif best_coords is not None and len(best_coords) == len(sequence):
         _final_aa_path = str(output_path / "final_allatom.pdb")
         _l25_ok = False
         if verbose:
-            print(f"\n[Level 2.5] REMD 后 CG→全原子: {_final_aa_path}")
+            print(f"\n[Level 2.5] CG->all-atom after REMD: {_final_aa_path}")
         try:
             from torusfold.scheme2.isrnacirc_wrapper import cg_to_allatom
             _tmp_cg = str(output_path / "_final_cg_for_aa.pdb")
@@ -1652,16 +1670,17 @@ def isrnaclong_pipeline(
             _cg2aa_elapsed = time.time() - _cg2aa_t0
             if verbose:
                 _sz = os.path.getsize(_final_aa_path) / 1024
-                print(f"    全原子输出: {_final_aa_path} ({_sz:.0f} KB)")
+                print(f"    all-atom output: {_final_aa_path} ({_sz:.0f} KB)")
             _l25_ok = True
 
-            # ── Level 2.5b: CG→AA 后处理弛豫 (far pair 约束防散开) ──
-            # 转换后立即用 far_pairs 约束做一轮短弛豫,
-            # 否则转换产生的几何噪声会让 Level 1.5/2 拉拢的远端配对散开.
+            # ── Level 2.5b: post-conversion CG->AA relaxation (far-pair restraints prevent drifting apart) ──
+            # run one short relaxation with the far_pairs restraints immediately after
+            # conversion, otherwise the geometric noise from conversion lets the far pairs
+            # pulled in by Level 1.5/2 drift apart again.
             try:
                 from torusfold.scheme2.physical_relaxation import relax_structure as _relax_25b
                 if verbose and far_pairs:
-                    print(f"    后处理弛豫: {len(far_pairs)} 对远端配对约束...")
+                    print(f"    post-processing relaxation: {len(far_pairs)} far-pair restraints...")
                 best_coords, _relax_metrics_25b = _relax_25b(
                     best_coords, sequence,
                     far_pairs=far_pairs if far_pairs else None,
@@ -1669,13 +1688,13 @@ def isrnaclong_pipeline(
                     use_openmm=True,
                 )
                 if verbose:
-                    print(f"    弛豫完成: clash {_relax_metrics_25b['initial']['clash_count']} → "
+                    print(f"    relaxation done: clash {_relax_metrics_25b['initial']['clash_count']} -> "
                           f"{_relax_metrics_25b['final']['clash_count']}")
             except Exception as e_relax_25b:
                 if verbose:
-                    print(f"    后处理弛豫跳过: {e_relax_25b}")
+                    print(f"    post-processing relaxation skipped: {e_relax_25b}")
 
-            # Level 2.5 CG→allatom 转换诊断
+            # Level 2.5 CG->allatom conversion diagnostics
             try:
                 _n_aa_atoms = 0
                 if os.path.exists(_final_aa_path):
@@ -1694,8 +1713,8 @@ def isrnaclong_pipeline(
                 pass
         except Exception as e:
             if verbose:
-                print(f"    CG→allatom 失败: {e}")
-            # Level 2.5 失败诊断
+                print(f"    CG->allatom failed: {e}")
+            # Level 2.5 failure diagnostics
             try:
                 diag_cg2aa = {
                     "cg_atoms": len(best_coords),
@@ -1710,7 +1729,7 @@ def isrnaclong_pipeline(
             except Exception:
                 pass
 
-        # Level 2.5 完成后保存 checkpoint (仅成功时)
+        # save the checkpoint after Level 2.5 finishes (only on success)
         if _l25_ok:
             _save_ckpt(2.5,
                 final_aa_pdb=_final_aa_path,
@@ -1720,27 +1739,27 @@ def isrnaclong_pipeline(
     else:
         _final_aa_path = str(output_path / "final_allatom.pdb")
 
-    # ── Level 2.6: PyRosetta 条件式精修 (WSL, socket 优先) ──
+    # ── Level 2.6: PyRosetta conditional refinement (WSL, socket preferred) ──
     if not os.path.exists(_final_aa_path):
         _final_aa_path = str(output_path / "final_allatom.pdb")
     if ckpt.get("pyrosetta_done"):
         if verbose:
-            print(f"\n[Level 2.6] 从 checkpoint 恢复")
+            print(f"\n[Level 2.6] restored from checkpoint")
     elif os.path.exists(_final_aa_path) and use_pyrosetta:
         _l26_ok = False
         if verbose:
-            print(f"\n[Level 2.6] PyRosetta 条件式精修...")
+            print(f"\n[Level 2.6] PyRosetta conditional refinement...")
         try:
             _pyrosetta_out = str(output_path / "final_allatom_refined.pdb")
             _wsl_aa = _win_to_wsl(_final_aa_path)
             _wsl_out = _win_to_wsl(_pyrosetta_out)
 
-            # 优先: 长驻 socket 服务 (init 只做一次, 后续 <1s)
+            # preferred: long-lived socket service (init runs once; later calls <1s)
             _result = _pyrosetta_socket_refine(
                 _wsl_aa, _wsl_out, max_iter=200, verbose=verbose,
             )
             if _result is None and not _pyrosetta_server_running():
-                # 服务不在 → 启动
+                # server is down -> start it
                 if _pyrosetta_start_server(verbose=verbose):
                     _result = _pyrosetta_socket_refine(
                         _wsl_aa, _wsl_out, max_iter=200, verbose=verbose,
@@ -1750,11 +1769,11 @@ def isrnaclong_pipeline(
                 _final_aa_path = _pyrosetta_out
                 _l26_ok = True
                 if verbose:
-                    print(f"    PyRosetta 精修完成 (socket): {_pyrosetta_out}")
+                    print(f"    PyRosetta refinement done (socket): {_pyrosetta_out}")
             else:
-                # 回退: 一次性 subprocess (带超时)
+                # fallback: one-shot subprocess (with timeout)
                 if verbose:
-                    print("    [fallback] 回退到 subprocess 模式...")
+                    print("    [fallback] falling back to subprocess mode...")
                 _wsl_src = _win_to_wsl(Path(__file__).resolve().parent)
                 _wsl_script = (
                     f'import sys; sys.path.insert(0, "{_wsl_src}")\n'
@@ -1783,49 +1802,49 @@ def isrnaclong_pipeline(
                     _proc.kill()
                     _proc.wait()
                     if verbose:
-                        print(f"    PyRosetta 超时({_pyrosetta_timeout}s), 已终止")
+                        print(f"    PyRosetta timed out ({_pyrosetta_timeout}s), terminated")
                     _proc = None
                 _rc = _proc.returncode if _proc is not None else -1
                 if _rc == 0 and os.path.exists(_pyrosetta_out):
                     _final_aa_path = _pyrosetta_out
                     _l26_ok = True
                     if verbose:
-                        print(f"    PyRosetta 精修完成 (subprocess): {_pyrosetta_out}")
+                        print(f"    PyRosetta refinement done (subprocess): {_pyrosetta_out}")
                 elif verbose:
-                    _tail = ''.join(_stdout_lines[-20:]) if _stdout_lines else '(无输出)'
-                    print(f"    PyRosetta 跳过或失败 (rc={_rc}):")
+                    _tail = ''.join(_stdout_lines[-20:]) if _stdout_lines else '(no output)'
+                    print(f"    PyRosetta skipped or failed (rc={_rc}):")
                     print(f"    {_tail}")
 
         except Exception as e:
             if verbose:
-                print(f"    PyRosetta 精修失败: {e}")
+                print(f"    PyRosetta refinement failed: {e}")
 
-    # Level 2.6 完成后保存 checkpoint (仅成功时)
+    # save the checkpoint after Level 2.6 finishes (only on success)
     if _l26_ok:
         _save_ckpt(2.6,
             final_aa_pdb=_final_aa_path,
             pyrosetta_done=True,
         )
 
-    # ── Level 3: RL 微调 (连续动作空间) ──
+    # ── Level 3: RL fine-tuning (continuous action space) ──
     if ckpt_level >= 3:
         if verbose:
-            print(f"\n[Level 3] 从 checkpoint 恢复")
+            print(f"\n[Level 3] restored from checkpoint")
     elif use_rl_mcts and far_pairs:
         _l3_ok = False
         if verbose:
-            print(f"\n[Level 3] RL 微调 (连续动作, PPO {rl_n_simulations} epochs)...")
+            print(f"\n[Level 3] RL fine-tuning (continuous actions, PPO {rl_n_simulations} epochs)...")
         try:
             from torusfold.scheme2.rl_optimizer import optimize_far_pairs
             _rl_l3_path = str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "rl_policy_b0.pth")
             if not Path(_rl_l3_path).exists():
                 _rl_l3_path = str(Path(__file__).resolve().parent.parent.parent.parent / "data" / "rl_policy_bootstrap.pth")
-            # 检查 best_coords 维度是否匹配 CG 粒子数
-            # IsRNAcirc 输出全原子 PDB, 但 far_pairs 基于 CG 索引 (0~L-1)
-            # 如果 best_coords 维度 != len(sequence), 跳过 RL 微调
+            # check whether best_coords dimensions match the CG particle count
+            # IsRNAcirc outputs an all-atom PDB, but far_pairs index into the CG trace (0~L-1)
+            # if the best_coords dimension != len(sequence), skip RL fine-tuning
             if len(best_coords) != len(sequence):
                 if verbose:
-                    print(f"    跳过: best_coords 维度 ({len(best_coords)}) != 序列长度 ({len(sequence)}), IsRNAcirc 输出全原子 PDB")
+                    print(f"    skipping: best_coords dimension ({len(best_coords)}) != sequence length ({len(sequence)}); IsRNAcirc outputs an all-atom PDB")
             else:
                 opt_p, cg_orig, rl_info = optimize_far_pairs(
                     best_coords, sequence, far_pairs, stem_blocks,
@@ -1835,10 +1854,10 @@ def isrnaclong_pipeline(
                 best_coords = opt_p
                 _l3_ok = True
                 if verbose:
-                    print(f"    RL 完成: reward={rl_info.get('reward_after', 0):.4f}")
+                    print(f"    RL done: reward={rl_info.get('reward_after', 0):.4f}")
         except Exception as e:
             if verbose:
-                print(f"    RL 微调失败: {e}")
+                print(f"    RL fine-tuning failed: {e}")
         if _l3_ok:
             _save_ckpt(3,
                 pairs=pairs, far_pairs=far_pairs, stem_blocks=stem_blocks,
@@ -1848,11 +1867,11 @@ def isrnaclong_pipeline(
                 rl_done=True,
             )
 
-    # ── Level 3.5: Metadynamics 增强采样 (沿 CV 跨越自由能垒) ──
-    # GPU batched 版本优先 (torch.cuda), OpenMM CPU 作为 fallback.
+    # ── Level 3.5: Metadynamics enhanced sampling (crossing free-energy barriers along the CVs) ──
+    # GPU batched version preferred (torch.cuda); OpenMM CPU is the fallback.
     if ckpt_level >= 3.5:
         if verbose:
-            print(f"\n[Level 3.5] 从 checkpoint 恢复")
+            print(f"\n[Level 3.5] restored from checkpoint")
     elif use_metad and best_coords is not None and len(best_coords) == len(sequence):
         _l35_ok = False
         _use_gpu_meta = False
@@ -1863,10 +1882,10 @@ def isrnaclong_pipeline(
             pass
 
         if _use_gpu_meta:
-            # ── GPU batched path: 所有副本在单 GPU 上批量跑 ──
+            # ── GPU batched path: all replicas run in batch on a single GPU ──
             if verbose:
                 print(f"\n[Level 3.5] GPU batched Metadynamics "
-                      f"(8 replicas, well-tempered, {metad_n_steps} 步)...")
+                      f"(8 replicas, well-tempered, {metad_n_steps} steps)...")
             try:
                 from torusfold.scheme2.metadynamics_gpu import BatchedMetadynamics
 
@@ -1892,27 +1911,27 @@ def isrnaclong_pipeline(
                     best_coords = meta_coords
                     best_energy = meta_e
                     if verbose:
-                        print(f"    GPU-MetaD E={meta_e:.0f} (优于当前)")
+                        print(f"    GPU-MetaD E={meta_e:.0f} (better than current)")
                 elif verbose:
                     print(f"    GPU-MetaD E={meta_e:.0f} "
-                          f"(未优于 {best_energy:.0f}, 保留)")
+                          f"(not better than {best_energy:.0f}, keeping)")
                 _l35_ok = True
             except Exception as e:
                 if verbose:
-                    print(f"    GPU-MetaD 失败, 回退 OpenMM: {e}")
+                    print(f"    GPU-MetaD failed, falling back to OpenMM: {e}")
 
         if not _l35_ok:
-            # ── OpenMM CPU fallback: 2 副本独立线程 ──
+            # ── OpenMM CPU fallback: 2 replicas on independent threads ──
             if verbose:
-                _fallback_tag = "OpenMM" if not _use_gpu_meta else "回退 OpenMM"
+                _fallback_tag = "OpenMM" if not _use_gpu_meta else "fallback OpenMM"
                 print(f"\n[Level 3.5] {_fallback_tag} Metadynamics "
-                      f"(2 replicas, well-tempered, {metad_n_steps} 步)...")
+                      f"(2 replicas, well-tempered, {metad_n_steps} steps)...")
             try:
                 from torusfold.scheme2.metadynamics_sampler import MetaDynamicsSampler
                 from concurrent.futures import ThreadPoolExecutor, as_completed
 
                 def _run_metad_replica(coords_init, seq, prs, n_steps, replica_id):
-                    """单个 MetaD 副本 (独立线程)."""
+                    """Run a single MetaD replica (on an independent thread)."""
                     _meta_plat = "CPU"
                     try:
                         import openmm as _omm
@@ -1963,14 +1982,14 @@ def isrnaclong_pipeline(
                     best_energy = meta_e
                     if verbose:
                         print(f"    MetaD (replica {best_replica[0]}) "
-                              f"E={meta_e:.0f} (优于当前)")
+                              f"E={meta_e:.0f} (better than current)")
                 elif verbose:
                     print(f"    MetaD (replica {best_replica[0]}) "
-                          f"E={meta_e:.0f} (未优于 {best_energy:.0f}, 保留)")
+                          f"E={meta_e:.0f} (not better than {best_energy:.0f}, keeping)")
                 _l35_ok = True
             except Exception as e:
                 if verbose:
-                    print(f"    MetaD 跳过: {e}")
+                    print(f"    MetaD skipped: {e}")
 
         if _l35_ok:
             _save_ckpt(3.5,
@@ -1980,25 +1999,25 @@ def isrnaclong_pipeline(
                 best_coords=best_coords, best_energy=best_energy,
             )
 
-    # ── Level 4: REST2 精修 ──
+    # ── Level 4: REST2 refinement ──
     if ckpt_level >= 4:
         if verbose:
-            print(f"\n[Level 4] 从 checkpoint 恢复")
+            print(f"\n[Level 4] restored from checkpoint")
     else:
-        # 解析 "auto" 平台
+        # resolve the "auto" platform
         if platform == "auto":
             from torusfold.scheme2.rest2_sampler import detect_openmm_platform
             resolved_platform = detect_openmm_platform()
         else:
             resolved_platform = platform
         if verbose:
-            print(f"\n[Level 4] REST2 精修 ({n_rest2_replicas} 副本, 平台={resolved_platform})...")
+            print(f"\n[Level 4] REST2 refinement ({n_rest2_replicas} replicas, platform={resolved_platform})...")
         _l4_ok = False
         _use_gpu_rest2 = torch.cuda.is_available()
-        use_trirnasp = False  # 默认关闭, 等 Level 2 集成后启用
+        use_trirnasp = False  # off by default; enabled after Level 2 integration
         if _use_gpu_rest2:
             try:
-                # ── GPU 批量 REST2×REMD ──
+                # ── batched GPU REST2×REMD ──
                 from torusfold.scheme2.torch_cgsim import BatchedREMD2D
                 _remd2d = BatchedREMD2D(
                     n_t=8,
@@ -2008,13 +2027,13 @@ def isrnaclong_pipeline(
                     use_trirnasp=use_trirnasp,
                     sequence=sequence,
                     force_refresh_freq=500,
-                    # 弛豫参数 (与 OpenMM 版对齐)
+                    # relaxation parameters (aligned with the OpenMM version)
                     relax_bond_k=500.0,
                     relax_angle_k=200.0,
                     relax_pair_k=500.0,
                     restraint_k=500.0,
                 )
-                # best_coords 始终是 P-only Cartesian coordinates in Å.
+                # best_coords is always P-only Cartesian coordinates in Å.
                 # BatchedREMD2D expects the same public interface and a step count.
                 _pairs_flat = [(i, j, w) for i, j, w in pairs]
                 best_coords, energy, diag = _remd2d.run(
@@ -2024,7 +2043,7 @@ def isrnaclong_pipeline(
                 _l4_ok = True
             except Exception as e_gpu:
                 if verbose:
-                    print(f"    GPU REST2 失败, 回退 OpenMM: {e_gpu}")
+                    print(f"    GPU REST2 failed, falling back to OpenMM: {e_gpu}")
                 _use_gpu_rest2 = False
 
         if not _l4_ok and not _use_gpu_rest2:
@@ -2046,13 +2065,13 @@ def isrnaclong_pipeline(
                     _acc_t = _rest2_diag.get("acceptance_T", [])
                     _acc_l = _rest2_diag.get("acceptance_lam", [])
                 if _acc_t:
-                    print(f"    [2D-REMD] T轴接受率: "
+                    print(f"    [2D-REMD] T-axis acceptance: "
                           f"{['%.0f%%' % (a*100) for a in _acc_t]}")
                 if _acc_l:
-                    print(f"    [2D-REMD] λ轴接受率: "
+                    print(f"    [2D-REMD] lambda-axis acceptance: "
                           f"{['%.0f%%' % (a*100) for a in _acc_l]}")
                 _rest2_snaps = [coords_rest2]
-                # 聚类选择: 从 REST2 快照中选最优
+                # cluster selection: choose the best from the REST2 snapshots
                 _snap_list = list(_rest2_snaps) if _rest2_snaps else [coords_rest2]
                 _snap_energies = [e_rest2] * len(_snap_list)
                 if len(_snap_list) > 1:
@@ -2070,7 +2089,7 @@ def isrnaclong_pipeline(
                 _l4_ok = True
             except Exception as e:
                 if verbose:
-                    print(f"    REST2 失败: {e}")
+                    print(f"    REST2 failed: {e}")
         if _l4_ok:
             _save_ckpt(4,
                 pairs=pairs, far_pairs=far_pairs, stem_blocks=stem_blocks,
@@ -2079,37 +2098,37 @@ def isrnaclong_pipeline(
                 best_coords=best_coords, best_energy=best_energy,
             )
 
-    # ── Level 5: AMBER RNA.OL3 全原子精修 (带 C1'-C1' pair restraints) ──
+    # ── Level 5: AMBER RNA.OL3 all-atom refinement (with C1'-C1' pair restraints) ──
     if ckpt_level >= 5:
         if verbose:
-            print(f"\n[Level 5] 从 checkpoint 恢复")
+            print(f"\n[Level 5] restored from checkpoint")
     else:
         _l5_ok = False
         if verbose:
-            print(f"\n[Level 5] AMBER RNA.OL3 全原子精修 (最小化+MD)...")
+            print(f"\n[Level 5] AMBER RNA.OL3 all-atom refinement (minimization + MD)...")
         try:
-            # 优先: amber_refine (完整版, 含 C1'-C1' pair restraints + A-form torsion)
+            # preferred: amber_refine (full version with C1'-C1' pair restraints + A-form torsions)
             from torusfold.scheme2.aform_from_template import reconstruct_all_atom
             from torusfold.scheme2.amber_refine import amber_refine as _amber_refine_full
 
-            # CG P coords (Å) -> AllAtomStructure (1EHZ 晶体模板)
+            # CG P coords (Å) -> AllAtomStructure (1EHZ crystal template)
             _structure_5 = reconstruct_all_atom(best_coords, sequence)
-            # amber_refine: C1'-C1' pair restraints (K=100 kJ/mol/nm²) + A-form torsion
+            # amber_refine: C1'-C1' pair restraints (K=100 kJ/mol/nm²) + A-form torsions
             _refined_coords_5, _e0_5, _e1_5, _info_5 = _amber_refine_full(
                 _structure_5, pairs,
                 platform_name="CPU",
                 max_iterations=3000,
             )
 
-            # 从 heavy atom 输出提取 P-only 坐标 (按 residue_atom_spans 定位)
+            # extract P-only coordinates from the heavy-atom output (located via residue_atom_spans)
             _p_coords_5 = []
             for _ri in range(L):
                 _span = _structure_5.residue_atom_spans[_ri]
-                _p_idx = _span[0]  # 每残基第一个原子是 P
+                _p_idx = _span[0]  # the first atom of each residue is P
                 if _p_idx < len(_refined_coords_5):
                     _p_coords_5.append(_refined_coords_5[_p_idx])
             _p_coords_5 = np.array(_p_coords_5) if _p_coords_5 else np.zeros((0, 3))
-            # 写 PDB 供 PPR (Level 5.5) 等后续步骤使用
+            # write the PDB for downstream steps such as PPR (Level 5.5)
             _write_coords_pdb(
                 _p_coords_5 if len(_p_coords_5) == L else best_coords,
                 sequence, str(output_path / "level5_amber.pdb"))
@@ -2120,17 +2139,17 @@ def isrnaclong_pipeline(
                 if len(_p_coords_5) == L:
                     best_coords = _p_coords_5
                 if verbose:
-                    print(f"    AMBER 精修: E={_e0_5:.0f} -> {_e1_5:.0f} kJ/mol (优于之前 {old_energy:.0f})")
-                    print(f"    pair restraints: {len(pairs)} 对, A-form torsions: {_info_5.get('n_torsions', 0)}")
+                    print(f"    AMBER refinement: E={_e0_5:.0f} -> {_e1_5:.0f} kJ/mol (better than previous {old_energy:.0f})")
+                    print(f"    pair restraints: {len(pairs)} pairs, A-form torsions: {_info_5.get('n_torsions', 0)}")
             else:
                 if verbose:
-                    print(f"    AMBER 精修: E={_e1_5:.0f} (未优于 {old_energy:.0f}, 保留原结果)")
+                    print(f"    AMBER refinement: E={_e1_5:.0f} (not better than {old_energy:.0f}, keeping the original result)")
             _l5_ok = True
         except Exception as e_full:
             if verbose:
-                print(f"    amber_refine 失败 ({e_full!r}), 尝试 openmm_amber_refine fallback...")
+                print(f"    amber_refine failed ({e_full!r}), trying openmm_amber_refine fallback...")
             try:
-                # Fallback: openmm_amber_refine (简化版, 无 pair restraints)
+                # Fallback: openmm_amber_refine (simplified, no pair restraints)
                 from torusfold.scheme2.openmm_amber_refiner import openmm_amber_refine, OPENMM_AVAILABLE as AMBER_OK
                 if AMBER_OK:
                     cg_pdb_5 = str(output_path / "level5_cg.pdb")
@@ -2152,17 +2171,17 @@ def isrnaclong_pipeline(
                         if len(p_coords_5) == L:
                             best_coords = p_coords_5
                         if verbose:
-                            print(f"    AMBER 精修 (fallback): E={amber_e:.0f} (优于之前 {old_energy:.0f})")
+                            print(f"    AMBER refinement (fallback): E={amber_e:.0f} (better than previous {old_energy:.0f})")
                     else:
                         if verbose:
-                            print(f"    AMBER 精修 (fallback): E={amber_e:.0f} (未优于 {old_energy:.0f}, 保留)")
+                            print(f"    AMBER refinement (fallback): E={amber_e:.0f} (not better than {old_energy:.0f}, keeping)")
                     _l5_ok = True
                 else:
                     if verbose:
-                        print(f"    AMBER 精修跳过 (OpenMM 未安装)")
+                        print(f"    AMBER refinement skipped (OpenMM not installed)")
             except Exception as e:
                 if verbose:
-                    print(f"    Level 5 fallback 也失败: {e}")
+                    print(f"    Level 5 fallback also failed: {e}")
     if _l5_ok:
         _save_ckpt(5,
             pairs=pairs, far_pairs=far_pairs, stem_blocks=stem_blocks,
@@ -2171,18 +2190,18 @@ def isrnaclong_pipeline(
             best_coords=best_coords, best_energy=best_energy,
         )
 
-    # ── Level 5.5: PPR 碱基对氢键修复 ──
+    # ── Level 5.5: PPR base-pair hydrogen-bond repair ──
     if use_ppr:
         if ckpt_level >= 5.5:
             if verbose:
-                print(f"\n[Level 5.5] 从 checkpoint 跳过 (已修复)")
+                print(f"\n[Level 5.5] skipping from checkpoint (already repaired)")
         else:
             _level5_pdb = str(output_path / "level5_amber.pdb")
             if not os.path.exists(_level5_pdb):
                 _level5_pdb = str(output_path / "level5_aa.pdb")
             if os.path.exists(_level5_pdb):
                 if verbose:
-                    print(f"\n[Level 5.5] PPR 碱基对氢键修复...")
+                    print(f"\n[Level 5.5] PPR base-pair hydrogen-bond repair...")
                 try:
                     from torusfold.scheme2.ppr_repair import ppr_repair
                     _ppr_out = str(output_path / "level5_ppr.pdb")
@@ -2193,33 +2212,33 @@ def isrnaclong_pipeline(
                     )
                     if ppr_result["after"] > ppr_result["before"]:
                         if verbose:
-                            print(f"  PPR 有效: {ppr_result['before']} -> {ppr_result['after']} 对")
+                            print(f"  PPR effective: {ppr_result['before']} -> {ppr_result['after']} pairs")
                 except Exception as e:
                     if verbose:
-                        print(f"  PPR 失败: {e}")
+                        print(f"  PPR failed: {e}")
                 _save_ckpt(5.5,
                     ppr_output=_ppr_out if os.path.exists(_ppr_out) else "",
                 )
             elif verbose:
-                print(f"  PPR 跳过: Level 5 PDB 不存在")
+                print(f"  PPR skipped: Level 5 PDB does not exist")
 
-    # 写最终 PDB
+    # write the final PDB
     final_pdb = str(output_path / "isrnaclong_final.pdb")
     _write_coords_pdb(best_coords, sequence, final_pdb)
 
-    # 读取全原子 P 坐标 (如果 final_allatom.pdb 存在)
+    # read the all-atom P coordinates (if final_allatom.pdb exists)
     _faa = str(output_path / "final_allatom.pdb")
     coords_aa = _read_pdb_p_coords(_faa) if os.path.exists(_faa) else best_coords
 
     runtime = time.time() - t0
     if verbose:
-        print(f"\n=== 完成: {runtime:.1f}s ===")
+        print(f"\n=== done: {runtime:.1f}s ===")
 
-    # 全原子坐标: 从 final_allatom.pdb 读取 (Level 2.5 输出)
+    # all-atom coordinates: read from final_allatom.pdb (Level 2.5 output)
     _faa_path = str(output_path / "final_allatom.pdb")
     coords_aa = _read_pdb_p_coords(_faa_path) if os.path.exists(_faa_path) else best_coords
 
-    # ── 最终统计: 真 H-bond rate (全原子级) ──
+    # ── final statistics: real H-bond rate (all-atom level) ──
     _hbond_rate = 0.0
     _faa_check = str(output_path / "final_allatom.pdb")
     if not os.path.exists(_faa_check):
@@ -2228,23 +2247,24 @@ def isrnaclong_pipeline(
         try:
             _hbond_rate = _compute_hbond_rate(_faa_check, pairs, sequence)
             if verbose:
-                print(f"\n  真 H-bond rate: {_hbond_rate*100:.1f}% ({_hbond_rate:.4f})")
+                print(f"\n  real H-bond rate: {_hbond_rate*100:.1f}% ({_hbond_rate:.4f})")
                 print(f"  CG pair_rate (P-P<12A): {state.pair_rate*100:.1f}%")
         except Exception as _err:
             raise
 
-    # ── checkpoint 保留 ──
-    # _cleanup_checkpoints 已禁用: checkpoint 文件 (_checkpoint.json, ckpt_*.npy)
-    # 用于后续分析 (能量轨迹、REMD 收敛曲线、best_coords 回溯等)
+    # ── keep the checkpoints ──
+    # _cleanup_checkpoints is disabled: the checkpoint files (_checkpoint.json, ckpt_*.npy)
+    # are used for later analysis (energy trajectories, REMD convergence curves,
+    # best_coords traceback, etc.)
 
-    # ── 最终数据导出 ──
+    # ── final data export ──
     try:
         from torusfold.scheme2.data_exporter import export_final_summary
         export_final_summary(best_coords, sequence, str(output_path))
     except Exception as _err:
         raise
 
-    # ── Pipeline 完整总结 ──
+    # ── full pipeline summary ──
     try:
         total_time = time.time() - t0
         _chunk_confs = chunk_confidences if 'chunk_confidences' in dir() else []
@@ -2308,12 +2328,12 @@ def isrnaclong_pipeline(
 
 
 def _steps_for_level(level) -> int:
-    """根据保真度级别返回 MD 步数 (3 级版)."""
+    """Return the MD step count for a fidelity level (3-level version)."""
     steps = {
-        "CG_FAST": 500,        # ~1ps, 快速探索
-        "CG_MEDIUM": 5000,     # ~10ps, 中等精度
-        "CG_REST2": 50000,     # ~100ps, REST2 增强采样
-        # 旧版兼容
+        "CG_FAST": 500,        # ~1ps, fast exploration
+        "CG_MEDIUM": 5000,     # ~10ps, medium accuracy
+        "CG_REST2": 50000,     # ~100ps, REST2 enhanced sampling
+        # legacy compatibility
         "CG_SHORT": 500,
         "REST2": 50000,
     }
@@ -2321,7 +2341,7 @@ def _steps_for_level(level) -> int:
 
 
 def _estimate_energy(coords, pairs, sequence) -> float:
-    """简单能量估计 (无 LAMMPS 时). coords 为 P-only Å."""
+    """Simple energy estimate (used when LAMMPS is unavailable). coords are P-only in Å."""
     try:
         from torusfold.scheme2.refine import BOND_LEN
     except ImportError:
@@ -2329,12 +2349,12 @@ def _estimate_energy(coords, pairs, sequence) -> float:
     energy = 0.0
     L = len(coords)
 
-    # 骨架键 (BOND_LEN 单位 Å, coords 单位 Å)
+    # backbone bonds (BOND_LEN in Å, coords in Å)
     for i in range(L - 1):
         d = np.linalg.norm(coords[i] - coords[i + 1])
         energy += 0.5 * 31000.0 * (d - BOND_LEN) ** 2
 
-    # 配对 (兼容 (i,j) 和 (i,j,w) 格式, 目标 ~10.5Å WC 距离)
+    # pairs (accepts both (i,j) and (i,j,w) formats; target ~10.5Å WC distance)
     for p in pairs:
         if len(p) == 3:
             i, j, w = p
@@ -2349,7 +2369,7 @@ def _estimate_energy(coords, pairs, sequence) -> float:
 
 
 def _check_cross_segment_pairs(coords, far_pairs, segments) -> float:
-    """检查跨片段配对距离."""
+    """Check the cross-segment pairing distance."""
     if not far_pairs:
         return 1.0
 
@@ -2371,7 +2391,7 @@ def _check_cross_segment_pairs(coords, far_pairs, segments) -> float:
 
 
 def _find_segment(res_idx, segments) -> int:
-    """找残基属于哪个段."""
+    """Find which segment a residue index belongs to."""
     for idx, seg in enumerate(segments):
         if seg["start"] <= res_idx < seg["end"]:
             return idx
@@ -2379,7 +2399,7 @@ def _find_segment(res_idx, segments) -> int:
 
 
 def _compute_pair_rate(coords, pairs) -> float:
-    """计算配对满足率 (P-P 距离 < 12Å, 比旧版 15Å 更严格)."""
+    """Compute the base-pairing satisfaction rate (P-P distance < 12Å, stricter than the old 15Å)."""
     if not pairs or len(coords) == 0:
         return 0.0
     ok = 0
@@ -2392,13 +2412,13 @@ def _compute_pair_rate(coords, pairs) -> float:
         if i >= L or j >= L:
             continue
         d = np.linalg.norm(coords[i] - coords[j])
-        if d < 12.0:  # 旧版 15Å 太松, 12Å 更合理
+        if d < 12.0:  # the old 15Å was too loose; 12Å is more reasonable
             ok += 1
     return ok / len(pairs)
 
 
 def _compute_hbond_rate(pdb_path, pairs, sequence) -> float:
-    """计算真氢键满足率 (N1/N3/O6/N4 距离 < 3.6Å)."""
+    """Compute the real hydrogen-bond satisfaction rate (N1/N3/O6/N4 distance < 3.6Å)."""
     try:
         from openmm.app import PDBFile
         import openmm.unit as unit
@@ -2447,7 +2467,7 @@ def _compute_hbond_rate(pdb_path, pairs, sequence) -> float:
 
 
 def _validate_structure(coords, pairs, bpp_matrix, sequence, level_name=""):
-    """快速验证结构质量 (clash + pair_rate + bond_quality).
+    """Quickly validate structure quality (clash + pair_rate + bond_quality).
 
     Returns: dict with clash_count, pair_rate, bond_quality, is_valid
     """
@@ -2464,15 +2484,15 @@ def _validate_structure(coords, pairs, bpp_matrix, sequence, level_name=""):
         result["is_valid"] = False
         return result
 
-    # 1. Clash 检测: P-P 距离 < 3.0A (排除相邻残基)
+    # 1. Clash detection: P-P distance < 3.0A (excluding adjacent residues)
     from scipy.spatial.distance import cdist
     dist_mat = cdist(coords, coords)
     for i in range(L):
-        for j in range(i + 3, L):  # 跳过相邻残基
+        for j in range(i + 3, L):  # skip adjacent residues
             if dist_mat[i, j] < 3.0:
                 result["clash_count"] += 1
 
-    # 2. 配对符合度: pairs 距离 < 15A 的比例
+    # 2. pairing satisfaction: fraction of pairs closer than 15A
     if pairs:
         n_ok = 0
         for p in pairs:
@@ -2481,13 +2501,13 @@ def _validate_structure(coords, pairs, bpp_matrix, sequence, level_name=""):
                 n_ok += 1
         result["pair_rate"] = n_ok / len(pairs)
 
-    # 3. 键长质量: P-P 相邻距离
+    # 3. bond-length quality: adjacent P-P distances
     diffs = np.diff(coords, axis=0)
     bond_dists = np.linalg.norm(diffs, axis=1)
     mean_bond = np.mean(bond_dists)
     result["bond_quality"] = max(0.0, 1.0 - abs(mean_bond - 5.9) / 5.9)
 
-    # 4. 判定
+    # 4. verdict
     if result["clash_count"] > 10:
         result["is_valid"] = False
         result["warnings"].append(f"clash={result['clash_count']}")
@@ -2500,11 +2520,11 @@ def _validate_structure(coords, pairs, bpp_matrix, sequence, level_name=""):
 
 
 def _compute_clash_count(coords, threshold: float = 3.0) -> int:
-    """计算 P-P 碰撞数 (距离 < threshold Å)."""
+    """Count P-P clashes (distance < threshold Å)."""
     L = len(coords)
     count = 0
     for i in range(L):
-        for j in range(i + 2, min(i + 20, L)):  # 局部检查, 避免 O(n²)
+        for j in range(i + 2, min(i + 20, L)):  # local check to avoid O(n²)
             d = np.linalg.norm(coords[i] - coords[j])
             if d < threshold:
                 count += 1
@@ -2512,25 +2532,26 @@ def _compute_clash_count(coords, threshold: float = 3.0) -> int:
 
 
 def _compute_rmsd(a: np.ndarray, b: np.ndarray) -> float:
-    """计算两组坐标之间的 RMSD."""
+    """Compute the RMSD between two coordinate sets."""
     if a.shape != b.shape:
         return float("inf")
     return float(np.sqrt(np.mean(np.sum((a - b) ** 2, axis=1))))
 
 
 def _cluster_and_select(coords_list, energies, rmsd_threshold=5.0):
-    """聚类 + 选择最优构象.
+    """Cluster and select the best conformation.
 
-    算法: 贪心聚类 (RMSD < threshold 归为同一类), 选能量最低的代表.
+    Algorithm: greedy clustering (RMSD < threshold merges into one cluster), then pick
+    the lowest-energy representative.
 
     Args:
-        coords_list: List[(L, 3)] CG 坐标列表
-        energies: List[float] 对应能量
-        rmsd_threshold: 聚类 RMSD 阈值 (Å)
+        coords_list: List[(L, 3)] of CG coordinate sets
+        energies: List[float] of the corresponding energies
+        rmsd_threshold: RMSD threshold for clustering (Å)
 
     Returns:
-        best_idx: 最优构象索引
-        n_clusters: 聚类数
+        best_idx: index of the best conformation
+        n_clusters: number of clusters
         cluster_info: [(center_idx, member_count, min_energy), ...]
     """
     if not coords_list:
@@ -2538,7 +2559,7 @@ def _cluster_and_select(coords_list, energies, rmsd_threshold=5.0):
     if len(coords_list) == 1:
         return 0, 1, [(0, 1, energies[0])]
 
-    # 贪心聚类
+    # greedy clustering
     clusters = []  # [(center_coords, [member_indices])]
     for idx in range(len(coords_list)):
         assigned = False
@@ -2551,7 +2572,7 @@ def _cluster_and_select(coords_list, energies, rmsd_threshold=5.0):
         if not assigned:
             clusters.append((coords_list[idx].copy(), [idx]))
 
-    # 每个聚类选能量最低的代表
+    # pick the lowest-energy representative from each cluster
     cluster_info = []
     best_idx = 0
     best_energy = float("inf")
@@ -2576,9 +2597,9 @@ def _compute_relaxation_metrics(
     energy: float,
     prev_energy: float,
 ) -> RelaxationMetrics:
-    """计算 4 指标弛豫监控."""
+    """Compute the 4-metric relaxation monitor."""
     if len(coords) == 0:
-        # 坐标读取失败, 返回空指标
+        # failed to read coordinates; return empty metrics
         return RelaxationMetrics(
             cross_segment_ok=0.0, clash_count=0, rmsd_change=0.0,
             pair_rate=0.0, energy_delta=0.0,
@@ -2593,7 +2614,7 @@ def _compute_relaxation_metrics(
 
 
 def _update_pair_weights(coords, far_pairs, old_weights, metrics=None) -> dict:
-    """更新跨片段配对权重 (扩展版: 加入 clash 惩罚)."""
+    """Update the cross-segment pair weights (extended version with a clash penalty)."""
     new_weights = old_weights.copy()
     L = len(coords)
     for p in far_pairs:
@@ -2602,13 +2623,13 @@ def _update_pair_weights(coords, far_pairs, old_weights, metrics=None) -> dict:
             continue
         d = np.linalg.norm(coords[i] - coords[j])
         if d > 15.0:
-            # 距离太远 → 加强权重
+            # too far -> increase the weight
             new_weights[(i, j)] = min(old_weights.get((i, j), 1.0) * 1.2, 5.0)
         elif d < 5.0:
-            # 太近 → 降低权重
+            # too close -> decrease the weight
             new_weights[(i, j)] = max(old_weights.get((i, j), 1.0) * 0.8, 0.1)
 
-    # 全局 clash 惩罚: 有碰撞时降低所有权重
+    # global clash penalty: lower every weight when there are clashes
     if metrics is not None and metrics.clash_count > 0:
         for key in new_weights:
             new_weights[key] = max(new_weights[key] * 0.7, 0.1)
@@ -2617,7 +2638,7 @@ def _update_pair_weights(coords, far_pairs, old_weights, metrics=None) -> dict:
 
 
 def _default_helix_coords(L):
-    """默认 A-form 螺旋坐标."""
+    """Default A-form helix coordinates."""
     import math
     coords = np.zeros((L, 3))
     for i in range(L):
@@ -2628,7 +2649,7 @@ def _default_helix_coords(L):
 
 
 def _read_pdb_p_coords(pdb_path: str) -> np.ndarray:
-    """从 PDB 读取 P 原子坐标, 返回 (N, 3)."""
+    """Read P-atom coordinates from a PDB file, returning (N, 3)."""
     coords = []
     with open(pdb_path) as f:
         for line in f:
@@ -2638,8 +2659,8 @@ def _read_pdb_p_coords(pdb_path: str) -> np.ndarray:
                 z = float(line[46:54])
                 coords.append([x, y, z])
     if not coords:
-        # fallback: IsRNAcirc 输出全原子 PDB, 没有 P 原子标记.
-        # 读所有原子坐标 (不只是第一个), 供 Level 3 RL 使用.
+        # fallback: IsRNAcirc outputs an all-atom PDB with no P-atom tag.
+        # read every atom coordinate (not just the first), for the Level 3 RL.
         with open(pdb_path) as f:
             for line in f:
                 if line.startswith("ATOM"):
@@ -2651,7 +2672,7 @@ def _read_pdb_p_coords(pdb_path: str) -> np.ndarray:
 
 
 def _write_coords_pdb(coords, sequence, output_path):
-    """写坐标到 PDB. CG_to_allatom.exe 需要 3字母残基名."""
+    """Write coordinates to a PDB. CG_to_allatom.exe requires 3-letter residue names."""
     _BASE_MAP = {"A": "ADE", "U": "URA", "G": "GUA", "C": "CYT", "T": "THY"}
     lines = ["HEADER    isRNAcircLong CG structure"]
     for i, (x, y, z) in enumerate(coords):
@@ -2667,9 +2688,10 @@ def _write_coords_pdb(coords, sequence, output_path):
 
 
 def _merge_allatom_pdbs(aa_pdb_paths, seg_list, output_path, full_sequence):
-    """把分段全原子 PDB 按残基顺序拼成完整全原子 PDB.
+    """Merge the segmented all-atom PDBs into one complete all-atom PDB in residue order.
 
-    直接复制原始 ATOM 行 (保持 PDB 列对齐), 只改残基编号.
+    Copy the original ATOM lines verbatim (preserving PDB column alignment), changing
+    only the residue numbering.
     """
     lines = ["HEADER    isRNAcircLong merged allatom"]
     atom_idx = 0
@@ -2684,20 +2706,21 @@ def _merge_allatom_pdbs(aa_pdb_paths, seg_list, output_path, full_sequence):
                 if not line.startswith("ATOM"):
                     continue
                 line = line.rstrip("\n\r")
-                # 段内残基编号 (从 PDB 原始行读取)
+                # residue number within the segment (read from the original PDB line)
                 try:
                     local_res = int(line[22:26].strip())
                 except (ValueError, IndexError):
                     local_res = seg_res_count + 1
                 global_res = res_offset + local_res
                 atom_idx += 1
-                # 保持原始 PDB 列对齐, 只改 atom serial (7-11) 和 resSeq (22-26)
+                # keep the original PDB column alignment; change only atom serial (7-11)
+                # and resSeq (22-26)
                 new_line = (
                     line[:6]                              # "ATOM  "
                     + f"{atom_idx:5d}"                    # serial 7-11
                     + line[11:22]                         # atom name, altLoc, resName, chainID
                     + f"{global_res:4d}"                  # resSeq 22-26
-                    + line[26:]                           # iCode + 其余 (coords, occ, etc.)
+                    + line[26:]                           # iCode + the rest (coords, occupancy, etc.)
                 )
                 lines.append(new_line)
                 seg_res_count = local_res

@@ -1,19 +1,20 @@
-"""trirnasp_torch.py — TriRNASP 三体统计势的 PyTorch GPU 批量实现.
+"""trirnasp_torch.py - PyTorch GPU batched implementation of the TriRNASP three-body statistical potential.
 
-与 trirnasp_openmm.py (numpy CPU 版) 的对应关系:
-  - 能量表 Rough.energy (12³×4×4×8 = 73k 条) 一次性载入 → device 常量
-  - 三体项: 对每个合法 pair (i,j), 找 R0 内的 k>j, 查表累加
-    — CPU 版是 Python for 循环逐 pair; torch 版全 batch 化:
-      pair 列表 (M,) × 邻居变长 → 展平成三元组列表 (T,) 一次 gather
-  - 梯度: 默认硬分箱查表 (分段常数势, 与 CPU score() 逐位对齐, 用于
-    打分/校验). ★ 该路径计算图被 .long() 截断 — 不可微, autograd
-    拿不到梯度. soft=True 时改用相邻 bin 的三线性插值: 势变成距离的
-    分段线性函数, autograd 经插值权重回传严格梯度, 供 REMD 外力用.
-    (CPU 版 score_with_gradient 的前向差分线性化问题由此根治)
+Correspondence with trirnasp_openmm.py (numpy CPU version):
+  - Energy table Rough.energy (12^3 x 4 x 4 x 8 = 73k entries) loaded once into a device constant
+  - Three-body term: for each valid pair (i,j), find k>j within R0 and accumulate by table lookup
+    - The CPU version loops per pair in Python; the torch version is fully batched:
+      pair list (M,) x variable-length neighbors -> flattened into a triplet list (T,) with one gather
+  - Gradient: default is hard-bin table lookup (piecewise-constant potential, bit-aligned with the CPU
+    score(), used for scoring/validation). NOTE: this path's computation graph is truncated by .long()
+    - non-differentiable, autograd cannot recover a gradient. With soft=True it switches to trilinear
+    interpolation over adjacent bins: the potential becomes a piecewise-linear function of distance, and
+    autograd backpropagates an exact gradient through the interpolation weights, for REMD external forces.
+    (This roots out the finite-difference linearization problem of the CPU score_with_gradient)
 
-批量副本支持: (B, N, 3) 一批结构同时打分 (REMD 全副本一次算).
+Batched replica support: (B, N, 3) scores a batch of structures at once (all REMD replicas in one pass).
 
-单位约定: 输入 Å (3bead 布局), 输出 kBT; 调用方负责 kJ/mol 换算.
+Unit convention: input in Angstrom (3bead layout), output in kBT; the caller handles kJ/mol conversion.
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ try:
 except ImportError:
     TORCH_OK = False
 
-# ── 与 trirnasp_openmm.py 对齐的常数 ──
+# Constants aligned with trirnasp_openmm.py
 R0 = 8.0
 BIN_WIDTH_ROUGH = 2.0
 EXCLUSION_R1_SQ = 1.21   # (1.1)^2
@@ -54,7 +55,7 @@ def _type_code(base: str, bead: str) -> int:
 
 def _load_energy_table(filepath: str, n_types: int, n_bins: int,
                        n_bins_fine: int) -> np.ndarray:
-    """同 trirnasp_openmm._load_energy_table."""
+    """Same as trirnasp_openmm._load_energy_table."""
     total = (n_types ** 3) * (n_bins ** 2) * (2 * n_bins)
     table = np.zeros(total, dtype=np.float64)
     with open(filepath, "r") as f:
@@ -73,22 +74,24 @@ def _load_energy_table(filepath: str, n_types: int, n_bins: int,
 
 
 class TriRNASPTorch:
-    """GPU 批量 TriRNASP 势.
+    """GPU batched TriRNASP potential.
 
-    一次性预计算 (与序列/坐标无关的拓扑量):
-      - atom 类型/残基索引表 (3L 原子: P,C4',N 布局同 3bead)
-      - pair 候选 (i<j, 排除规则只依赖 res_diff 和距离上限的静态部分)
-      - 每个 pair 的邻居 mask 变长部分在运行时按距离筛
+    Precomputed once (topology quantities independent of sequence/coordinates):
+      - atom type/residue index tables (3L atoms: P,C4',N layout, same as 3bead)
+      - pair candidates (i<j; the static part of the exclusion rules, depending only on
+        res_diff and the distance cap)
+      - each pair's neighbor mask: the variable-length part is screened by distance at runtime
 
-    运行时每次调用做:
-      dist_sq (B,N,N) → pair 距离 → bin → 表 gather → sum
-    梯度: 硬模式不可微 (硬截断查表断图); 软模式 (soft=True) 在相邻
-    bin 间三线性插值, 计算图完整, autograd 给严格梯度.
+    Each runtime call does:
+      dist_sq (B,N,N) -> pair distance -> bin -> table gather -> sum
+    Gradient: hard mode is non-differentiable (the hard-truncated lookup severs the graph);
+    soft mode (soft=True) trilinearly interpolates between adjacent bins, keeping the graph
+    intact and giving autograd an exact gradient.
     """
 
     def __init__(self, sequence: str, energy_dir: Optional[str] = None,
                  device="cuda"):
-        assert TORCH_OK, "PyTorch 未安装"
+        assert TORCH_OK, "PyTorch is not installed"
         if energy_dir is None:
             _root = Path(__file__).resolve().parents[3]
             energy_dir = str(_root / "external" / "TriRNASP" / "Energy")
@@ -104,20 +107,22 @@ class TriRNASPTorch:
 
         self.L = len(sequence)
 
-        # ── 原子布局: [P, C4', N]×L (与 3bead 一致, N=3L) ──
-        # trirnasp_openmm 的顺序是 C4',N,P — 但类型码决定查表结果,
-        # 顺序只影响内部索引一致性, 这里统一用 3bead 布局省转换.
+        # Atom layout: [P, C4', N] x L (same as 3bead, N=3L)
+        # trirnasp_openmm's order is C4',N,P - but the type code determines the lookup
+        # result; order only affects internal index consistency, so we use the 3bead
+        # layout uniformly to avoid conversions.
         codes_c = [_type_code(sequence[i], "C4'") for i in range(self.L)]
         codes_n = [_type_code(
             sequence[i], "N9" if sequence[i] in ("A", "G") else "N1")
             for i in range(self.L)]
         codes_p = [_type_code(sequence[i], "P") for i in range(self.L)]
 
-        # 布局约定: 与 trirnasp_openmm CPU 版完全一致 — [C4', N, P]×L.
-        # ★ 三体计数依赖原子排序 (k>j 规则), 布局不同能量就不同,
-        #   所以这里必须逐字对齐 CPU 的 valid append 顺序.
-        # 注意这与 torch_cgsim 的 [P,C4,N] 不同; energy_from_3bead
-        # 负责把 3bead 粒子重排到本布局.
+        # Layout convention: identical to the trirnasp_openmm CPU version - [C4', N, P] x L.
+        # NOTE: three-body counting depends on atom ordering (the k>j rule); a different
+        #   layout would give different energies, so this must mirror the CPU's valid
+        #   append order verbatim.
+        # Note this differs from torch_cgsim's [P,C4,N]; energy_from_3bead handles
+        # reordering the 3bead particles into this layout.
         types = []
         res_of = []
         bead_seq = []
@@ -132,13 +137,13 @@ class TriRNASPTorch:
                                        device=self.device)
         self.atom_res = torch.tensor(res_of, dtype=torch.long,
                                      device=self.device)
-        # 原子 a → 3bead 扁平粒子索引 ([P,C4,N] 布局的 3r+bead)
+        # atom a -> flattened 3bead particle index (3r+bead in the [P,C4,N] layout)
         self._particle_idx = torch.tensor(
             [3 * r + b for r, b in zip(res_of, bead_seq)],
             dtype=torch.long, device=self.device)
 
-        # ── 静态 pair 候选: i<j 且 |res_i - res_j| 结构性排除在运行时判 ──
-        # 这里只预筛 i<j; 距离相关的排除每步算.
+        # Static pair candidates: i<j; structural exclusion |res_i - res_j| is decided at runtime
+        # Only i<j is prefiltered here; distance-dependent exclusions are computed every step.
         na = self.n_atoms
         iu, ju = np.triu_indices(na, k=1)
         self._iu = torch.tensor(iu, dtype=torch.long, device=self.device)
@@ -146,10 +151,10 @@ class TriRNASPTorch:
         res_i = self.atom_res[self._iu]
         res_j = self.atom_res[self._ju]
         self._res_diff = (res_i - res_j).abs()          # (M,)
-        # k>j 邻接候选的全局上三角 (k 索引 > j): 运行时按 pair 展开
-        # 为控制显存, 邻居筛选在运行时对每个 pair 单独 gather (向量化).
+        # Global upper triangle of k>j adjacency candidates (k index > j): expanded per pair at runtime
+        # To keep memory bounded, neighbor screening gathers per-pair separately at runtime (vectorized).
 
-        # 排除阈值常量
+        # Exclusion threshold constants
         self._r1sq = EXCLUSION_R1_SQ
         self._r2sq = EXCLUSION_R2_SQ
         self._r3sq = EXCLUSION_R3_SQ
@@ -158,16 +163,17 @@ class TriRNASPTorch:
 
     def energy(self, coords_A: "torch.Tensor",
                soft: bool = False) -> "torch.Tensor":
-        """批量 TriRNASP 能量 (kBT).
+        """Batched TriRNASP energy (kBT).
 
         Args:
-            coords_A: (B, N_atoms, 3) Å — 注意是 _build_atoms 后的原子序,
-                      由本类 particle_idx 映射回 3bead 粒子.
-                      便捷入口: 用 from_3bead() 先转换.
-            soft: False → 硬分箱查表 (与 CPU score 逐位对齐, 但
-                  计算图被 .long() 截断, autograd 无梯度);
-                  True → 相邻 bin 三线性插值, 势变成距离的
-                  分段线性函数, autograd 经插值权重给出严格梯度.
+            coords_A: (B, N_atoms, 3) Angstrom - atom order after _build_atoms;
+                      mapped back to 3bead particles by this class's particle_idx.
+                      Convenience entry: use from_3bead() to convert first.
+            soft: False -> hard-bin table lookup (bit-aligned with the CPU score, but the
+                  graph is truncated by .long(); autograd has no gradient);
+                  True -> trilinear interpolation over adjacent bins; the potential becomes
+                  a piecewise-linear function of distance and autograd gives an exact
+                  gradient through the interpolation weights.
 
         Returns:
             (B,) kBT
@@ -197,14 +203,14 @@ class TriRNASPTorch:
         cand = (~excl) & (d_ij < self._r0sq)               # (B,M)
         d12 = torch.sqrt(torch.where(cand, d_ij, torch.zeros_like(d_ij)))
         if soft:
-            # 软分箱: 保留连续坐标, 插值权重保留 autograd 通路
-            f12 = d12 * self._inv_bw                         # 连续 bin 坐标
-            b12_lo = f12.floor().long()                      # 下界 bin
-            w12 = (f12 - b12_lo.float()).clamp(0.0, 1.0)   # 插值权重
-            b12_lo = b12_lo.clamp(0, 3)                     # 安全截断
+            # Soft binning: keep coordinates continuous; interpolation weights keep the autograd path alive
+            f12 = d12 * self._inv_bw                         # continuous bin coordinate
+            b12_lo = f12.floor().long()                      # lower bin
+            w12 = (f12 - b12_lo.float()).clamp(0.0, 1.0)   # interpolation weight
+            b12_lo = b12_lo.clamp(0, 3)                     # safe clamp
         else:
             b12 = (d12 * self._inv_bw).long()
-        # CPU 版: b12>3 的 pair 从三体候选剔除 (ok12 过滤)
+        # CPU version: pairs with b12>3 are dropped from the three-body candidates (ok12 filter)
         if soft:
             ok12 = (b12_lo <= 3) & cand
         else:
@@ -215,13 +221,13 @@ class TriRNASPTorch:
         if not bool(cand.any()):
             return total
 
-        # ── 三体项: 向量化展开 (pair, k) 组合 ──
-        # 对每个候选 pair (i,j), k ∈ (j, N) 且 dist²(i,k)<R0², dist²(j,k)<rcut
-        # 全展开 M×N 太大时按 pair 分块 (chunk) 处理.
+        # Three-body term: vectorized expansion over (pair, k) combinations
+        # For each candidate pair (i,j), k in (j, N) with dist^2(i,k)<R0^2 and dist^2(j,k)<rcut
+        # A full M x N expansion is too large, so process it in per-pair chunks.
         ci = iu[None].expand(B, -1)
         cj = ju[None].expand(B, -1)
 
-        # 只处理有候选的 (b, pair) 组合
+        # Only handle the (batch, pair) entries that have candidates
         cand_flat = cand.reshape(-1)
         sel = torch.nonzero(cand_flat, as_tuple=False).squeeze(-1)
         b_idx = sel // cand.shape[1]
@@ -232,9 +238,9 @@ class TriRNASPTorch:
         bi_all = iu[p_idx]
         bj_all = ju[p_idx]
 
-        # ── 三体项: 按 pair 分块展开, 控制 (chunk, N) 中间张量显存 ──
-        # L=2013 时 M~18M 候选 pair × N=6039 直接广播 ≈ 1TB — 必须 chunk.
-        # 每块目标中间量 ≈ chunk × N × 8B ≤ ~256MB → chunk 自适应.
+        # Three-body term: expand per pair in chunks to bound the (chunk, N) intermediate tensor memory
+        # At L=2013, M~18M candidate pairs x N=6039 broadcast directly would be ~1TB - chunking is required.
+        # Target intermediate size per chunk ~= chunk x N x 8B <= ~256MB, so chunk adapts.
         n_atoms = coords_A.shape[1]
         n_pairs_sel = b_idx.numel()
         k_col = torch.arange(n_atoms, device=dev)              # (N,)
@@ -260,7 +266,7 @@ class TriRNASPTorch:
             k_ok = (kc > bj[:, None]) & \
                 (d_ik < self._r0sq) & (d_jk < rcut_sq)
 
-            # 排除规则 (三体)
+            # Exclusion rules (three-body)
             ri = self.atom_res[bi][:, None]
             rj = self.atom_res[bj][:, None]
             rk = rk_all[None, :]
@@ -273,10 +279,11 @@ class TriRNASPTorch:
             bad = bad | ((d23 > self._r2sq) & (d23 <= self._r3sq))
             good = k_ok & (~bad)
 
-            # 数值哲学 (2026-08-26 与学长定版): GPU 内部全程 f64,
-            # 不复刻 CPU "f32 存 dsq 再开方" 的历史路径. 与 CPU 的
-            # ~1-2% bin 边界偏差是结构相关基线偏移, REMD 副本间
-            # 相互抵消, 不影响交换判据的自洽性.
+            # Numerical philosophy (finalized with the senior on 2026-08-26): GPU runs f64
+            # throughout, and does not reproduce the CPU's legacy path of "store dsq as f32,
+            # then sqrt". The ~1-2% bin-boundary deviation vs CPU is a structure-dependent
+            # baseline shift that cancels across REMD replicas and does not affect the
+            # self-consistency of the exchange criterion.
             g_d13 = torch.sqrt(
                 torch.where(good, d13, torch.zeros_like(d13)))
             g_d23 = torch.sqrt(
@@ -302,11 +309,11 @@ class TriRNASPTorch:
             t_i = self.atom_types[iu[pi_[f_rows]]]
             t_j = self.atom_types[ju[pi_[f_rows]]]
             t_k = self.atom_types[f_k]
-            # atom type 维度的基址 (type part is discrete — always integer)
+            # base offset for the atom-type dimension (type part is discrete - always integer)
             base_t = ((t_i * 12 + t_j) * 12 + t_k).long()
 
             if soft:
-                # ── 三线性插值: 势 = Σ角落 w₁w₂w₃ · E(角落) ──
+                # Trilinear interpolation: potential = sum over corners of w1*w2*w3 * E(corner)
                 tb12b = b12_lo[bb[f_rows], pi_[f_rows]].long()
                 tb13b = b13_lo[f_rows, f_k].long()
                 tb23b = b23_lo[f_rows, f_k].long()
@@ -338,10 +345,10 @@ class TriRNASPTorch:
 
     def energy_from_3bead(self, pos_nm: "torch.Tensor",
                           soft: bool = False) -> "torch.Tensor":
-        """便捷入口: (B, 3L, 3) nm torch_cgsim 布局 ([P,C4,N]×L) → (B,) kBT.
+        """Convenience entry: (B, 3L, 3) nm torch_cgsim layout ([P,C4,N] x L) -> (B,) kBT.
 
-        _particle_idx 把本类原子序映射到 3bead 粒子索引 —
-        这里反向 gather: 按本类原子顺序取出对应粒子坐标.
+        _particle_idx maps this class's atom order to the 3bead particle indices -
+        here we gather in reverse: pull the coordinates of each atom in this class's order.
         """
         coords_A = pos_nm * 10.0
         atoms = coords_A[:, self._particle_idx, :]
@@ -349,13 +356,13 @@ class TriRNASPTorch:
 
 
 if __name__ == "__main__":
-    """冒烟: 与 numpy CPU 版能量对比 (同一组残基坐标, 允许 float32 容差).
+    """Smoke test: compare energy against the numpy CPU version (same residue coordinates, float32 tolerance).
 
-    布局约定:
-      CPU 版 score() 吃 (L,3,3), bead 序 = 原子序 [C4', N, P]
-        — 见 trirnasp_openmm._build_atoms 的 valid append 顺序
-      本类 energy_from_3bead() 吃 (B,3L,3) nm, bead 序 = [P, C4', N]
-    同一残基坐标分别按两种布局展开.
+    Layout conventions:
+      The CPU score() takes (L,3,3), bead order = atom order [C4', N, P]
+        - see the valid append order in trirnasp_openmm._build_atoms
+      This class's energy_from_3bead() takes (B,3L,3) nm, bead order = [P, C4', N]
+    The same residue coordinates are expanded in each of the two layouts.
     """
     import os
     import sys
@@ -365,16 +372,16 @@ if __name__ == "__main__":
     seq = "AUGCAUGCAUGCAUGC"
     L = len(seq)
     rng = np.random.default_rng(42)
-    res_coords = rng.random((L, 3, 3)).astype(np.float64) * 8.0  # Å, 分散
-    # CPU 版 (L,3,3) axis 语义: axis0=P, axis1=C4', axis2=N
-    # (_build_atoms 用 bead id 直接索引 axis: P←[r,0], C4'←[r,1], N←[r,2])
+    res_coords = rng.random((L, 3, 3)).astype(np.float64) * 8.0  # Angstrom, spread out
+    # CPU (L,3,3) axis semantics: axis0=P, axis1=C4', axis2=N
+    # (_build_atoms indexes the axis directly by bead id: P<-[r,0], C4'<-[r,1], N<-[r,2])
 
     pot_cpu = TriRNASPPotential()
     e_cpu = pot_cpu.score(res_coords.copy(), seq)
 
     pot_gpu = TriRNASPTorch(seq)
-    # 本类布局 [C4',N,P]×L = CPU 布局; res_coords axis 是 [P,C4,N]
-    # (axis0=P) → 重排为 [C4'=axis1, N=axis2, P=axis0]
+    # This class's layout [C4',N,P] x L equals the CPU layout; res_coords axis is [P,C4,N]
+    # (axis0=P) -> reorder to [C4'=axis1, N=axis2, P=axis0]
     flat = np.stack([res_coords[:, 1], res_coords[:, 2], res_coords[:, 0]],
                     axis=1).reshape(3 * L, 3)
     t = torch.tensor(flat, dtype=torch.float64, device=pot_gpu.device)[None]
@@ -384,23 +391,23 @@ if __name__ == "__main__":
     print(f"GPU kBT: {e_gpu:.4f}")
     rel = abs(e_gpu - e_cpu) / max(abs(e_cpu), 1e-8)
     print(f"rel err: {rel:.2%}")
-    assert rel < 0.05, f"GPU/CPU TriRNASP 能量偏差过大: {rel}"
+    assert rel < 0.05, f"GPU/CPU TriRNASP energy deviation too large: {rel}"
     print("[PASS] TriRNASP torch matches numpy within tolerance")
 
-    # ── 软分箱测试: 可微性 + 数值验证 ──
+    # Soft-binning test: differentiability + numerical verification
     t_test = t.clone().detach().requires_grad_(True)
     e_soft = pot_gpu.energy(t_test, soft=True)[0]
     print(f"\n[soft] energy kBT: {e_soft.item():.4f}")
     diff_rel = abs(e_soft.item() - e_gpu) / max(abs(e_gpu), 1e-8)
-    print(f"[soft] soft/hard rel diff: {diff_rel:.4%} (表稀疏导致, 预期行为)")
+    print(f"[soft] soft/hard rel diff: {diff_rel:.4%} (sparse table; expected behavior)")
     e_soft.backward()
     ag = t_test.grad.clone()   # (1,48,3)
     print(f"[soft] |autograd|={ag.norm().item():.4f} kBT/Å, "
           f"|per-atom|={ag.view(-1,3).norm(dim=1).mean().item():.4f}")
 
-    # 数值验证: 单原子微扰, cosine > 0.9 → 梯度正确
+    # Numerical check: single-atom perturbation, cosine > 0.9 -> gradient correct
     eps = 1e-3
-    ag0 = ag[0, 0].double()   # 原子0的xyz
+    ag0 = ag[0, 0].double()   # xyz of atom 0
     num_g = torch.zeros(3, device=ag.device, dtype=torch.float64)
     for d in range(3):
         tp = t.clone()

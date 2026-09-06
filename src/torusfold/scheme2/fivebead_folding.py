@@ -1,19 +1,21 @@
-"""fivebead_folding.py — IsRNAcirc 式 5-bead CG 力场 + 退火。
+"""fivebead_folding.py — IsRNAcirc-style 5-bead CG force field + annealing.
 
-5-bead 每核苷酸: P / S(sugar) / B1(major groove) / B2(minor groove) / B3(glycosidic N)
-优势: 比 3-bead 多 sugar ring 和 base ring 的独立描述, 更好捕捉 stacking/H-bond 几何。
+Each nucleotide is coarse-grained to 5 beads: P / S(sugar) / B1(major groove) /
+B2(minor groove) / B3(glycosidic N).
+Advantage over 3-bead: the sugar ring and base ring are described independently,
+which better captures stacking/H-bond geometry.
 
-力场项:
-  1. P-P 骨架键 (全环) + BSJ (可调)
-  2. P-S 残基内键
-  3. S-B3 残基内键 (sugar → glycosidic N)
-  4. S-B1, S-B2 残基内键 (sugar → base grooves)
-  5. P-P-P 骨架键角 (A-form)
-  6. P-P-P-P 二面角 (A-form 螺旋扭转)
-  7. B1-B1 堆叠 LJ (相邻 base major groove, 主 stacking, ε=1.5)
-  8. WC 配对: B1-B1 方向依赖 12-10 H-bond
-  9. 非键 clash + 静电
- 10. DL 高斯约束: B1-B1 距离 (可选)
+Force-field terms:
+  1. P-P backbone bond (full ring) + BSJ (adjustable)
+  2. P-S intra-residue bond
+  3. S-B3 intra-residue bond (sugar → glycosidic N)
+  4. S-B1, S-B2 intra-residue bonds (sugar → base grooves)
+  5. P-P-P backbone angle (A-form)
+  6. P-P-P-P dihedral (A-form helical twist)
+  7. B1-B1 stacking LJ (adjacent bases' major-groove edge, primary stacking, ε=1.5)
+  8. WC pairing: B1-B1 orientation-dependent 12-10 H-bond
+  9. Nonbonded clash + electrostatics
+ 10. DL Gaussian restraint: B1-B1 distance (optional)
 """
 from __future__ import annotations
 
@@ -44,26 +46,27 @@ def build_5bead_system(
     dl_constraints: Optional[List[Tuple[int, int, float, float]]] = None,
     intra_k: float = 5000.0,
 ):
-    """构建 5-bead CG OpenMM system.
+    """Build a 5-bead CG OpenMM system.
 
     Args:
         p_coords: (L, 3) P-only coordinates (Å)
         pairs: [(i, j, w)] ViennaRNA pairing
         bsj_k_scale: BSJ spring constant multiplier
-        enabled: 10 个 bool, 控制各 force 块.
+        enabled: 10 bools, one per force block.
             [bb, bsj, intra, angle, dihedral, ps_bond, stack_b1, pair, clash, stat_pot]
-            注意: #5 原为 S-S 堆叠 (物理不合理), 已改为 P-S 骨架约束
-        stat_pot_path: 统计势 pkl 路径
-        sequence: RNA 序列 (用于统计势)
-        dl_constraints: [(i, j, d_ij_A, w)] DL 预测碱基距离约束 (B1-B1, Å)
-            i, j: 残基索引 (0-indexed)
-            d_ij: 预测距离 (Å)
-            w: 置信度权重 (0-1), 控制高斯振幅和宽度
-            BSJ ±50nt 区域应设 w=0
+            Note: block #5 was originally an S-S stacking term (physically unsound);
+            it has been replaced by a P-S backbone restraint.
+        stat_pot_path: path to the statistical-potential pkl
+        sequence: RNA sequence (used by the statistical potential)
+        dl_constraints: [(i, j, d_ij_A, w)] DL-predicted base-distance restraints (B1-B1, Å)
+            i, j: residue indices (0-indexed)
+            d_ij: predicted distance (Å)
+            w: confidence weight (0-1), controls the Gaussian amplitude and width
+            Should be w=0 within ±50 nt of the BSJ
 
-        高斯势形式: E = A * exp(-(r-μ)²/(2σ²))
+        Gaussian form: E = A * exp(-(r-μ)²/(2σ²))
             A = 500 * w (kJ/mol)
-            σ = 0.3 + 1.2*(1-w) Å  (高置信→窄, 低置信→宽)
+            σ = 0.3 + 1.2*(1-w) Å  (high confidence → narrow, low confidence → wide)
             μ = d_ij / 10 (nm)
     """
     from openmm import (
@@ -76,7 +79,7 @@ def build_5bead_system(
     coords_nm = coords_5bead / 10.0
     en = enabled if enabled is not None else [True] * 10
     if len(en) != 10:
-        raise ValueError("enabled 必须是 10 个 bool")
+        raise ValueError("enabled must be a list of 10 bools")
 
     system = System()
     for _ in range(5 * L):
@@ -89,8 +92,8 @@ def build_5bead_system(
     def B2(i): return 5 * i + 3
     def B3(i): return 5 * i + 4
 
-    # 1. P-P 骨架键 + BSJ
-    bb_k = 5000.0  # kJ/mol/nm² (CG, 不需要 AA 级别刚度)
+    # 1. P-P backbone bond + BSJ
+    bb_k = 5000.0  # kJ/mol/nm² (CG, no need for AA-level stiffness)
     bsj_force = None
     if en[0] or en[1]:
         bond_bb = HarmonicBondForce()
@@ -105,7 +108,7 @@ def build_5bead_system(
         bsj_force.addBond(P(L - 1), P(0), [bsj_k_scale * 500.0, BOND_LEN / 10.0])
         system.addForce(bsj_force)
 
-    # 2. 残基内键 P-S, S-B3, S-B1, S-B2
+    # 2. Intra-residue bonds P-S, S-B3, S-B1, S-B2
     if en[2]:
         bond_intra = HarmonicBondForce()
         for i in range(L):
@@ -115,7 +118,7 @@ def build_5bead_system(
             bond_intra.addBond(S(i), B2(i), 0.110, intra_k)   # S-B2: 1.10Å
         system.addForce(bond_intra)
 
-    # 3. P-P-P 骨架键角 (A-form 150°)
+    # 3. P-P-P backbone angle (A-form 150°)
     if en[3]:
         angle_force = HarmonicAngleForce()
         angle0 = 2.618  # 150°
@@ -124,7 +127,7 @@ def build_5bead_system(
             angle_force.addAngle(P(i), P(i + 1), P(i + 2), angle0, angle_k)
         system.addForce(angle_force)
 
-    # 4. P-P-P-P 二面角 (A-form 螺旋扭转 33°)
+    # 4. P-P-P-P dihedral (A-form helical twist 33°)
     if en[4]:
         dihedral_force = CustomTorsionForce("0.5*k_dih*(theta-theta0)^2")
         dihedral_force.addGlobalParameter("k_dih", 500.0)  # kJ/mol/rad²
@@ -133,9 +136,9 @@ def build_5bead_system(
             dihedral_force.addTorsion(P(i), P(i + 1), P(i + 2), P(i + 3))
         system.addForce(dihedral_force)
 
-    # 5. (已删除: P-S 键在 #2 残基内键中已添加, 不再重复)
+    # 5. (removed: the P-S bond is already added in the #2 intra-residue block, not repeated)
 
-    # 6. B1-B1 堆叠 (辅 stacking, 相邻 base major groove)
+    # 6. B1-B1 stacking (auxiliary stacking between adjacent bases' major-groove edges)
     if en[6]:
         stack_b1 = CustomBondForce(
             "step(sig-r)*k_rep*(sig-r)^2 - step(r-sig)*eps*(r-sig)/sig")
@@ -143,10 +146,10 @@ def build_5bead_system(
         stack_b1.addPerBondParameter("sig")
         stack_b1.addPerBondParameter("k_rep")
         for i in range(L - 1):
-            stack_b1.addBond(B1(i), B1(i + 1), [1.5, 0.34, 500.0])  # ε=1.5 (原0.8, S-S移除后补偿), k_rep=500
+            stack_b1.addBond(B1(i), B1(i + 1), [1.5, 0.34, 500.0])  # ε=1.5 (raised from 0.8 to compensate for S-S removal), k_rep=500
         system.addForce(stack_b1)
 
-    # 7. WC 配对: B1-B1 12-10 H-bond
+    # 7. WC pairing: B1-B1 12-10 H-bond
     if en[7] and pairs:
         pair_force = CustomBondForce(
             "pair_k_scale * w_pair * 30 * (5*(r0/r)^12 - 6*(r0/r)^10) * step(r_cut - r)")
@@ -160,7 +163,7 @@ def build_5bead_system(
     else:
         pair_force = None
 
-    # 8. 非键 clash (5-bead 更密集, 需更小 dmin)
+    # 8. Nonbonded clash (5-bead is denser, so a smaller dmin is needed)
     if en[8]:
         clash_force = CustomNonbondedForce(
             "step(dmin-r)*k_clash*(dmin-r)^2")
@@ -186,10 +189,12 @@ def build_5bead_system(
     else:
         clash_force = None
 
-    # 9. DL 距离约束: B1-B1 高斯势, 目标距离来自 trRosettaRNA2/RhoFold+/DivideFold
+    # 9. DL distance restraints: B1-B1 Gaussian potential; target distances come from
+    #    trRosettaRNA2/RhoFold+/DivideFold
     #    E_DL = Σ A * exp[-(r - μ)² / (2σ²)]
-    #    高斯势优势: 远距离自动衰减, 不会撕裂结构; 对错误 DL 预测更鲁棒
-    #    BSJ ±50nt 区域 w=0 (DL 对环化拓扑不可信)
+    #    Gaussian advantage: it decays automatically at long range, so it never tears the
+    #    structure apart, and it is robust to incorrect DL predictions
+    #    w=0 within ±50 nt of the BSJ (DL is unreliable for circularization topology)
     dl_force = None
     if dl_constraints:
         # Gaussian: A * exp(-(r-mu)^2 / (2*sigma^2))
@@ -198,26 +203,26 @@ def build_5bead_system(
         dl_force = CustomBondForce(
             "A_dl * exp(-k_gauss * (r - mu)^2)"
         )
-        dl_force.addPerBondParameter("A_dl")       # 振幅 (kJ/mol)
-        dl_force.addPerBondParameter("k_gauss")     # = 1/(2σ²), 控制宽度
-        dl_force.addPerBondParameter("mu")           # 目标距离 (nm)
-        bsj_zone = max(50, L // 40)  # BSJ ±50nt 或序列长度1/40
+        dl_force.addPerBondParameter("A_dl")       # amplitude (kJ/mol)
+        dl_force.addPerBondParameter("k_gauss")     # = 1/(2σ²), controls width
+        dl_force.addPerBondParameter("mu")           # target distance (nm)
+        bsj_zone = max(50, L // 40)  # ±50 nt around the BSJ, or 1/40 of the sequence length
         for i, j, d_ij_a, w in dl_constraints:
             if w <= 0 or i >= L or j >= L:
                 continue
-            # BSJ 区域降权: 位置靠近 0 或 L 的残基
+            # Downweight the BSJ zone: residues located near position 0 or L
             pos_i = min(i, L - i)
             pos_j = min(j, L - j)
             if pos_i < bsj_zone or pos_j < bsj_zone:
-                w *= 0.1  # BSJ 区域权重降 10x
+                w *= 0.1  # BSJ-zone weight reduced 10x
             if w < 0.01:
                 continue
             mu_nm = d_ij_a / 10.0
-            # σ: 高置信 → 窄 (0.3Å), 低置信 → 宽 (1.5Å)
+            # σ: high confidence → narrow (0.3Å), low confidence → wide (1.5Å)
             sigma_a = 0.3 + 1.2 * (1.0 - w)
             sigma_nm = sigma_a / 10.0
             k_gauss = 1.0 / (2.0 * sigma_nm ** 2)
-            A_dl = 500.0 * w  # 振幅 × 置信度
+            A_dl = 500.0 * w  # amplitude × confidence
             dl_force.addBond(B1(i), B1(j), [A_dl, k_gauss, mu_nm])
         if dl_force.getNumBonds() > 0:
             system.addForce(dl_force)
@@ -234,23 +239,23 @@ def refine_5bead(
     sequence: Optional[str] = None,
     dl_constraints: Optional[List[Tuple[int, int, float, float]]] = None,
 ):
-    """5-bead CG 三阶段退火。
+    """Three-stage 5-bead CG annealing.
 
     Args:
-        p_coords: (L, 3) P-only 初始坐标 (Å)
-        pairs: [(i, j, w)] ViennaRNA 配对
-        platform_name: "CPU" 或 "CUDA"
-        n_anneal: 每阶段 MD 步数 (× 1000)
+        p_coords: (L, 3) initial P-only coordinates (Å)
+        pairs: [(i, j, w)] ViennaRNA pairing
+        platform_name: "CPU" or "CUDA"
+        n_anneal: MD steps per stage (× 1000)
 
     Returns:
-        (p_refined, e0, e1): 优化后 P 坐标, 初始能量, 最终能量
+        (p_refined, e0, e1): refined P coordinates, initial energy, final energy
     """
     from openmm import LangevinMiddleIntegrator, Platform, unit
     from openmm.app import Simulation, Topology, Element
 
     L = len(p_coords)
 
-    # ── 构建系统: intra 键用满力常数 (坐标已修正) ──
+    # ── Build system: intra bonds at full force constant (coordinates now fixed) ──
     system, coords_nm, pair_force, bsj_force = \
         build_5bead_system(p_coords, pairs, stat_pot_path=stat_pot_path,
                            sequence=sequence, dl_constraints=dl_constraints)
@@ -275,7 +280,7 @@ def refine_5bead(
     sim.context.setPositions(coords_nm)
     sim.context.setVelocitiesToTemperature(300 * unit.kelvin)
 
-    # 找到 intra-residue bond force (用于逐步增强)
+    # Locate the intra-residue bond force (so it can be ramped up in stages)
     intra_bond_force = None
     for fi in range(system.getNumForces()):
         f = system.getForce(fi)
@@ -295,37 +300,37 @@ def refine_5bead(
         pair_force.setGlobalParameterDefaultValue(0, scale)
         pair_force.updateParametersInContext(sim.context)
 
-    # 步数按序列长度自动缩放 (L=200 → 1×, L=2009 → 10×)
+    # Step counts auto-scale with the sequence length (L=200 → 1×, L=2009 → 10×)
     _s = max(1.0, L / 200.0)
 
-    # Phase 0: 纯 minimize (无配对/BSJ), 让 intra 键找到平衡
+    # Phase 0: pure minimize (no pairing/BSJ) so the intra bonds reach equilibrium
     set_pair_k(0.0)
     set_bsj_k(0.0)
     sim.minimizeEnergy(maxIterations=int(500000 * _s))
     e0 = sim.context.getState(getEnergy=True).getPotentialEnergy()._value
     pre_md = sim.context.getState(getPositions=True, getEnergy=True)
 
-    # Phase 1: 加弱配对 + MD 退火 (350K→300K) + minimize
+    # Phase 1: weak pairing + MD annealing (350K→300K) + minimize
     set_pair_k(0.1); set_bsj_k(0.0)
     sim.integrator.setTemperature(350 * unit.kelvin)
     sim.step(int(5000 * _s))
     sim.integrator.setTemperature(300 * unit.kelvin)
     sim.minimizeEnergy(maxIterations=int(300000 * _s))
 
-    # Phase 2: 强配对 + 弱 BSJ + MD 退火 (320K→300K) + minimize
+    # Phase 2: strong pairing + weak BSJ + MD annealing (320K→300K) + minimize
     set_pair_k(1.0); set_bsj_k(0.1)
     sim.integrator.setTemperature(320 * unit.kelvin)
     sim.step(int(3000 * _s))
     sim.integrator.setTemperature(300 * unit.kelvin)
     sim.minimizeEnergy(maxIterations=int(400000 * _s))
 
-    # Phase 3: 强配对 + 强 BSJ + MD (300K) + minimize
+    # Phase 3: strong pairing + strong BSJ + MD (300K) + minimize
     set_pair_k(1.0); set_bsj_k(1.0)
     sim.integrator.setTemperature(300 * unit.kelvin)
     sim.step(int(5000 * _s))
     sim.minimizeEnergy(maxIterations=int(500000 * _s))
 
-    # Phase 4: 最终 minimize (tight tolerance)
+    # Phase 4: final minimize (tight tolerance)
     sim.minimizeEnergy(tolerance=0.1 * unit.kilojoules_per_mole / unit.nanometer,
                        maxIterations=int(500000 * _s))
 
@@ -333,7 +338,7 @@ def refine_5bead(
     pos = state.getPositions(asNumpy=True)._value
     e1 = state.getPotentialEnergy()._value
 
-    # Safety: only discard if energy went 10x worse (真正的爆炸)
+    # Safety: only discard if the energy got 10x worse (a genuine blow-up)
     e_pre = pre_md.getPotentialEnergy()._value
     if e1 > e_pre * 10 and e_pre < 0:
         pos = pre_md.getPositions(asNumpy=True)._value

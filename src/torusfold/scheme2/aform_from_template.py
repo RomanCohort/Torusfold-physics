@@ -1,17 +1,20 @@
-"""aform_from_template.py - 从 1EHZ tRNA 晶体标准残基重建全原子 RNA。
+"""aform_from_template.py - reconstructs all-atom RNA from 1EHZ tRNA crystal standard residues.
 
-替代 allatom_reconstruct.py 的手算模板。旧版手算几何 (P-O5'=1.6Å 等) 与
-amber14 OL3 力场平衡值有偏差, 最小化后 amber_field 恒正 (+7 万 kJ/mol,
-学长指出不合理)。改用 1EHZ (酵母 tRNA^Phe, 1.93Å 高分辨率晶体) 的真实
-实验坐标做模板:
+Replaces the hand-derived templates in allatom_reconstruct.py. The old
+hand-built geometry (P-O5'=1.6Å, etc.) deviates from the amber14 OL3 force-field
+equilibrium, so after minimization amber_field stayed positive (+70,000 kJ/mol,
+which is physically unreasonable). We now build the template from the real
+experimental coordinates of 1EHZ (yeast tRNA^Phe, 1.93Å high-resolution crystal):
 
-  1. 从 aform_template.npz 取 A/U/G/C 四种标准残基坐标 (真实晶体)
-  2. 对 CG 的每个 P 点, 取对应碱基的标准残基
-  3. 用 P + C1' + C4' 三点 Kabsch 对齐, 把标准残基叠加到 CG 局部坐标
-  4. 残基内坐标 = 真实晶体几何, amber 力场能量从负开始
+  1. Take the four standard A/U/G/C residue coordinates from aform_template.npz (real crystal)
+  2. For each CG P point, take the standard residue of the matching base
+  3. Align the standard residue onto the CG local frame with a three-point (P + C1' + C4') Kabsch fit
+  4. Intra-residue coordinates are then real crystal geometry, so the amber energy starts negative
 
-BSJ 闭合: circRNA 首末残基的 O3'/P 靠 amber_refine 的 HarmonicBondForce
-约束 (Kabsch 叠加后首末残基 O3'-P 距离接近真实 ~1.6Å, 力场微调即闭合)。
+BSJ closure: the O3'/P of the first and last circRNA residues is closed by
+amber_refine's HarmonicBondForce restraint (after Kabsch superposition the
+terminal O3'-P distance is already near the real ~1.6Å, so a tiny force-field
+adjustment closes it).
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -19,7 +22,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 import numpy as np
 
-# 复用旧 AllAtomStructure 接口, predictor 不用改
+# Reuse the old AllAtomStructure interface so predictors need no changes
 from .allatom_reconstruct import AllAtomStructure, Atom
 
 
@@ -28,7 +31,7 @@ _templates: Dict[str, Dict] = {}
 
 
 def _load_templates() -> Dict[str, Dict]:
-    """惰性加载 1EHZ 标准残基模板 (A/U/G/C)。"""
+    """Lazily load the 1EHZ standard-residue templates (A/U/G/C)."""
     if _templates:
         return _templates
     data = np.load(_TEMPLATE_PATH, allow_pickle=True)
@@ -43,28 +46,29 @@ def _kabsch_align(
     src_three: np.ndarray, dst_three: np.ndarray,
     src_all: np.ndarray,
 ) -> np.ndarray:
-    """三点 Kabsch: 把 src_all 变换到使 src_three -> dst_three 的坐标系。
+    """Three-point Kabsch: transform src_all into the frame that maps src_three -> dst_three.
 
     Args:
-        src_three: (3, 3) 模板的三个锚点 (P, C1', C4') 行向量
-        dst_three: (3, 3) 目标的三个锚点 (CG 推出的 P, C1', C4')
-        src_all:   (N, 3) 模板全部原子坐标
+        src_three: (3, 3) the three template anchor points (P, C1', C4') as row vectors
+        dst_three: (3, 3) the three target anchor points (P, C1', C4' derived from CG)
+        src_all:   (N, 3) all template atom coordinates
     Returns:
-        (N, 3) 变换后的坐标 (平移+旋转, 仿射对齐)
+        (N, 3) transformed coordinates (translation + rotation, affine alignment)
     """
-    # 中心化
+    # Center
     src_c = src_three.mean(axis=0)
     dst_c = dst_three.mean(axis=0)
     s = src_three - src_c
     d = dst_three - dst_c
-    # Kabsch: R = argmin ||R @ s - d||, 用 SVD
+    # Kabsch: R = argmin ||R @ s - d||, solved by SVD
     H = s.T @ d
     U, _, Vt = np.linalg.svd(H)
-    # 反射修正: 防止 R 含镜像 (det=-1), 用变量名 refl 避免与上面的 d 撞名
+    # Reflection correction: keep R free of mirroring (det=-1); the variable is
+    # named refl to avoid clashing with the d above
     refl = np.sign(np.linalg.det(Vt.T @ U.T))
     D = np.diag([1.0, 1.0, refl])
     R = Vt.T @ D @ U.T
-    # 变换: 先中心化模板到原点, 旋转, 平移到目标中心
+    # Transform: center the template at the origin, rotate, then translate to the target center
     aligned = (src_all - src_c) @ R.T + dst_c
     return aligned.astype(np.float32)
 
@@ -72,24 +76,25 @@ def _kabsch_align(
 def reconstruct_all_atom(
     p_coords: np.ndarray, sequence: str,
 ) -> AllAtomStructure:
-    """CG P 坐标 -> 全原子 RNA (1EHZ 晶体模板)。
+    """CG P coordinates -> all-atom RNA (1EHZ crystal template).
 
     Args:
-        p_coords: (L, 3) Å, 每核苷酸一个 P 原子 (CG 求解输出)
-        sequence: ACGU 字符串, 长度 L
+        p_coords: (L, 3) Å, one P atom per nucleotide (CG solver output)
+        sequence: ACGU string of length L
     Returns:
-        AllAtomStructure, 每残基全原子坐标 = 1EHZ 标准残基 Kabsch 叠加。
+        AllAtomStructure whose per-residue all-atom coordinates are Kabsch-superposed
+        1EHZ standard residues.
     """
-    # 序列标准化: 大小写 + T→U
+    # Normalize the sequence: case + T→U
     sequence = sequence.upper().replace("T", "U")
     if p_coords.ndim != 2 or p_coords.shape[1] != 3:
-        raise ValueError(f"p_coords 形状异常 {p_coords.shape}, 期望 (L,3)")
+        raise ValueError(f"p_coords has unexpected shape {p_coords.shape}, expected (L,3)")
     L = len(sequence)
     if p_coords.shape[0] != L:
-        raise ValueError(f"sequence 长度 {L} != P 点数 {p_coords.shape[0]}")
+        raise ValueError(f"sequence length {L} != P count {p_coords.shape[0]}")
     bad = [c for c in sequence if c not in "ACGU"]
     if bad:
-        raise ValueError(f"sequence 含非法字母 {set(bad)}, 只允许 ACGU")
+        raise ValueError(f"sequence contains invalid letters {set(bad)}; only ACGU allowed")
 
     templates = _load_templates()
     centroid = p_coords.mean(axis=0)
@@ -100,11 +105,13 @@ def reconstruct_all_atom(
         base = sequence[i]
         tmpl = templates[base]
         names = tmpl["names"]
-        tcoords = tmpl["coords"]  # (N, 3) 模板坐标
+        tcoords = tmpl["coords"]  # (N, 3) template coordinates
 
-        # 找模板的 P / C1' / C4' / O3' 四个锚点
-        # P1 修: 加 O3' 锚点 (磷酸桥几何), 让重建时 O3' 位置跟相邻残基 P 协调,
-        #        避免 O3' 被模板继承时跟下一残基 P 压成灾难性几何 (C3'-O3'-P 偏 70°)
+        # Find the four anchors P / C1' / C4' / O3' in the template
+        # P1 fix: add the O3' anchor (phosphate-bridge geometry) so the rebuilt O3'
+        # position is consistent with the P of the neighboring residue, avoiding the
+        # catastrophic geometry (C3'-O3'-P bent ~70°) that arose when O3' was inherited
+        # from the template right next to the following residue's P
         idx_P = names.index("P")
         idx_C1 = names.index("C1'")
         idx_C4 = names.index("C4'")
@@ -112,12 +119,12 @@ def reconstruct_all_atom(
         src_anchors = np.stack([tcoords[idx_P], tcoords[idx_C1],
                                 tcoords[idx_C4], tcoords[idx_O3]])
 
-        # CG 只给 P[i], C1'/C4'/O3' 的目标位置用局部坐标系推 (近似 A-form 几何):
-        #   backbone 方向 b = P[i+1] - P[i] (末位用 P[0]-P[L-1])
-        #   径向 r = P[i] - centroid (碱基朝外)
-        #   C1' 在 P 沿 backbone 方向 +5.5Å、径向 +1.5Å 处 (A-form 统计)
-        #   C4' 在 P 沿 backbone +4.2Å、径向 0 处
-        #   O3' 在 P[i+1] 反推 -1.6Å (A-form O3'-P 键长 1.6Å)
+        # CG only supplies P[i]; the C1'/C4'/O3' targets are inferred in the local frame (approximate A-form geometry):
+        #   backbone direction b = P[i+1] - P[i] (the last residue uses P[0]-P[L-1])
+        #   radial r = P[i] - centroid (bases point outward)
+        #   C1' lies +5.5Å along the backbone and +1.5Å radially from P (A-form statistics)
+        #   C4' lies +4.2Å along the backbone and 0 radially from P
+        #   O3' is placed 1.6Å back from P[i+1] (A-form O3'-P bond length of 1.6Å)
         nxt = p_coords[(i + 1) % L]
         b = nxt - p_coords[i]
         bn = np.linalg.norm(b)
@@ -125,19 +132,19 @@ def reconstruct_all_atom(
         r = p_coords[i] - centroid
         rn = np.linalg.norm(r)
         r = r / rn if rn > 1e-6 else np.array([0.0, 0.0, 1.0])
-        r = r - np.dot(r, b) * b  # 正交到 b 法平面
+        r = r - np.dot(r, b) * b  # orthogonalize into the plane normal to b
         rn = np.linalg.norm(r)
         r = r / rn if rn > 1e-6 else np.array([0.0, 0.0, 1.0])
 
         c1_dst = p_coords[i] + b * 5.5 + r * 1.5
         c4_dst = p_coords[i] + b * 4.2
-        o3_dst = nxt - b * 1.6  # O3'[i] 跟 P[i+1] 几何协调
+        o3_dst = nxt - b * 1.6  # O3'[i] consistent with the geometry of P[i+1]
         dst_anchors = np.stack([p_coords[i], c1_dst, c4_dst, o3_dst])
 
-        # Kabsch 叠加 (4 点最小二乘, 比 3 点多一个 O3' 约束)
+        # Kabsch superposition (4-point least squares; one more O3' constraint than the 3-point version)
         aligned = _kabsch_align(src_anchors, dst_anchors, tcoords)
 
-        # 写入 structure
+        # Populate the structure
         res_name = base
         res_seq = i + 1
         atom_index: Dict[str, int] = {}
@@ -167,4 +174,4 @@ if __name__ == "__main__":
     ps = np.stack([R * np.cos(angles), R * np.sin(angles), np.zeros(L)], axis=1)
     s = reconstruct_all_atom(ps, seq)
     print(f"L={L} atoms={len(s.atoms)} per_residue={len(s.atoms)/L:.1f}")
-    print(f"残基0 原子: {[a.atom_name for a in s.atoms[:s.residue_atom_spans[0][1]]]}")
+    print(f"Residue 0 atoms: {[a.atom_name for a in s.atoms[:s.residue_atom_spans[0][1]]]}")

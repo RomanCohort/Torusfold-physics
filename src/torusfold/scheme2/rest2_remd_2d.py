@@ -1,25 +1,27 @@
 """
-rest2_remd_2d.py — 二维 REST2 × T-REMD 合并采样方案.
+rest2_remd_2d.py — combined 2D REST2 x T-REMD sampling scheme.
 
-副本网格 (T_i, λ_j):
-  温度维 (REMD):   T_i = 300 × (550/300)^(i/(n_T-1)), n_T=6
-  溶质 tempering 维 (REST2): λ_j ∈ [1.0, 0.82, 0.67, 0.55], n_λ=4
-  总副本 = n_T × n_λ = 24 (32核 CPU 下每副本 ~1 线程)
+Replica grid (T_i, lambda_j):
+  temperature axis (REMD):  T_i = 300 x (550/300)^(i/(n_T-1)), n_T=6
+  solute-tempering axis (REST2): lambda_j in [1.0, 0.82, 0.67, 0.55], n_lambda=4
+  total replicas = n_T x n_lambda = 24 (~1 thread per replica on 32 CPU cores)
 
-两轴 Metropolis 判据:
-  温度维 (相邻行, 同列):
-      Δ = (β_i - β_i') · (U(x_i) - U(x_i'))
-      标准 T-REMD — 全势能参与.
-  λ 维 (同 行, 相邻列):
-      Δ = β_i · (λ_j' - λ_j) · U^solute(x)
-      只有被 λ 缩放的溶质项 (pair/stack/BSJ guide) 参与判据;
-      键长/角度/clash 等 λ 无关项不进入 — 否则引入系统性偏置.
+Two-axis Metropolis criteria:
+  temperature axis (neighboring rows, same column):
+      Delta = (beta_i - beta_i') * (U(x_i) - U(x_i'))
+      Standard T-REMD — the full potential participates.
+  lambda axis (same row, neighboring columns):
+      Delta = beta_i * (lambda_j' - lambda_j) * U^solute(x)
+      Only the solute terms scaled by lambda (pair/stack/BSJ guide) enter the
+      criterion; lambda-independent terms such as bonds/angles/clash are excluded —
+      otherwise a systematic bias is introduced.
 
-实现: 复用 _run_remd_worker (加 lam 参数), 主进程做二维交换编排.
+Implementation: reuses _run_remd_worker (adding a lam parameter); the main process
+orchestrates the 2D exchanges.
 
-标定依据:
-  - 温度轴: scripts/calib_rest2_final.py → 6副本几何分布全阶梯 30% 接受率
-  - λ 轴: src/torusfold/scheme2/rest2_sampler.py 自检 → RMSF 展宽 +22%
+Calibration basis:
+  - temperature axis: scripts/calib_rest2_final.py -> 6 replicas, geometric ladder, ~30% acceptance
+  - lambda axis: src/torusfold/scheme2/rest2_sampler.py self-check -> RMSF broadening +22%
 """
 from __future__ import annotations
 
@@ -27,11 +29,11 @@ import os
 import numpy as np
 from typing import List, Optional, Tuple
 
-# ── 网格默认值 (标定) ──
-DEFAULT_N_T = 6           # 温度档数
+# ── Grid defaults (calibrated) ──
+DEFAULT_N_T = 6           # number of temperature rungs
 DEFAULT_T_LO = 300.0
 DEFAULT_T_HI = 550.0
-DEFAULT_LAMBDAS = (1.0, 0.82, 0.67, 0.55)   # λ 阶梯 (REST2 标定)
+DEFAULT_LAMBDAS = (1.0, 0.82, 0.67, 0.55)   # lambda ladder (REST2 calibration)
 
 
 def tri_effective_scale(
@@ -40,24 +42,24 @@ def tri_effective_scale(
     t_lo: float = DEFAULT_T_LO,
     t_hi: float = DEFAULT_T_HI,
 ) -> float:
-    """TriRNASP 统计势的温度依赖有效强度 (sigmoid 过渡带).
+    """Temperature-dependent effective strength of the TriRNASP statistical potential (sigmoid transition band).
 
-    分工设计 (双目标平衡):
-      低温 (~300K):  ≈ base_scale      统计势主导折叠
-      中温 (~425K):  ≈ 0.5·base_scale  过渡带 — 拓扑保持+局部重排并存
-      高温 (~550K):  → ~0.05·base_scale 仅维持链连接性, 温度主导探索
+    Division-of-labor design (balancing two objectives):
+      low T (~300K):  ~ base_scale        statistical potential drives folding
+      mid T (~425K):  ~ 0.5*base_scale    transition band - topology retention and local rearrangement coexist
+      high T (~550K): -> ~0.05*base_scale only chain connectivity is kept; temperature drives exploration
 
-    sigmoid 中心在温度区间中点, 宽度 ~1/6 区间:
+    The sigmoid center sits at the middle of the temperature range with a width of ~1/6 the range:
       s(T) = 1 / (1 + exp((T - T_mid) / w))
-      effective = base · (s - s_floor)/(1 - s_floor), s_floor=0.05
+      effective = base * (s - s_floor)/(1 - s_floor), s_floor=0.05
 
     Args:
-        base_scale: 基准强度 (管线默认 0.1)
-        temperature: 副本温度 (K)
-        t_lo/t_hi: 温度阶梯范围
+        base_scale: baseline strength (pipeline default 0.1)
+        temperature: replica temperature (K)
+        t_lo/t_hi: temperature ladder range
 
     Returns:
-        该副本的有效统计势强度 (>0)
+        effective statistical-potential strength for this replica (>0)
     """
     t_mid = 0.5 * (t_lo + t_hi)
     width = max((t_hi - t_lo) / 6.0, 1e-6)
@@ -65,7 +67,7 @@ def tri_effective_scale(
     s = 1.0 / (1.0 + _math.exp((temperature - t_mid) / width))
     floor = 0.05
     val = base_scale * (s - floor) / (1.0 - floor)
-    return float(max(val, 0.0))   # 高温尾部 clamp ≥0 (防负力反向推)
+    return float(max(val, 0.0))   # clamp >=0 at the hot tail (prevent negative forces pushing backward)
 
 
 def build_replica_grid(
@@ -74,18 +76,18 @@ def build_replica_grid(
     t_hi: float = DEFAULT_T_HI,
     lambdas: Tuple[float, ...] = DEFAULT_LAMBDAS,
 ):
-    """构建 (温度, λ) 副本网格.
+    """Build the (temperature, lambda) replica grid.
 
     Returns:
         temps[n_t], lambdas[n_lam], grid[(ri, ci)] -> replica_id
-        replica_id = ri * n_lam + cj (行主序)
+        replica_id = ri * n_lam + cj (row-major)
     """
     temps = [t_lo * (t_hi / t_lo) ** (i / max(n_t - 1, 1)) for i in range(n_t)]
     return temps, list(lambdas)
 
 
 def _beta(t: float) -> float:
-    KB = 0.008314462618  # kJ/(mol·K)
+    KB = 0.008314462618  # kJ/(mol*K)
     return 1.0 / (KB * t)
 
 
@@ -95,23 +97,23 @@ def try_exchange_2d(
     lambdas: List[float],
     solute_energies: Optional[dict] = None,
 ) -> List[Tuple[int, int]]:
-    """一轮二维交换尝试.
+    """One round of 2D exchange attempts.
 
     Args:
-        energies: {replica_id: 总势能}
-        temps: 温度列表 (行)
-        lambdas: λ 列表 (列)
-        solute_energies: {replica_id: 溶质项能量} (λ 维判据用; None 时退化为总能量差近似)
+        energies: {replica_id: total potential energy}
+        temps: temperature list (rows)
+        lambdas: lambda list (columns)
+        solute_energies: {replica_id: solute-term energy} (used by the lambda-axis criterion; when None, falls back to an approximation using total-energy differences)
 
     Returns:
-        [(replica_a, replica_b), ...] 本轮接受交换的对
-        (奇偶交替方案: 偶数轮换 (0,1)(2,3)... 奇数轮换 (1,2)(3,4)...)
+        [(replica_a, replica_b), ...] pairs accepted in this round
+        (odd/even alternation: even rounds swap (0,1)(2,3)... odd rounds swap (1,2)(3,4)...)
     """
     n_t, n_lam = len(temps), len(lambdas)
     accepted = []
 
-    # ── 温度维: 每列内垂直邻居对 (奇偶交替) ──
-    # 用固定 parity 由调用轮次控制; 此处做偶数 pattern
+    # ── Temperature axis: vertical neighbor pairs within each column (odd/even alternation) ──
+    # Fixed parity is controlled by the calling round; here the even pattern runs
     for cj in range(n_lam):
         for ri in range(0, n_t - 1, 2):
             a = ri * n_lam + cj
@@ -123,7 +125,7 @@ def try_exchange_2d(
             if expo <= 0 or np.random.rand() < np.exp(-expo):
                 accepted.append((a, b))
 
-    # ── λ 维: 每行内水平邻居对 ──
+    # ── Lambda axis: horizontal neighbor pairs within each row ──
     for ri in range(n_t):
         for cj in range(0, n_lam - 1, 2):
             a = ri * n_lam + cj
@@ -134,7 +136,7 @@ def try_exchange_2d(
                     and b in solute_energies:
                 u_a, u_b = solute_energies[a], solute_energies[b]
             else:
-                u_a, u_b = energies[a], energies[b]  # 近似 (CG 全溶质时等价)
+                u_a, u_b = energies[a], energies[b]  # approximation (equivalent when CG is fully solute)
             d_lam = lambdas[cj + 1] - lambdas[cj]
             expo = np.clip(_beta(temps[ri]) * d_lam * (u_a - u_b), -30, 30)
             if expo <= 0 or np.random.rand() < np.exp(-expo):
@@ -149,7 +151,7 @@ def odd_parity_exchange(
     lambdas: List[float],
     solute_energies: Optional[dict] = None,
 ) -> List[Tuple[int, int]]:
-    """奇数 pattern 的二维交换 ((1,2),(3,4)...)."""
+    """2D exchange with the odd pattern ((1,2),(3,4)...)."""
     n_t, n_lam = len(temps), len(lambdas)
     accepted = []
     for cj in range(n_lam):
@@ -181,12 +183,12 @@ def odd_parity_exchange(
 
 
 class REMD2DSampler:
-    """二维 REST2×REMD 编排器.
+    """2D REST2 x REMD orchestrator.
 
-    与 openmm_gpu_refiner 的单进程 worker 复用: 每个 worker 增加 lam 参数,
-    system 构建后 apply_lambda(scalables, lam, context).
+    Reuses the single-process worker from openmm_gpu_refiner: each worker gains a lam
+    parameter, and after the system is built apply_lambda(scalables, lam, context) is run.
 
-    用法 (在 isrnaclong Level 4 替换 REST2Sampler):
+    Usage (replace REST2Sampler at isrnaclong Level 4):
         s = REMD2DSampler(n_t=6, lambdas=(1.0, 0.82, 0.67, 0.55))
         best_coords, best_e, diag = s.sample(coords, pairs, sequence)
     """
@@ -202,7 +204,7 @@ class REMD2DSampler:
         platform_name: str = "CPU",
         use_trirnasp: bool = False,
         trirnasp_energy_dir: Optional[str] = None,
-        trirnasp_scale: float = 0.003,  # 统一默认值: 0.003 (最优值)
+        trirnasp_scale: float = 0.003,  # unified default: 0.003 (optimal value)
     ):
         self.temps, self.lambdas = build_replica_grid(n_t, t_lo, t_hi, lambdas)
         self.n_steps = n_steps
@@ -217,7 +219,7 @@ class REMD2DSampler:
         return len(self.temps) * len(self.lambdas)
 
     def sample(self, coords, pairs, sequence=None, verbose=True):
-        """跑二维交换采样.
+        """Run 2D exchange sampling.
 
         Returns:
             (best_coords_nm, best_energy, diagnostics)
@@ -233,8 +235,8 @@ class REMD2DSampler:
         n_tot = _clamp_replicas_by_memory(n_tot, mem_per_proc_gb=1.0)
         _, per_threads = _balance_replicas_threads(n_tot)
         if verbose:
-            print(f"    [2D-REMD] {len(self.temps)}T x {len(self.lambdas)}λ "
-                  f"= {n_tot} 副本, 每副本 {per_threads} 线程")
+            print(f"    [2D-REMD] {len(self.temps)}T x {len(self.lambdas)}lambda "
+                  f"= {n_tot} replicas, {per_threads} threads each")
 
         ctx = mp.get_context("spawn")
         conns, procs = [], []
@@ -252,7 +254,7 @@ class REMD2DSampler:
                 rid += 1
 
         n_rounds = max(1, self.n_steps // self.exchange_interval)
-        acc_T = [0] * len(self.temps)          # 温度维每格尝试计数
+        acc_T = [0] * len(self.temps)          # temperature-axis acceptance per rung
         att_T = [0] * len(self.temps)
         acc_L = [0] * len(self.lambdas)
         att_L = [0] * len(self.lambdas)
@@ -263,7 +265,7 @@ class REMD2DSampler:
 
         try:
             for rnd in range(n_rounds):
-                # 收集能量
+                # Collect energies
                 energies, positions = {}, {}
                 for r in sorted(alive):
                     try:
@@ -280,7 +282,7 @@ class REMD2DSampler:
                 if not energies:
                     break
 
-                # 交换决策 (偶偶交替)
+                # Exchange decision (odd/even alternation)
                 if rnd % 2 == 0:
                     swaps = try_exchange_2d(energies, self.temps, self.lambdas)
                 else:
@@ -296,14 +298,14 @@ class REMD2DSampler:
                                      acc_L, att_L, True)
                     except (BrokenPipeError, EOFError):
                         pass
-                # 未交换的副本也要记一次"尝试未接受"
+                # Replicas that did not swap still count an attempted-but-unaccepted exchange
                 for a, b in _all_neighbor_pairs(len(self.temps),
                                                 len(self.lambdas)):
                     if a in sent or b in sent:
                         continue
                     if a in energies and b in energies and rnd % 2 == (
                             0 if (b - a == len(self.lambdas)) else 1):
-                        pass  # 只统计本 pattern 涉及的邻居对
+                        pass  # only count neighbor pairs covered by this round's parity pattern
                 for r in sorted(alive):
                     if r in sent:
                         continue
@@ -352,15 +354,15 @@ def _all_neighbor_pairs(n_t: int, n_lam: int):
 
 
 def _record_axis(a, b, lambdas, acc_T, att_T, acc_L, att_L, ok):
-    """按轴记录接受/尝试次数."""
+    """Record accept/attempt counts per axis."""
     n_lam = len(lambdas)
     ra, ca = _row(a, n_lam), _col(a, n_lam)
     rb, cb = _row(b, n_lam), _col(b, n_lam)
-    if ca == cb:  # 温度维
+    if ca == cb:  # temperature axis
         att_T[min(ra, rb)] += 1
         if ok:
             acc_T[min(ra, rb)] += 1
-    else:         # λ 维
+    else:         # lambda axis
         att_L[min(ca, cb)] += 1
         if ok:
             acc_L[min(ca, cb)] += 1
@@ -381,13 +383,14 @@ def _remd2d_worker(
     trirnasp_energy_dir: Optional[str] = None,
     trirnasp_scale: float = 0.1,
 ):
-    """二维方案的单副本 worker: 温度 T + λ 缩放同时生效.
+    """Single-replica worker for the 2D scheme: temperature T and lambda scaling act together.
 
-    TriRNASP 统计势也随 λ 耦合缩放 (REST2 哲学):
-      effective_scale = trirnasp_scale × lam
-      高温/低λ副本弱化统计势 → 力场熵主导探索 (统计势从室温结构
-      统计而来, 高温下本就不该全强生效);
-      低温副本保持强度 → 用天然几何偏好精修.
+    The TriRNASP statistical potential is also coupled to lambda scaling (REST2 philosophy):
+      effective_scale = trirnasp_scale x lam
+      Hot/low-lambda replicas weaken the statistical potential -> force-field entropy drives
+      exploration (the potential is derived from room-temperature structures, so it should not
+      apply at full strength at high temperature);
+      cold replicas keep full strength -> refine with natural geometric preferences.
     """
     try:
         import openmm as mm
@@ -404,7 +407,7 @@ def _remd2d_worker(
         L = len(coords)
         system, coords_nm, scalables = _build_lambda_scaled_system(coords, pairs)
 
-        # ── TriRNASP 外力 (必须在建 Simulation 前加入 system) ──
+        # ── TriRNASP external force (must be added to the system before building the Simulation) ──
         tri_potential = None
         tri_force = None
         if use_trirnasp and sequence:
@@ -418,7 +421,7 @@ def _remd2d_worker(
                     tri_force.addParticle(p_idx, [0.0, 0.0, 0.0])
                 system.addForce(tri_force)
             except Exception as exc_tri:
-                print(f"    [2D worker {rid}] TriRNASP 初始化失败: {exc_tri}")
+                print(f"    [2D worker {rid}] TriRNASP init failed: {exc_tri}")
                 tri_potential = None
                 tri_force = None
 
@@ -442,24 +445,24 @@ def _remd2d_worker(
         sim = Simulation(topo, system, integrator, plat, props)
         sim.context.setPositions(coords_nm * unit.nanometer)
 
-        # 本副本的 λ 缩放 (力场溶质项 + TriRNASP 有效强度)
+        # Lambda scaling for this replica (force-field solute terms + TriRNASP effective strength)
         apply_lambda(scalables, lam, sim.context)
-        # 双重耦合: sigmoid(温度) × λ — 层次二+层次三的组合
-        #   温度维: 高温副本统计势非线性衰减 (分工: 折叠→拓扑→仅连接性)
-        #   λ 维:   低λ副本进一步弱化 (REST2 溶质 tempering 哲学)
+        # Dual coupling: sigmoid(temperature) x lambda - combination of hierarchy 2 + hierarchy 3
+        #   temperature axis: statistical potential decays nonlinearly for hot replicas (division: folding -> topology -> connectivity only)
+        #   lambda axis:    low-lambda replicas are weakened further (REST2 solute-tempering philosophy)
         from torusfold.scheme2.rest2_remd_2d import tri_effective_scale
         eff_scale = tri_effective_scale(trirnasp_scale, temperature) * lam
 
-        TRI_KBT = 2.494                     # kBT@300K → kJ/mol
-        TRI_MAX_F = 500.0                   # 单粒子力上限 (kJ/mol/nm)
+        TRI_KBT = 2.494                     # kBT@300K -> kJ/mol
+        TRI_MAX_F = 500.0                   # per-particle force cap (kJ/mol/nm)
 
         def _update_tri_forces():
-            """重算 TriRNASP 梯度并写入外力 (capped, 随 λ 缩放)."""
+            """Recompute the TriRNASP gradient and write it to the external force (capped, scaled by lambda)."""
             pos_A = sim.context.getState(
                 getPositions=True).getPositions(asNumpy=True)._value * 10.0
             coords_3b = pos_A.reshape(L, 3, 3)
             _, grad = tri_potential.score_with_gradient(coords_3b, sequence)
-            f = -grad * eff_scale * TRI_KBT * 10.0          # kBT/A → kJ/mol/nm
+            f = -grad * eff_scale * TRI_KBT * 10.0          # kBT/A -> kJ/mol/nm
             norms_sq = (f * f).sum(axis=-1, keepdims=True)
             over = norms_sq > TRI_MAX_F * TRI_MAX_F
             if over.any():
@@ -474,7 +477,7 @@ def _remd2d_worker(
             tri_force.updateParametersInContext(sim.context)
 
         if tri_potential is not None:
-            _update_tri_forces()   # minimize 前生效
+            _update_tri_forces()   # applied before minimize
 
         sim.minimizeEnergy(maxIterations=1000)
 
@@ -491,14 +494,14 @@ def _remd2d_worker(
             elif cmd[0] == "swap":
                 sim.context.setPositions(np.asarray(cmd[1]) * unit.nanometer)
                 sim.context.setVelocitiesToTemperature(temperature * unit.kelvin)
-                # swap 后坐标变了, 刷新统计势外力
+                # coordinates changed after a swap, refresh the statistical-potential external force
                 if tri_potential is not None:
                     _update_tri_forces()
-            # keep: 继续
+            # keep: continue
 
             sim.step(exchange_interval)
             if tri_potential is not None:
-                _update_tri_forces()   # 每周期 (=exchange_interval=1000步) 刷新
+                _update_tri_forces()   # refresh each cycle (= exchange_interval = 1000 steps)
             st = sim.context.getState(getEnergy=True, getPositions=True)
             e_cur = st.getPotentialEnergy()._value
             pos_cur = st.getPositions(asNumpy=True)._value
@@ -516,21 +519,21 @@ def _remd2d_worker(
             pass
 
 
-# ── 判据自检 ─────────────────────────────────────────────────────
+# ── Criterion self-check ─────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     rng = np.random.default_rng(42)
     temps, lambdas = build_replica_grid()
-    print(f"Grid: {len(temps)}T x {len(lambdas)}λ = "
+    print(f"Grid: {len(temps)}T x {len(lambdas)}lambda = "
           f"{len(temps)*len(lambdas)} replicas")
     print(f"T: {[f'{t:.0f}' for t in temps]}")
-    print(f"λ: {lambdas}")
+    print(f"lambda: {lambdas}")
 
-    # 构造能量场: 高温副本能量高, 低λ副本能量低 (物理合理方向)
+    # Build an energy landscape: hot replicas are high-energy, low-lambda replicas low-energy (physically sensible direction)
     energies = {}
     for ri, t in enumerate(temps):
         for cj, lam in enumerate(lambdas):
-            base = 50000 + 80 * (t - 300)              # 温度升 → E 升
+            base = 50000 + 80 * (t - 300)              # E rises with temperature
             energies[ri * len(lambdas) + cj] = base * lam + 5000
 
     sw = try_exchange_2d(energies, temps, lambdas)
@@ -539,9 +542,10 @@ if __name__ == "__main__":
         print(f"  ({_row(a,len(lambdas))},{_col(a,len(lambdas))}) <-> "
               f"({_row(b,len(lambdas))},{_col(b,len(lambdas))})")
 
-    # 判据方向检查: 温度低的副本能量低 → 向上交换应难, 向下应易
-    # (构造中 E ∝ T×λ, 低T高λ vs 高T低λ 有交叉点)
-    e_cold_strict = energies[0]                 # T=300, λ=1.0
-    e_hot_loose = energies[len(lambdas)*(len(temps)-1)]  # T_max, λ_min
-    assert e_hot_loose > e_cold_strict or True  # 方向性由构造保证
+    # Criterion direction check: low-temperature replicas are low-energy -> upward swaps should be
+    # hard and downward swaps easy (E is proportional to T x lambda in the construction, so
+    # low-T/high-lambda vs high-T/low-lambda cross over)
+    e_cold_strict = energies[0]                 # T=300, lambda=1.0
+    e_hot_loose = energies[len(lambdas)*(len(temps)-1)]  # T_max, lambda_min
+    assert e_hot_loose > e_cold_strict or True  # direction guaranteed by construction
     print("[PASS] 2D exchange criteria computed without error")

@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """metadynamics_sampler.py — Well-Tempered Metadynamics for circRNA.
 
-关键改进:
-1. 偏置势通过 CustomExternalForce 注入 (不修改坐标)
+Key improvements:
+1. The bias potential is injected via CustomExternalForce (coordinates are not modified)
 2. CV-specific sigma (BSJ=2nm, nc=0.1, Rg=1nm)
-3. hill_height 按系统大小缩放
-4. 平滑 nc CV 梯度 (sigmoid switching)
-5. well-tempered 自适应 hill 高度
+3. hill_height scaled by system size
+4. smooth nc CV gradient (sigmoid switching)
+5. well-tempered adaptive hill heights
 
-Level 3.5 GPU 迁移 (2026-08-26):
-  _add_bias 内循环 (hills × particles × pairs) 用 torch 向量化.
-  OpenMM 集成不变 — numpy 写回 CustomExternalForce.
+Level 3.5 GPU migration (2026-08-26):
+  The _add_bias inner loops (hills × particles × pairs) are vectorized with torch.
+  The OpenMM integration is unchanged — forces are written back to CustomExternalForce via numpy.
 """
 from __future__ import annotations
 
@@ -259,11 +259,11 @@ def _compute_bias_forces_cpu(
 class MetaDynamicsSampler:
     """Well-Tempered Metadynamics.
 
-    每 hill_freq 步:
-      1. 读取 P 坐标, 计算3个 CV
-      2. 添加 Gaussian hill (存入列表)
-      3. 移除旧偏置力, 重建所有 hill 的偏置力
-      4. reinitialize (保持坐标+速度)
+    Every hill_freq steps:
+      1. Read the P coordinates and compute the 3 CVs
+      2. Deposit a Gaussian hill (appended to the list)
+      3. Remove the old bias forces and rebuild them from all hills
+      4. Reinitialize (coordinates and velocities are preserved)
     """
 
     def __init__(
@@ -351,7 +351,7 @@ class MetaDynamicsSampler:
         P_idx = [3 * i for i in range(self.L)]
         topo = _create_3bead_topology(self.L)
 
-        # ── 单个累积 bias force ──
+        # ── Single accumulating bias force ──
         _bias_force_obj = mm.CustomExternalForce("fx*x + fy*y + fz*z")
         _bias_force_obj.addPerParticleParameter("fx")
         _bias_force_obj.addPerParticleParameter("fy")
@@ -419,7 +419,7 @@ class MetaDynamicsSampler:
                       f"BSJ={cv1:.2f}nm nc={cv2:.2f} Rg={cv3:.2f}nm "
                       f"E={energy:.0f} hills={len(hills)}")
 
-        # Final minimization: 清零 bias 力
+        # Final minimization: zero out the bias forces
         for i in range(self.L):
             _bias_force_obj.setParticleParameters(
                 i, P_idx[i], [0.0, 0.0, 0.0])
@@ -433,18 +433,19 @@ class MetaDynamicsSampler:
             best_pos = pf
 
         if verbose:
-            print(f"    MetaD 完成: {len(hills)} hills, best E={best_energy:.0f}")
+            print(f"    MetaD done: {len(hills)} hills, best E={best_energy:.0f}")
         return best_pos, best_energy
 
     def _compute_bias_forces(self, p_coords_A, hills_list):
-        """Dispatch to torch GPU kernel or numpy CPU fallback.
+        """Dispatch to the torch GPU kernel or the numpy CPU fallback.
 
-        GPU 加速只在 hills×L 足够大时有效 (小系统传输开销 > 计算收益).
-        阈值: hills × L > 5000 时走 GPU.
+        GPU acceleration only pays off when hills × L is large enough
+        (for small systems, transfer overhead exceeds the compute gains).
+        Threshold: use the GPU when hills × L > 5000.
         """
         n_hills = len(hills_list)
-        # GPU 传输开销 ~1-2ms, 只在计算量足够大时才值得
-        # 阈值估算: L=64 需 >500 hills, L=2013 需 >20 hills
+        # GPU transfer overhead is ~1-2ms; only worthwhile when the compute load is large enough
+        # Rough thresholds: L=64 needs >500 hills, L=2013 needs >20 hills
         use_gpu = (self._torch_ok and TORCH_AVAILABLE
                    and self._nc_p1 is not None
                    and n_hills * self.L > 20000)
@@ -515,7 +516,7 @@ class MetaDynamicsSampler:
 
 
 # ══════════════════════════════════════════════════════════════════════
-#  冒烟测试 (不需要 OpenMM)
+#  Smoke test (does not require OpenMM)
 # ══════════════════════════════════════════════════════════════════════
 
 def _smoke_test():

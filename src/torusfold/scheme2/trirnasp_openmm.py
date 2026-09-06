@@ -112,7 +112,7 @@ class TriRNASPPotential:
                         Auto-detects from external/TriRNASP/Energy/
         """
         if energy_dir is None:
-            # 绝对路径: 项目根 = src/torusfold/scheme2/../../..
+            # Absolute path: project root = src/torusfold/scheme2/../../..
             _project_root = Path(__file__).resolve().parents[3]
             energy_dir = str(_project_root / "external" / "TriRNASP" / "Energy")
 
@@ -131,11 +131,13 @@ class TriRNASPPotential:
         print(f"  [TriRNASP] Loaded tables from {energy_dir}")
 
     def score(self, coords_3bead: np.ndarray, sequence: str) -> float:
-        """Compute TriRNASP energy (kBT) — 向量化版.
+        """Compute the TriRNASP energy (kBT) — vectorized version.
 
-        与原逐原子三重循环等价, 但距离矩阵一次计算,
-        三体循环用 numpy 花式索引批量查表. 复杂度仍 O(N·k²)
-        (k=R0 内邻居数), 但常数从 ~200x Python 循环降到向量操作.
+        Equivalent to the original per-atom triple loop, but the distance
+        matrix is computed once and the three-body loop does batched table
+        lookups with numpy fancy indexing. Complexity is still O(N·k²)
+        (k = number of neighbors within R0), but the constant factor drops
+        from ~200x Python-loop iterations to vectorized operations.
         """
         atoms = self._build_atoms(coords_3bead, sequence)
         n_atoms = len(atoms[0]) if atoms else 0
@@ -143,13 +145,13 @@ class TriRNASPPotential:
             return 0.0
         atom_types, atom_res, _beads, atom_coords = atoms
 
-        # 全距离平方矩阵 (float32 省 1/2 内存; 6024² × 4B ≈ 145MB)
+        # Full squared-distance matrix (float32 halves the memory; 6024² × 4B ≈ 145MB)
         diff = atom_coords[:, None, :] - atom_coords[None, :, :]
         dist_sq = (diff * diff).sum(-1).astype(np.float32)
 
         inv_bw = np.float32(1.0 / BIN_WIDTH_ROUGH)
 
-        # ── 排除项 (pair 级常数贡献, 与原逻辑一致) ──
+        # ── Exclusions (pair-level constant contributions, consistent with the original logic) ──
         iu, ju = np.triu_indices(n_atoms, k=1)
         d_ij = dist_sq[iu, ju]
         res_diff = np.abs(atom_res[iu].astype(np.int32) - atom_res[ju].astype(np.int32))
@@ -170,7 +172,7 @@ class TriRNASPPotential:
         e_const[m3] += 0.2
         excl |= m3
 
-        # ── 合法 pair 候选 (进入三体循环) ──
+        # ── Valid pair candidates (entering the three-body loop) ──
         cand_mask = (~excl) & (d_ij < np.float32(R0_SQ))
         ci, cj = iu[cand_mask], ju[cand_mask]
 
@@ -181,14 +183,14 @@ class TriRNASPPotential:
 
         total = float(e_const.sum())
 
-        # ── 三体循环: 对每个合法 pair (i,j), 找 k>j 且在两球内 ──
-        # 邻接表 (R0-0.3 内), 用距离矩阵直接筛 (不再调 KD-tree)
+        # ── Three-body loop: for each valid pair (i,j), find k>j inside both spheres ──
+        # Neighborhood built from the distance matrix (within R0-0.3); no KD-tree needed
         r_cut = np.float32((R0 - 0.3) ** 2)
         ti_all, tj_all, tk_all = atom_types[ci], atom_types[cj], None
 
         for idx in range(len(ci)):
             i, j = int(ci[idx]), int(cj[idx])
-            row_j = dist_sq[j]                      # j 到所有原子
+            row_j = dist_sq[j]                      # distances from j to every atom
             ks = np.nonzero(
                 (np.arange(n_atoms) > j) &
                 (row_j < r_cut) &
@@ -201,7 +203,7 @@ class TriRNASPPotential:
             d23_sq = dist_sq[j, ks].astype(np.float64)
             ri, rj = atom_res[i], atom_res[j]
 
-            # 排除规则 (三体)
+            # Exclusion rules (three-body)
             bad = (d13_sq <= EXCLUSION_R1_SQ) | (d23_sq <= EXCLUSION_R1_SQ)
             bad |= ((d13_sq <= EXCLUSION_R2_SQ) & (np.abs(ri - atom_res[ks]) > 1))
             bad |= ((d23_sq <= EXCLUSION_R2_SQ) & (np.abs(rj - atom_res[ks]) > 1))
@@ -228,12 +230,12 @@ class TriRNASPPotential:
         return total
 
     def _build_atoms(self, coords_3bead: np.ndarray, sequence: str):
-        """构造扁平原子数组 (types, res_idx, bead_idx, coords).
+        """Build a flat atom array (types, res_idx, bead_idx, coords).
 
         Returns:
             (atom_types[int32], atom_res[int32], atom_beads[int32],
              atom_coords[float32 (N,3)])
-            或 None (残基不足)
+            or None (not enough residues)
         """
         L = len(sequence)
         codes_c = np.array([_type_code(sequence[i], "C4'") for i in range(L)],
@@ -268,17 +270,20 @@ class TriRNASPPotential:
     ) -> Tuple[float, np.ndarray]:
         """Compute energy + ANALYTIC gradient (soft-binned linearization).
 
-        势能表是分段常数 → bin 内梯度为 0、边界处无定义. 我们用
-        soft binning 线性化: 对每个三体的 (d12,d13,d23), 在 bin 间
-        用前向差分近似 dE/dd, 链式法则分配到三原子坐标.
+        The energy table is piecewise constant, so the gradient inside each
+        bin is zero and undefined at bin boundaries. We linearize it with soft
+        binning: for each triplet (d12, d13, d23), dE/dd is approximated by
+        forward differences between bins, then distributed onto the three atom
+        coordinates via the chain rule.
 
-        复杂度 = 1×score 循环 + O(#triplets) 梯度累加.
-        对比旧有限差分 (6L 次 score): 2008nt 从 ~12min → <1s.
+        Complexity = one score loop + O(#triplets) gradient accumulation.
+        Compared with the old finite-difference scheme (6L score calls),
+        a 2008-nt system drops from ~12 min to <1 s.
 
         Args:
             coords_3bead: (L, 3, 3) Angstroms
             sequence: ACGU string
-            p_only: 兼容参数 (解析版天然给出全原子梯度, 忽略)
+            p_only: kept for compatibility (the analytic version already returns full-atom gradients; ignored)
 
         Returns:
             (energy, gradient) — gradient shape (L, 3, 3) in kBT/Angstrom
@@ -295,7 +300,7 @@ class TriRNASPPotential:
 
         inv_bw = 1.0 / BIN_WIDTH_ROUGH
 
-        # ── pair 级常数项 (同 score) ──
+        # ── Pair-level constant terms (same as in score) ──
         iu, ju = np.triu_indices(n_atoms, k=1)
         d_ij = dist_sq[iu, ju]
         res_diff = np.abs(atom_res[iu].astype(np.int32) - atom_res[ju].astype(np.int32))
@@ -318,18 +323,18 @@ class TriRNASPPotential:
 
         r_cut = (R0 - 0.3) ** 2
         arange_n = np.arange(n_atoms)
-        # 前向差分步长 (bin 宽度的 1/4 — 足够分辨 bin 边界又不越界太远)
+        # Forward-difference step (1/4 bin width — resolves bin boundaries without overshooting)
         h = BIN_WIDTH_ROUGH * 0.25
 
-        # bin 导数缓存: de/db[b] = E[b+1]-E[b] (沿该维)
+        # Bin-derivative cache: de/db[b] = E[b+1]-E[b] along that dimension
         def _dbin(axis_size):
-            return None  # 直接按需查表 (表稀疏, 缓存命中率低)
+            return None  # look up on demand (the table is sparse; cache hit rate would be low)
 
-        # ── 向量化三体循环: chunk 处理防止内存爆炸 ──
+        # ── Vectorized three-body loop: process in chunks to avoid memory blowup ──
         n_pairs = len(ci)
         r_cut = (R0 - 0.3) ** 2
         arange_n = np.arange(n_atoms)
-        chunk_size = 10000  # 每 chunk 处理的 pair 数
+        chunk_size = 10000  # pairs processed per chunk
 
         for c_start in range(0, n_pairs, chunk_size):
             c_end = min(c_start + chunk_size, n_pairs)
@@ -338,7 +343,7 @@ class TriRNASPPotential:
             b12_c = b12_arr[c_start:c_end]
             n_c = c_end - c_start
 
-            # k 候选矩阵 (n_chunk, n_atoms)
+            # k-candidate matrix (n_chunk, n_atoms)
             k_ok = (arange_n[None, :] > cj_c[:, None]) & \
                    (dist_sq[cj_c] < r_cut) & (dist_sq[ci_c] < R0_SQ)
 
@@ -392,7 +397,7 @@ class TriRNASPPotential:
             e_vals = self._rough[idx_table]
             total += float(e_vals.sum())
 
-            # 批量梯度
+            # Batch gradients
             safe_b12p = np.minimum(tb12 + 1, 3)
             safe_b13p = np.minimum(b13 + 1, 3)
             safe_b23p = np.minimum(b23 + 1, 7)
@@ -412,7 +417,7 @@ class TriRNASPPotential:
                 np.add.at(grad_out, (atom_res[ci_c], atom_beads[ci_c]), f12_pair)
                 np.add.at(grad_out, (atom_res[cj_c], atom_beads[cj_c]), -f12_pair)
 
-            # d13 / d23 力: 直接 scatter (per-triplet)
+            # d13 / d23 forces: scattered directly (per-triplet)
             if np.any(ded_d13 != 0.0):
                 u13 = (atom_coords[ii_f] - atom_coords[kk_f]) / \
                       np.maximum(g_d13[:, None], 1e-8)

@@ -27,7 +27,7 @@ import numpy as np
 @dataclass
 class SolverConfig:
     """Configuration for the constraint solver."""
-    bond_length: float = 5.9        # Å, P-P backbone distance (A-form RNA 真值)
+    bond_length: float = 5.9        # Å, P-P backbone distance (A-form RNA ground truth)
     pair_distance: float = 10.6     # Å, WC C1'-C1' distance
     clash_distance: float = 3.0     # Å, minimum non-bonded distance
     n_samples: int = 20             # Number of conformations to sample
@@ -466,11 +466,14 @@ class GeometricConstraintSolver:
         cos_angles = np.sum(v1 * v2, axis=1)[:, np.newaxis] / norms
         energy += k_dih * np.sum((cos_angles - (-0.276)) ** 2)
 
-        # 7. A-form virtual dihedral 扭转势 (正路三维化):
-        #    连续 4 个 P 原子的二面角趋向 ~70° (A-form 右手螺旋特征扭转)。
-        #    用 cos 差做周期性惩罚, 不钉位置只奖励正确扭转。circRNA 闭合
-        #    约束会自然引入 twist defect (累积扭转须凑 360° 整数倍), 这是
-        #    物理正确的: circRNA 不是均匀螺旋, 有局部扭转涨落。
+        # 7. A-form virtual dihedral torsional potential (proper 3D path):
+        #    The dihedral of 4 consecutive P atoms tends toward ~70° (the
+        #    right-handed helical signature twist of A-form RNA). We apply a
+        #    periodic penalty on the cosine difference, rewarding the correct
+        #    twist without pinning positions. The circRNA closure constraint
+        #    naturally introduces twist defects (the cumulative twist must sum
+        #    to an integer multiple of 360°), which is physically correct: a
+        #    circRNA is not a uniform helix and carries local twist fluctuations.
         if L >= 4:
             p0, p1, p2, p3 = coords[:-3], coords[1:-2], coords[2:-1], coords[3:]
             b1, b2, b3 = p1 - p0, p2 - p1, p3 - p2
@@ -485,7 +488,7 @@ class GeometricConstraintSolver:
             y = np.sum(m1 * n2, axis=1)
             dih = np.arctan2(y, x)  # [-pi, pi]
             k_torsion = 0.8
-            target_dih = 1.22  # ~70°, A-form 右手螺旋特征扭转
+            target_dih = 1.22  # ~70°, A-form right-handed helical signature twist
             energy += k_torsion * np.sum((np.cos(dih) - np.cos(target_dih)) ** 2)
 
         return energy

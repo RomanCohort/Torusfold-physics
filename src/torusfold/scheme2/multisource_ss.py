@@ -1,15 +1,15 @@
 """
-multisource_ss.py — 多源二级结构共识预测
+multisource_ss.py - multi-source secondary-structure consensus prediction
 
-灵感来源: structRFM 的 MUSES (Multiple Sequence & Structure Prediction Fusion)
-- 5 个预测器加权平均 → MEA 解码 → 共识 SS
+Inspired by: structRFM's MUSES (Multiple Sequence & Structure Prediction Fusion)
+- weighted average of 5 predictors -> MEA decoding -> consensus SS
 
-简化版: 用 ViennaRNA + 结构一致性加权，不需要额外依赖
+Simplified: uses ViennaRNA + structural-consistency weighting, no extra dependencies
 
-用法:
+Usage:
     from .multisource_ss import multisource_consensus_ss
 
-    # 输入: 序列 + 可选 bpp 矩阵
+    # input: sequence + optional bpp matrix
     ss_consensus, bpp_fused = multisource_consensus_ss(sequence, bpp_vienna)
 """
 
@@ -18,13 +18,13 @@ from typing import Optional, Tuple, List
 
 
 def _vienna_fold_consensus(sequence: str) -> Tuple[str, np.ndarray]:
-    """单源: ViennaRNA fold → (ss_string, bpp_matrix)"""
+    """Single source: ViennaRNA fold -> (ss_string, bpp_matrix)"""
     try:
         import RNA
         fc = RNA.fold_compound(sequence)
         ss, mfe = fc.mfe()
         # ViennaRNA bpp: bp[i] = probability that i pairs with any j>i
-        # 转为 LxL 对称矩阵
+        # convert to an LxL symmetric matrix
         L = len(sequence)
         bpp_0 = np.zeros((L, L), dtype=np.float32)
         bp = fc.bpp()
@@ -39,7 +39,7 @@ def _vienna_fold_consensus(sequence: str) -> Tuple[str, np.ndarray]:
 
 
 def _ss_to_contact_matrix(ss: str) -> np.ndarray:
-    """SS 字符串 → 接触矩阵 (0/1)"""
+    """SS string -> contact matrix (0/1)"""
     L = len(ss)
     contact = np.zeros((L, L), dtype=np.float32)
     stack = []
@@ -59,7 +59,7 @@ def _ss_to_contact_matrix(ss: str) -> np.ndarray:
 
 def _consensus_from_bpp_list(bpp_list: List[np.ndarray],
                                weights: Optional[List[float]] = None) -> np.ndarray:
-    """多源 bpp 加权平均 → 共识 bpp"""
+    """Weighted average of multi-source bpp -> consensus bpp"""
     if weights is None:
         weights = [1.0] * len(bpp_list)
     weights = np.array(weights, dtype=np.float32)
@@ -73,12 +73,12 @@ def _consensus_from_bpp_list(bpp_list: List[np.ndarray],
 
 def _confidence_weighted_consensus(ss_list: List[str],
                                     bpp_list: List[np.ndarray]) -> Tuple[str, np.ndarray]:
-    """置信度加权共识:
-    - 每个预测器的 bpp 矩阵用配对概率作为置信度
-    - 高置信度的预测器权重更大
+    """Confidence-weighted consensus:
+    - each predictor's bpp matrix uses base-pair probability as its confidence
+    - higher-confidence predictors get larger weights
     """
     L = len(ss_list[0])
-    # 计算每个预测器的置信度: 对角线元素平均值
+    # per-predictor confidence: average of the diagonal elements
     confidences = []
     for bpp in bpp_list:
         if bpp is not None:
@@ -88,21 +88,21 @@ def _confidence_weighted_consensus(ss_list: List[str],
         else:
             confidences.append(0.01)
 
-    # 归一化权重
+    # normalize the weights
     confidences = np.array(confidences, dtype=np.float32)
     weights = confidences / confidences.sum()
 
-    # 加权 bpp
+    # weighted bpp
     fused_bpp = _consensus_from_bpp_list(bpp_list, weights.tolist())
 
-    # 共识 SS: 多数投票 (只对 Vienna 格式符号)
+    # consensus SS: majority vote (only over Vienna-format symbols)
     consensus = list(ss_list[0])
     for pos in range(L):
         votes = {}
         for ss in ss_list:
             ch = ss[pos] if pos < len(ss) else '.'
             votes[ch] = votes.get(ch, 0) + 1
-        # 优先投票: 配对 > 未配对
+        # tie-break: paired > unpaired
         paired = {k: v for k, v in votes.items() if k != '.'}
         if paired:
             best_paired = max(paired, key=paired.get)
@@ -122,18 +122,18 @@ def multisource_consensus_ss(
     use_nussinov_fallback: bool = True,
 ) -> Tuple[str, np.ndarray]:
     """
-    多源二级结构共识预测
+    Multi-source secondary-structure consensus prediction
 
-    简化版 MUSES: ViennaRNA + Nussinov(可选) + 置信度加权
+    Simplified MUSES: ViennaRNA + Nussinov (optional) + confidence weighting
 
     Args:
-        sequence: RNA 序列 (ACGU)
-        bpp_vienna: 可选的预计算 ViennaRNA bpp 矩阵
-        use_nussinov_fallback: 是否用 Nussinov 作为第二个预测器
+        sequence: RNA sequence (ACGU)
+        bpp_vienna: optional precomputed ViennaRNA bpp matrix
+        use_nussinov_fallback: whether to use Nussinov as the second predictor
 
     Returns:
-        ss_consensus: 共识二级结构字符串
-        bpp_fused: 融合 bpp 矩阵 (L, L)
+        ss_consensus: consensus secondary-structure string
+        bpp_fused: fused bpp matrix (L, L)
     """
     L = len(sequence)
     ss_list = []
@@ -141,7 +141,7 @@ def multisource_consensus_ss(
 
     # Source 1: ViennaRNA fold
     if bpp_vienna is not None:
-        # 从 bpp 反推 SS
+        # reconstruct SS from bpp
         ss_v = '.' * L
         stack = []
         for i in range(L):
@@ -157,7 +157,7 @@ def multisource_consensus_ss(
             ss_list.append(ss_v)
             bpp_list.append(bpp_v)
 
-    # Source 2: Nussinov (简单最大匹配)
+    # Source 2: Nussinov (simple maximum matching)
     if use_nussinov_fallback and L <= 500:
         ss_n, bpp_n = _nussinov_fold(sequence)
         ss_list.append(ss_n)
@@ -173,11 +173,11 @@ def multisource_consensus_ss(
 
 
 def _nussinov_fold(sequence: str) -> Tuple[str, np.ndarray]:
-    """Nussinov 最大匹配算法 (简单基线)"""
+    """Nussinov maximum-matching algorithm (simple baseline)"""
     L = len(sequence)
     can_pair = np.zeros((L, L), dtype=bool)
 
-    # RNA 碱基配对规则
+    # RNA base-pairing rules
     pairs = {('A', 'U'), ('U', 'A'), ('G', 'C'), ('C', 'G'), ('G', 'U'), ('U', 'G')}
     for i in range(L):
         for j in range(i + 4, L):  # min loop = 4
@@ -199,7 +199,7 @@ def _nussinov_fold(sequence: str) -> Tuple[str, np.ndarray]:
                         score += dp[k+1, j-1]
                     dp[i, j] = max(dp[i, j], score)
 
-    # 回溯
+    # traceback
     ss = ['.' ] * L
     traceback_stack = [(0, L - 1)]
     while traceback_stack:
@@ -229,7 +229,7 @@ def _nussinov_fold(sequence: str) -> Tuple[str, np.ndarray]:
         if not found:
             traceback_stack.append((i, j-1))
 
-    # 构建 bpp 矩阵
+    # build the bpp matrix
     bpp = np.zeros((L, L), dtype=np.float32)
     for i in range(L):
         if ss[i] == '(':

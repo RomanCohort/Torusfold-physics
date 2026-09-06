@@ -163,6 +163,62 @@ commits — see [.claude/RESPONSIBLE_AI_USE.md](.claude/RESPONSIBLE_AI_USE.md).
 Team JLU-FBH (iGEM 2026). Primary developer: Ziyi Yan. Built in the Dry Lab at
 Jilin University.
 
+## For judges & non-experts (quick tour)
+
+You do **not** need to run the full pipeline to evaluate this tool:
+
+1. **See a predicted structure** — open
+   [`docs/viewer_standalone.html`](docs/viewer_standalone.html) in any browser
+   and load a PDB; it renders circRNA models (rotate / inspect residues).
+2. **Try the web UI** — `python serve.py` serves the Mol* viewer with live
+   logs and a Predict API at `http://127.0.0.1:8877`.
+3. **Reproduce the headline result** — install (below), put the 2013 nt
+   sequence in `sequence.txt`, run `python run_2013nt.py`, and inspect
+   `output_2013nt/isrnaclong_final.pdb`.
+
+Running the full ensemble needs external predictors and (ideally) a GPU — see
+[docs/DEPLOY_EXTERNAL.md](docs/DEPLOY_EXTERNAL.md).
+
+## AI / model disclosure
+
+This software **calls machine-learning RNA structure predictors as external
+tools**; it does **not** train them, and it ships no trained weights:
+
+| Model | Source | Used for | Weight/data provenance |
+|---|---|---|---|
+| RhoFold+ | Wang et al., *Nat. Methods* 2024 | per-chunk 3D prediction (`rhofold_wrapper`) | external checkpoint |
+| trRosettaRNA2 | Li et al., *Nat. Commun.* 2021;12:5934 | per-chunk 3D prediction (`trrna2_wrapper`) | external checkpoint |
+| RNAbpFlow | Bhattacharya-Lab/RNAbpFlow | 3D flow prediction / distance evidence (`ensemble_predictor`) | `RNA3DB.ckpt` (trained on RNA3DB/bpRNA), archived separately |
+| structRFM | inspired by Zhai et al., *Nat. Commun.* 2024 | optional multi-task heads (`multitask_heads`) | external checkpoint |
+
+The folding/refinement core of this repository is **physics-based
+(zero-training)**: CG MD, REST2×T-REMD, metadynamics and Amber14-OL3 — no
+learned model. No fine-tuning data is committed. Development used an AI coding
+assistant; see [.claude/RESPONSIBLE_AI_USE.md](.claude/RESPONSIBLE_AI_USE.md)
+for the team's responsibility policy.
+
+**Evaluation & limitations.** No experimental (wet-lab) validation has been
+performed yet for the demo construct. Independent validation is pending:
+2OIU crystal-structure recovery and replica-exchange acceptance checks. Known
+dead ends and open problems are recorded in
+[docs/NOTES.md](docs/NOTES.md) — please read it before extending the code.
+
+## Data formats & synthetic-biology standards
+
+Input: FASTA-like plain sequence (`sequence.txt`, `T`→`U` handled);
+secondary-structure strings (dot-bracket). Output: PDB (all-atom) + JSON
+metrics. This is a **structure-prediction** tool, so it does not emit SBOL /
+genetic-design constructs; where a circRNA is later cloned for wet-lab work the
+PDB is the geometry reference and the sequence can be re-exported to FASTA /
+GenBank as needed.
+
+## Testing & CI
+
+- `tests/test_smoke.py` — compiles every Python file and imports the
+  `torusfold.scheme2` package (needs only numpy).
+- `.gitlab-ci.yml` — runs the smoke suite on every push to keep `main` green.
+- Run locally: `pip install -e . && python -m pytest -q tests`.
+
 ## License
 
 [Apache-2.0](LICENSE). External components retain their own licenses

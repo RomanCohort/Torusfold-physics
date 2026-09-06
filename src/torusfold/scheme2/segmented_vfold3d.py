@@ -1,21 +1,22 @@
 """
-segmented_vfold3d.py — 分段 3D 预测 + Kabsch 拼装
+segmented_vfold3d.py - segmented 3D prediction + Kabsch assembly
 
-长序列拆成 ≤200nt 段，每段独立预测 3D:
-  - 集成预测: RhoFold+ + trRosettaRNA2 (置信度加权)
-  - 置信度加权融合: 高质量预测占更大权重
-  - 不确定性估计: 分歧大时标记为不确定
+Long sequences are split into <=200 nt segments, each predicted in 3D
+independently:
+  - ensemble prediction: RhoFold+ + trRosettaRNA2 (confidence-weighted)
+  - confidence-weighted fusion: high-quality predictions carry more weight
+  - uncertainty estimation: large predictor disagreement is flagged as uncertain
 
-改进 (v2):
-  1. 跨片段拓扑保持: 重叠区置信度加权 + 后处理弛豫
-  2. 集成预测: RhoFold+ + trRosettaRNA2
-  3. 不确定性估计: 预测器分歧作为不确定性指标
+Improvements (v2):
+  1. Cross-segment topology preservation: confidence-weighted overlap + post-relaxation
+  2. Ensemble prediction: RhoFold+ + trRosettaRNA2
+  3. Uncertainty estimation: predictor disagreement as an uncertainty signal
 
-公开 API:
-  kabsch_assemble_chunks()  — 确定性 Kabsch 拼装
-  segmented_vfold3d_pipeline() — 分段预测+拼装完整管线
-  confidence_weighted_assemble() — 置信度加权拼装
-  cross_chunk_relaxation() — 跨片段后处理弛豫
+Public API:
+  kabsch_assemble_chunks()  - deterministic Kabsch assembly
+  segmented_vfold3d_pipeline() - full segmented-prediction + assembly pipeline
+  confidence_weighted_assemble() - confidence-weighted assembly
+  cross_chunk_relaxation() - cross-chunk post-relaxation
 """
 from __future__ import annotations
 
@@ -27,28 +28,28 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 
-# ── 常量 ──
-MAX_SEGMENT_LEN = 200     # 每段最大长度 (nt)
-OVERLAP_LEN = 30          # 重叠区长度 (nt) — 增大到30nt缓解边界效应
-MIN_STEM_LEN = 3          # 最小茎长 (用于分段)
-BSJ_MARGIN = 20           # BSJ 附近额外 overlap (nt)
-P_BOND_LEN = 5.9          # P-P 键长 (A)
-WC_TARGET_DIST = 20.0     # Watson-Crick C1'-C1' 目标距离
-_PAIRING_DENSITY_HIGH = 0.3  # 配对密度 > 此值 → stem
-_PAIRING_DENSITY_LOW = 0.1   # 配对密度 < 此值 → bsj
+# ── constants ──
+MAX_SEGMENT_LEN = 200     # max length per segment (nt)
+OVERLAP_LEN = 30          # overlap length (nt) - raised to 30 nt to ease boundary effects
+MIN_STEM_LEN = 3          # minimum stem length (used for segmentation)
+BSJ_MARGIN = 20           # extra overlap (nt) near the BSJ
+P_BOND_LEN = 5.9          # P-P bond length (A)
+WC_TARGET_DIST = 20.0     # Watson-Crick C1'-C1' target distance
+_PAIRING_DENSITY_HIGH = 0.3  # pairing density above this -> stem
+_PAIRING_DENSITY_LOW = 0.1   # pairing density below this -> bsj
 
 
 def _score_chunk_quality(pdb_path: str, ss_chunk: str) -> float:
-    """评估单个 chunk 预测的置信度 (0-1).
+    """Score the confidence of a single chunk prediction (0-1).
 
-    综合因素:
-    - ss_coverage: 二级结构覆盖率 (配对残基比例)
-    - clash_score: P-P 碰撞惩罚 (距离 < 3Å 的 pair 数)
-    - compactness: 紧凑度 (radius of gyration / 理论值)
+    Composite factors:
+    - ss_coverage: secondary-structure coverage (fraction of paired residues)
+    - clash_score: P-P clash penalty (number of pairs closer than 3 A)
+    - compactness: compactness (radius of gyration / theoretical value)
 
     Args:
-        pdb_path: Vfold 输出的 PDB 路径
-        ss_chunk: chunk 的二级结构 (dot-bracket)
+        pdb_path: path to the Vfold-output PDB
+        ss_chunk: secondary structure of the chunk (dot-bracket)
 
     Returns:
         confidence score [0, 1]
@@ -57,11 +58,11 @@ def _score_chunk_quality(pdb_path: str, ss_chunk: str) -> float:
     if len(coords) < 3:
         return 0.0
 
-    # 1. 二级结构覆盖率
+    # 1. secondary-structure coverage
     n_paired = sum(1 for ch in ss_chunk if ch in "()")
     ss_coverage = n_paired / max(len(ss_chunk), 1)
 
-    # 2. 碰撞分数: P-P 距离 < 3Å 的 pair 数
+    # 2. clash score: number of P-P pairs closer than 3 A
     from itertools import combinations
     n_clash = 0
     for i, j in combinations(range(len(coords)), 2):
@@ -70,15 +71,15 @@ def _score_chunk_quality(pdb_path: str, ss_chunk: str) -> float:
             n_clash += 1
     clash_penalty = min(1.0, n_clash / max(len(coords), 1))
 
-    # 3. 紧凑度: RoG / 理论RoG
+    # 3. compactness: RoG / theoretical RoG
     centroid = coords.mean(axis=0)
     rog = np.sqrt(np.mean(np.sum((coords - centroid) ** 2, axis=1)))
-    # 理论 RoG: 对于均匀分布的链，RoG ≈ 0.35 * L * 5.9Å (P-P bond)
+    # theoretical RoG: for a uniformly extended chain, RoG ~ 0.35 * L * 5.9 A (P-P bond)
     L = len(coords)
     theoretical_rog = 0.35 * L * 5.9 if L > 1 else 1.0
     compactness = min(1.0, rog / max(theoretical_rog, 1.0))
 
-    # 综合分数: 高覆盖率好，低碰撞好，适中紧凑度好
+    # composite score: high coverage is good, few clashes are good, moderate compactness is good
     score = (
         0.4 * ss_coverage
         + 0.3 * (1.0 - clash_penalty)
@@ -90,17 +91,17 @@ def _score_chunk_quality(pdb_path: str, ss_chunk: str) -> float:
 def _select_best_candidate(
     candidate_pdbs: List[str], ss_chunk: str
 ) -> Tuple[str, float, int]:
-    """从多个候选中选最佳 chunk 预测.
+    """Pick the best chunk prediction from several candidates.
 
     Args:
-        candidate_pdbs: 候选 PDB 路径列表
-        ss_chunk: chunk 二级结构
+        candidate_pdbs: list of candidate PDB paths
+        ss_chunk: chunk secondary structure
 
     Returns:
         (best_pdb_path, best_score, best_index)
     """
     if not candidate_pdbs:
-        raise ValueError("无候选 PDB")
+        raise ValueError("no candidate PDBs")
 
     best_score = -1.0
     best_idx = 0
@@ -121,22 +122,22 @@ def split_sequence(
     is_circular: bool = True,
     msa_blocks: Optional[List[Dict]] = None,
 ) -> List[Dict]:
-    """把长序列拆成有重叠的段 (circular-aware).
+    """Split a long sequence into overlapping segments (circular-aware).
 
-    分段策略 (结构感知):
-    1. 找所有茎-环交界点 (paired→unpaired 或 unpaired→paired 转换)
-    2. 在每个交界点附近找最佳切分位置 (loop 中心优先)
-    3. 保证茎区不被切断: 切点在 loop 内, 茎完整保留在 chunk 内
-    4. 相邻段重叠 overlap 个残基 (在 loop 内, 供 Kabsch 对齐)
-    5. Circular-aware: BSJ 附近标记 bsj_aware=True, 额外 overlap
+    Segmentation strategy (structure-aware):
+    1. Find all stem-loop junctions (paired->unpaired or unpaired->paired transitions)
+    2. Near each junction, look for the best cut position (loop centers preferred)
+    3. Keep stems intact: cut inside loops, so each stem stays wholly inside a chunk
+    4. Adjacent segments overlap by `overlap` residues (inside loops, for Kabsch alignment)
+    5. Circular-aware: chunks near the BSJ are flagged bsj_aware=True with extra overlap
 
     Args:
-        sequence: RNA 序列
-        secondary_structure: 二级结构 (dot-bracket)
-        max_seg_len: 段最大长度
-        overlap: 重叠长度
-        is_circular: 是否环状
-        msa_blocks: 可选, [{"start","end","msa_path","source"}, ...]
+        sequence: RNA sequence
+        secondary_structure: secondary structure (dot-bracket)
+        max_seg_len: maximum segment length
+        overlap: overlap length
+        is_circular: whether the sequence is circular
+        msa_blocks: optional, [{"start","end","msa_path","source"}, ...]
 
     Returns:
         [{"seq", "ss", "start", "end", "overlap_start", "overlap_end",
@@ -144,7 +145,7 @@ def split_sequence(
     """
     if len(sequence) != len(secondary_structure):
         raise ValueError(
-            f"序列长度 ({len(sequence)}) ≠ 二级结构长度 ({len(secondary_structure)})。"
+            f"sequence length ({len(sequence)}) does not match secondary-structure length ({len(secondary_structure)})"
         )
     L = len(sequence)
     if L <= max_seg_len:
@@ -155,19 +156,19 @@ def split_sequence(
             "bsj_aware": is_circular,
         }]
 
-    # MSA-aware 分块
+    # MSA-aware segmentation
     if msa_blocks:
         return _split_with_msa_blocks(
             sequence, secondary_structure, max_seg_len, overlap,
             is_circular, msa_blocks,
         )
 
-    # ── 结构感知分段 ──
-    # 找所有茎-环交界点 (paired→unpaired 或 unpaired→paired)
+    # ── structure-aware segmentation ──
+    # find all stem-loop junctions (paired->unpaired or unpaired->paired)
     junctions = _find_junctions(secondary_structure)
 
-    # 在均匀切分点附近找最佳切分位置
-    # 搜索范围扩大到 ±100nt, 优先选 loop 中心
+    # find the best cut position near the uniform cut point
+    # search window widened to +/-100 nt; prefer loop centers
     SEARCH_RANGE = 100
     segments = []
     pos = 0
@@ -176,7 +177,7 @@ def split_sequence(
     while pos < L:
         next_end = min(pos + max_seg_len, L)
 
-        if next_end < L:  # 不是最后一段
+        if next_end < L:  # not the last segment
             best_boundary = _find_best_cut_point(
                 secondary_structure, junctions,
                 pos, next_end, max_seg_len, SEARCH_RANGE,
@@ -184,7 +185,7 @@ def split_sequence(
         else:
             best_boundary = L
 
-        # 重叠区 — BSJ 附近给予额外 margin
+        # overlap region - extra margin near the BSJ
         effective_overlap = overlap
         if is_circular:
             near_bsj_start = pos < BSJ_MARGIN
@@ -219,11 +220,11 @@ def split_sequence(
 
 
 def _find_junctions(ss: str) -> List[int]:
-    """找所有茎-环交界点 (paired↔unpaired 转换位置).
+    """Find all stem-loop junctions (paired<->unpaired transitions).
 
-    返回转换位置列表, 按位置排序.
-    例如: ss = "..(((...)))." → junctions = [2, 5, 8, 11]
-      (2: .→(, 5: (→., 8: .→), 11: )→.)
+    Returns the list of transition positions, sorted by position.
+    e.g. ss = "..(((...)))." -> junctions = [2, 5, 8, 11]
+      (2: .->(, 5: (->., 8: .->), 11: )->.)
     """
     junctions = []
     for i in range(1, len(ss)):
@@ -242,65 +243,65 @@ def _find_best_cut_point(
     max_seg_len: int,
     search_range: int,
 ) -> int:
-    """在均匀切分点附近找最佳切分位置.
+    """Find the best cut position near a uniform cut point.
 
-    策略:
-    1. 收集 search_range 内的所有交界点
-    2. 对每个交界点, 找最近的 loop 中心 (连续 unpaired 区域的中点)
-    3. 如果没有好的 loop 中心, 用交界点本身 (stem 末端)
-    4. 优先选配对密度低的位置 (loop > stem末端)
+    Strategy:
+    1. Collect every junction within search_range
+    2. For each junction, find the nearest loop center (midpoint of a run of unpaired residues)
+    3. If no good loop center exists, fall back to the junction itself (stem end)
+    4. Prefer low-pairing-density positions (loop > stem end)
 
     Returns:
-        最佳切分位置 (0-based, 在 ss 中)
+        best cut position (0-based, index into ss)
     """
     candidates = []
 
-    # 收集 search_range 内的交界点
+    # collect junctions within search_range
     for j in junctions:
         if abs(j - uniform_end) <= search_range and j > seg_start + MIN_STEM_LEN:
-            # 找这个交界点附近的 loop 中心
+            # find the loop center nearest this junction
             loop_center = _find_nearest_loop_center(ss, j, search_range // 2)
             if loop_center is not None:
-                candidates.append((loop_center, 0.0))  # loop 中心, 密度=0
+                candidates.append((loop_center, 0.0))  # loop center, density=0
             else:
-                # 交界点本身 (stem 末端)
+                # junction itself (stem end)
                 candidates.append((j, 0.3))
 
     if not candidates:
-        # 没找到好的交界点, 用均匀切分点
+        # no good junction found; fall back to the uniform cut
         return uniform_end
 
-    # 选离均匀切分点最近的候选
+    # pick the candidate closest to the uniform cut
     candidates.sort(key=lambda x: abs(x[0] - uniform_end))
     return candidates[0][0]
 
 
 def _find_nearest_loop_center(ss: str, pos: int, max_dist: int) -> Optional[int]:
-    """找 pos 附近最近的 loop 中心 (连续 unpaired 区域的中点).
+    """Find the nearest loop center to pos (midpoint of a run of unpaired residues).
 
-    loop = 连续 3+ 个 unpaired 残基 ( '.', ',', etc.)
-    返回 loop 中心位置, 或 None.
+    loop = a run of 3+ unpaired residues ( '.', ',', etc.)
+    Returns the loop center position, or None.
     """
     L = len(ss)
     best_center = None
     best_score = float("inf")
 
-    # 扫描 pos 附近的 loop 区域
+    # scan loop regions near pos
     i = max(0, pos - max_dist)
     while i < min(L, pos + max_dist):
         if ss[i] not in "()":
-            # 找连续 unpaired 区域
+            # find a run of unpaired residues
             loop_start = i
             while i < L and ss[i] not in "()":
                 i += 1
             loop_end = i
             loop_len = loop_end - loop_start
 
-            if loop_len >= 3:  # 至少 3nt 的 loop 才算有效切分点
+            if loop_len >= 3:  # only loops of at least 3 nt are valid cut points
                 center = (loop_start + loop_end) // 2
                 dist = abs(center - pos)
-                # 惩罚: 距离 + loop 太短的惩罚
-                score = dist - loop_len * 2  # loop 越长越好
+                # penalty: distance, plus a penalty for overly short loops
+                score = dist - loop_len * 2  # longer loops are preferred
                 if score < best_score:
                     best_score = score
                     best_center = center
@@ -318,56 +319,56 @@ def _split_with_msa_blocks(
     is_circular: bool,
     msa_blocks: List[Dict],
 ) -> List[Dict]:
-    """MSA-aware 分段: 锚定区间 (有真MSA) 优先作为 chunk, 间隙均匀切分.
+    """MSA-aware segmentation: anchor blocks (with a real MSA) become chunks first, gaps are split uniformly.
 
-    策略:
-    1. 排序/合并 msa_blocks 锚定区间
-    2. 每个锚定区间 → 一个 chunk (带 msa_path, 长度与真MSA匹配)
-    3. 锚定区间之间的间隙 → 按 max_seg_len 均匀切分 + 伪MSA
-    4. 锚定区间过短 (<50nt) 视为噪声, 合并到间隙
+    Strategy:
+    1. Sort and merge the msa_blocks anchor intervals
+    2. Each anchor interval becomes one chunk (carries msa_path, length matched to the real MSA)
+    3. Gaps between anchor intervals are split uniformly by max_seg_len with a pseudo-MSA
+    4. Anchor intervals that are too short (<50 nt) are treated as noise and merged into the gap
 
     Returns:
-        同 split_sequence 格式, 每个 chunk 多 msa_path 字段.
+        Same format as split_sequence, each chunk additionally carrying msa_path.
     """
     L = len(sequence)
     if not msa_blocks:
-        # 无锚定区间, 回退均匀切分
+        # no anchor blocks; fall back to uniform splitting
         return _split_uniform(
             sequence, secondary_structure, max_seg_len, overlap, is_circular,
         )
 
-    # 1) 排序并合并重叠锚定区间
+    # 1) sort and merge overlapping anchor intervals
     blocks = sorted(
         (b for b in msa_blocks
-         if b.get("end", 0) - b.get("start", 0) >= 50),  # 过滤过短
+         if b.get("end", 0) - b.get("start", 0) >= 50),  # drop blocks that are too short
         key=lambda b: b["start"],
     )
     merged: List[Dict] = []
     for b in blocks:
         if merged and b["start"] <= merged[-1]["end"]:
-            # 重叠/相邻 → 合并 (保留长度更长的 MSA)
+            # overlap/adjacent -> merge (keep the MSA with the longer path)
             if len(b.get("msa_path", "")) > len(merged[-1].get("msa_path", "")):
                 merged[-1] = b
             merged[-1]["end"] = max(merged[-1]["end"], b["end"])
         else:
             merged.append(dict(b))
 
-    # 2) 锚定区间成 chunk + 间隙均匀切分
+    # 2) anchor intervals become chunks; gaps split uniformly
     segments: List[Dict] = []
     pos = 0
     for b in merged:
         start, end = b["start"], min(b["end"], L)
-        if start > pos:  # 间隙
+        if start > pos:  # gap
             gap_segs = _split_uniform(
                 sequence[pos:start], secondary_structure[pos:start],
                 max_seg_len, overlap, is_circular,
             )
-            # 偏移到全局坐标
+            # shift to global coordinates
             for g in gap_segs:
                 g["start"] += pos
                 g["end"] += pos
                 segments.append(g)
-        # 锚定 chunk (允许稍大, 最长 1.5x max_seg_len)
+        # anchored chunk (may be somewhat larger, up to 1.5x max_seg_len)
         if start < end:
             segments.append({
                 "seq": sequence[start:end],
@@ -381,7 +382,7 @@ def _split_with_msa_blocks(
                 "msa_source": b.get("source", "msa"),
             })
         pos = end
-    if pos < L:  # 末尾间隙
+    if pos < L:  # trailing gap
         gap_segs = _split_uniform(
             sequence[pos:], secondary_structure[pos:],
             max_seg_len, overlap, is_circular,
@@ -401,7 +402,7 @@ def _split_uniform(
     overlap: int,
     is_circular: bool,
 ) -> List[Dict]:
-    """均匀切分 (原 split_sequence 主体逻辑, 无 MSA-aware)."""
+    """Uniform splitting (original split_sequence core logic, without MSA-awareness)."""
     L = len(sequence)
     if L <= max_seg_len:
         return [{
@@ -451,9 +452,9 @@ def _split_uniform(
 
 
 def _find_stem_boundaries(ss: str) -> List[int]:
-    """找二级结构中的茎边界位置.
+    """Find stem-boundary positions in a secondary structure.
 
-    茎边界 = 连续配对段的结束位置.
+    A stem boundary is the end position of a run of paired residues.
     """
     boundaries = []
     in_stem = False
@@ -480,35 +481,36 @@ def _detect_chunk_region(
     is_circular: bool = True,
     full_length: int = None,
 ) -> str:
-    """判断 chunk 的区域类型 (stem/bsj/loop), 用于动态权重.
+    """Classify the region type of a chunk (stem/bsj/loop) for dynamic weighting.
 
-    策略:
-      1. bsj_aware=True 的 chunk → "bsj" (靠近序列头尾, circular 拓扑中是 BSJ)
-      2. 计算配对密度: pairs / chunk_length
-         - 密度 > 0.3 → "stem" (WC 配对密集)
-         - 密度 < 0.1 → "bsj" (配对稀疏, 可能是连接区)
-         - 其他 → "loop" (非典型配对区)
+    Strategy:
+      1. A chunk with bsj_aware=True -> "bsj" (near the sequence ends; in circular
+         topology this is the back-splice junction)
+      2. Compute the pairing density: pairs / chunk_length
+         - density > 0.3 -> "stem" (dense Watson-Crick pairing)
+         - density < 0.1 -> "bsj" (sparse pairing; possibly a linker region)
+         - otherwise -> "loop" (non-canonical pairing region)
 
     Args:
-        seg: chunk 信息 (含 ss, bsj_aware, start, end)
-        is_circular: 是否环状
-        full_length: 完整序列长度 (用于判断是否跨 BSJ)
+        seg: chunk info (carries ss, bsj_aware, start, end)
+        is_circular: whether the sequence is circular
+        full_length: full sequence length (used to decide whether the chunk straddles the BSJ)
 
     Returns:
-        "stem", "bsj", 或 "loop"
+        "stem", "bsj", or "loop"
     """
-    # 1. bsj_aware 标记直接判定
+    # 1. decide directly from the bsj_aware flag
     if seg.get("bsj_aware", False):
         return "bsj"
 
-    # 2. 跨 BSJ 判断: circular 模式下 chunk 起始靠近 0 或结尾靠近 full_length
+    # 2. BSJ-straddle check: in circular mode a chunk starting near 0 or ending near full_length
     if is_circular and full_length is not None:
         start = seg.get("start", 0)
         end = seg.get("end", 0)
         if start < 20 or (full_length - end) < 20:
             return "bsj"
 
-    # 3. 配对密度判断
+    # 3. pairing-density classification
     ss = seg.get("ss", "")
     chunk_len = len(ss)
     if chunk_len == 0:
@@ -528,37 +530,37 @@ def kabsch_align(
     moving: np.ndarray,
     target: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, float]:
-    """Kabsch 算法: 最优旋转平移对齐.
+    """Kabsch algorithm: optimal rigid rotation + translation alignment.
 
     Args:
-        moving: (N, 3) 待对齐坐标
-        target: (N, 3) 参考坐标
+        moving: (N, 3) coordinates to align
+        target: (N, 3) reference coordinates
 
     Returns:
         (aligned, rotation, rmsd)
-        aligned: 对齐后的坐标
-        rotation: 3x3 旋转矩阵
-        rmsd: 对齐后 RMSD
+        aligned: aligned coordinates
+        rotation: 3x3 rotation matrix
+        rmsd: RMSD after alignment
     """
     assert moving.shape == target.shape
     N = moving.shape[0]
 
-    # 去质心
+    # subtract centroids
     cm_m = moving.mean(axis=0)
     cm_t = target.mean(axis=0)
     m = moving - cm_m
     t = target - cm_t
 
-    # SVD 分解
+    # SVD decomposition
     H = m.T @ t
     U, S, Vt = np.linalg.svd(H)
 
-    # 旋转矩阵
+    # rotation matrix
     d = np.linalg.det(Vt.T @ U.T)
     sign_matrix = np.diag([1, 1, np.sign(d)])
     R = Vt.T @ sign_matrix @ U.T
 
-    # 旋转 + 平移
+    # rotate + translate
     aligned = (R @ m.T).T + cm_t
 
     # RMSD
@@ -572,34 +574,34 @@ def spline_smooth_dihedral(
     boundary_indices: List[int],
     n_smooth: int = 10,
 ) -> np.ndarray:
-    """三次样条插值平滑边界处的 backbone 二面角.
+    """Smooth the backbone dihedrals near assembly boundaries with cubic-spline interpolation.
 
-    在拼装边界处，相邻段的 backbone 二面角不连续。
-    用三次样条插值平滑，消除应力集中。
+    At assembly boundaries the backbone dihedrals of neighboring segments are
+    discontinuous. Cubic-spline interpolation smooths them to relieve stress concentration.
 
     Args:
-        coords: (L, 3) 完整 P 坐标
-        boundary_indices: 边界位置列表
-        n_smooth: 每侧平滑点数
+        coords: (L, 3) full P coordinates
+        boundary_indices: list of boundary positions
+        n_smooth: number of points to smooth on each side
 
     Returns:
-        平滑后的坐标
+        smoothed coordinates
     """
     coords = coords.copy()
 
     for bi in boundary_indices:
-        # 边界两侧的索引
+        # indices on both sides of the boundary
         left_start = max(0, bi - n_smooth)
         right_end = min(len(coords), bi + n_smooth)
 
         if right_end - left_start < 4:
             continue
 
-        # 提取边界区域
+        # extract the boundary region
         region = coords[left_start:right_end].copy()
         n = len(region)
 
-        # 计算每个点的二面角
+        # compute the dihedral at each point
         dihedrals = []
         for i in range(1, n - 2):
             p0, p1, p2, p3 = region[i-1], region[i], region[i+1], region[i+2]
@@ -609,16 +611,16 @@ def spline_smooth_dihedral(
         if len(dihedrals) < 4:
             continue
 
-        # 三次样条插值
+        # cubic-spline interpolation
         x = np.arange(len(dihedrals))
         x_new = np.linspace(0, len(dihedrals) - 1, len(dihedrals))
 
-        # 简单三次样条: 用 numpy polyfit 拟合
+        # simple cubic spline: fit with numpy polyfit
         coeffs = np.polyfit(x, dihedrals, 3)
         smoothed_dihedrals = np.polyval(coeffs, x_new)
 
-        # 根据平滑后的二面角调整坐标
-        # 用原始坐标做基准，对边界附近施加小扰动
+        # adjust coordinates according to the smoothed dihedrals
+        # keep the original coordinates as a base and apply a small perturbation near the boundary
         mask = np.zeros(n)
         center = n // 2
         for i in range(n):
@@ -626,9 +628,9 @@ def spline_smooth_dihedral(
             if dist < n_smooth:
                 mask[i] = 1.0 - dist / n_smooth
 
-        # 用 mask 权重做加权混合：原始坐标 + 小幅随机扰动
-        # 平滑二面角的效果通过在边界区域微调位置实现
-        perturbation = np.random.randn(n, 3) * 0.1  # 0.1 A 扰动
+        # weighted blend using mask weights: original coordinates + small random perturbation
+        # the effect of smoothing dihedrals is realized by nudging positions in the boundary region
+        perturbation = np.random.randn(n, 3) * 0.1  # 0.1 A perturbation
         coords[left_start:right_end] = region * (1 - mask.reshape(-1, 1) * 0.3) + \
                                         (region + perturbation) * (mask.reshape(-1, 1) * 0.3)
 
@@ -636,7 +638,7 @@ def spline_smooth_dihedral(
 
 
 def _compute_dihedral(p0, p1, p2, p3) -> float:
-    """计算四原子二面角 (弧度)."""
+    """Compute the four-atom dihedral angle (radians)."""
     b0 = p1 - p0
     b1 = p2 - p1
     b2 = p3 - p2
@@ -657,17 +659,17 @@ def assemble_segments(
     segments: List[Dict],
     full_length: int,
 ) -> np.ndarray:
-    """拼装分段坐标到完整构象.
+    """Assemble segmented coordinates into a full conformation.
 
-    对齐重叠区，然后合并。
+    Align the overlap regions, then merge.
 
     Args:
-        segment_coords: 每段的 P 坐标列表
-        segments: 分段信息 (from split_sequence)
-        full_length: 完整序列长度
+        segment_coords: list of P-coordinate arrays, one per segment
+        segments: segment metadata (from split_sequence)
+        full_length: full sequence length
 
     Returns:
-        (full_length, 3) 完整 P 坐标
+        (full_length, 3) full P coordinates
     """
     full_coords = np.zeros((full_length, 3))
     placed = np.zeros(full_length, dtype=bool)
@@ -675,40 +677,40 @@ def assemble_segments(
     if not segment_coords:
         return full_coords
 
-    # 第一段直接放置
+    # place the first segment directly
     seg = segments[0]
     coords = segment_coords[0]
     length = seg["end"] - seg["start"]
     full_coords[seg["start"]:seg["start"] + length] = coords[:length]
     placed[seg["start"]:seg["start"] + length] = True
 
-    # 后续段对齐重叠区
+    # align subsequent segments on their overlap regions
     for idx in range(1, len(segment_coords)):
         seg = segments[idx]
         coords = segment_coords[idx]
 
         if seg["overlap_start"] >= 0 and seg["overlap_end"] > seg["overlap_start"]:
-            # 有重叠区: Kabsch 对齐
+            # has an overlap region: align with Kabsch
             ol_start = seg["overlap_start"]
             ol_end = seg["overlap_end"]
             ol_len = ol_end - ol_start
 
-            # 参考坐标 (已放置的)
+            # reference coordinates (already placed)
             target = full_coords[ol_start:ol_end]
 
-            # 移动坐标 (重叠区部分)
+            # moving coordinates (the overlap part)
             local_start = ol_start - seg["start"]
             moving = coords[local_start:local_start + ol_len]
 
-            # Kabsch 对齐
+            # Kabsch alignment
             if len(moving) > 0 and np.any(target):
                 aligned, R, rmsd = kabsch_align(moving, target)
 
-                # 应用旋转到整段
+                # apply the rotation to the whole segment
                 seg_center = coords.mean(axis=0)
                 coords_aligned = ((R @ (coords - seg_center).T).T + seg_center)
 
-                # 平移使重叠区匹配
+                # translate so the overlap regions match
                 shift = target.mean(axis=0) - coords_aligned[local_start:local_start + ol_len].mean(axis=0)
                 coords_aligned += shift
             else:
@@ -716,7 +718,7 @@ def assemble_segments(
         else:
             coords_aligned = coords
 
-        # 放置非重叠部分
+        # place the non-overlapping part
         for i in range(seg["start"], seg["end"]):
             if not placed[i]:
                 local_i = i - seg["start"]
@@ -732,18 +734,19 @@ def kabsch_assemble_chunks(
     chunks: List[Dict],
     full_length: int,
 ) -> np.ndarray:
-    """确定性 Kabsch 拼装: 将多个 chunk 的 3D 坐标拼装成完整链.
+    """Deterministic Kabsch assembly: stitch multiple chunks' 3D coordinates into a full chain.
 
-    以第一个 chunk 为参考, 后续 chunk 用 Kabsch 对齐重叠区,
-    平均重叠区坐标, 返回 (full_length, 3) 全链坐标.
+    The first chunk is the reference; each following chunk is Kabsch-aligned on its
+    overlap region, overlap coordinates are averaged, and (full_length, 3) full-chain
+    coordinates are returned.
 
     Args:
-        chunk_coords: 每个 chunk 的 P 坐标列表
-        chunks: 分段信息 (from split_sequence), 每个含 start/end/overlap_start/overlap_end
-        full_length: 完整序列长度
+        chunk_coords: list of P-coordinate arrays, one per chunk
+        chunks: chunk metadata (from split_sequence), each carrying start/end/overlap_start/overlap_end
+        full_length: full sequence length
 
     Returns:
-        (full_length, 3) 拼装后的全链 P 坐标
+        (full_length, 3) assembled full-chain P coordinates
     """
     return assemble_segments(chunk_coords, chunks, full_length)
 
@@ -754,22 +757,22 @@ def confidence_weighted_assemble(
     chunk_confidences: List[float],
     full_length: int,
 ) -> np.ndarray:
-    """置信度加权拼装: 先 Kabsch 对齐, 再置信度加权平均.
+    """Confidence-weighted assembly: Kabsch-align first, then take a confidence-weighted average.
 
-    流程:
-    1. 第一个 chunk 直接放置
-    2. 后续 chunk: 用重叠区做 Kabsch 对齐到已放置坐标
-    3. 对齐后, 重叠区用置信度加权平均 (高置信 chunk 权重大)
-    4. 非重叠区直接放置
+    Procedure:
+    1. Place the first chunk directly
+    2. For each following chunk, Kabsch-align it to the already-placed coordinates on its overlap region
+    3. After alignment, average the overlap region with confidence weights (high-confidence chunks weigh more)
+    4. Place non-overlap regions directly
 
     Args:
-        chunk_coords: 每个 chunk 的 P 坐标列表
-        chunks: 分段信息
-        chunk_confidences: 每个 chunk 的置信度 [0, 1]
-        full_length: 完整序列长度
+        chunk_coords: list of P-coordinate arrays, one per chunk
+        chunks: chunk metadata
+        chunk_confidences: per-chunk confidence [0, 1]
+        full_length: full sequence length
 
     Returns:
-        (full_length, 3) 拼装后的全链 P 坐标
+        (full_length, 3) assembled full-chain P coordinates
     """
     if not chunk_coords:
         return np.zeros((full_length, 3))
@@ -788,7 +791,7 @@ def confidence_weighted_assemble(
         length = end - start
         seg_coords = coords[:length].copy() if len(coords) >= length else coords.copy()
 
-        # Kabsch 对齐: 用重叠区对齐到已放置坐标
+        # Kabsch alignment: use the overlap region to align to the already-placed coordinates
         if (idx > 0
                 and seg["overlap_start"] >= 0
                 and seg["overlap_end"] > seg["overlap_start"]):
@@ -803,22 +806,22 @@ def confidence_weighted_assemble(
             if len(moving) > 0 and np.any(target) and np.any(moving):
                 aligned, R, rmsd = kabsch_align(moving, target)
 
-                # 应用旋转到整段
+                # apply rotation to the whole segment
                 seg_center = seg_coords.mean(axis=0)
                 seg_coords = ((R @ (seg_coords - seg_center).T).T + seg_center)
 
-                # 平移使重叠区匹配
+                # translate so the overlap regions match
                 shift = target.mean(axis=0) - seg_coords[local_start:local_start + ol_len].mean(axis=0)
                 seg_coords += shift
 
-        # 放置坐标: 非重叠区直接放, 重叠区加权平均
+        # place coordinates: overlap regions are confidence-weighted averages, the rest directly
         for i in range(start, min(start + len(seg_coords), full_length)):
             if not placed[i]:
                 full_coords[i] = seg_coords[i - start]
                 weight_sum[i] = conf
                 placed[i] = True
             else:
-                # 重叠区: 置信度加权平均
+                # overlap region: confidence-weighted average
                 old_w = weight_sum[i]
                 new_w = old_w + conf
                 full_coords[i] = (full_coords[i] * old_w + seg_coords[i - start] * conf) / new_w
@@ -833,82 +836,82 @@ def cross_chunk_relaxation(
     far_pairs: Optional[List[Tuple[int, int]]] = None,
     n_steps: int = 5000,
 ) -> np.ndarray:
-    """跨片段后处理弛豫: 用 OpenMM 精修键长/键角约束.
+    """Cross-chunk post-relaxation: refine bond-length/bond-angle restraints with OpenMM.
 
-    解决分块预测的边界不连续问题:
-    1. 键长约束: 相邻 P-P 距离 ~5.9A
-    2. 键角约束: backbone 二面角 ~A-form
-    3. 碰撞消除: P-P 距离 > 3A
-    4. 远端配对约束: WC 配对 ~10.5A (如果有)
+    Addresses the boundary discontinuities of segmented predictions:
+    1. Bond-length restraint: consecutive P-P distance ~5.9 A
+    2. Bond-angle restraint: backbone dihedrals ~ A-form
+    3. Clash removal: keep P-P distances above 3 A
+    4. Far-pair restraint: Watson-Crick pairs ~10.5 A (when provided)
 
     Args:
-        coords: (L, 3) 初始 P 坐标
-        sequence: RNA 序列
-        far_pairs: 远端配对列表 (可选)
-        n_steps: 能量最小化步数
+        coords: (L, 3) initial P coordinates
+        sequence: RNA sequence
+        far_pairs: list of far/long-range pairs (optional)
+        n_steps: number of energy-minimization steps
 
     Returns:
-        (L, 3) 弛豫后的 P 坐标
+        (L, 3) relaxed P coordinates
     """
     try:
         import openmm
         from openmm import app, unit
 
-        # 创建系统
+        # build the system
         L = len(coords)
         topology = app.Topology()
         chain = topology.addChain()
         res = topology.addResidue("RNA", chain)
 
-        # 添加 P 原子
+        # add the P atoms
         for i in range(L):
             topology.addAtom(f"P{i}", app.Element.getBySymbol("P"), res)
 
         system = openmm.System()
 
-        # 添加 P 原子质量
+        # add P-atom masses
         for i in range(L):
             system.addParticle(110.0)
 
-        # 键长约束 (harmonic)
+        # bond-length restraints (harmonic)
         force = openmm.HarmonicBondForce()
         for i in range(L - 1):
             force.addBond(i, i + 1, P_BOND_LEN * unit.angstrom, 100.0 * unit.kilocalorie_per_mole / unit.angstrom**2)
-        # Circular: BSJ 闭合
-        if len(sequence) > 100:  # 只有长序列才闭合
+        # Circular: close the BSJ
+        if len(sequence) > 100:  # only close sequences longer than 100 nt
             force.addBond(0, L - 1, P_BOND_LEN * unit.angstrom, 50.0 * unit.kilocalorie_per_mole / unit.angstrom**2)
         system.addForce(force)
 
-        # 键角约束 (harmonic)
+        # bond-angle restraints (harmonic)
         angle_force = openmm.HarmonicAngleForce()
         for i in range(L - 2):
-            # A-form RNA backbone angle ~110°
+            # A-form RNA backbone angle ~110 deg
             angle_force.addAngle(i, i + 1, i + 2, 110.0 * unit.degrees, 10.0 * unit.kilocalorie_per_mole / unit.radians**2)
         system.addForce(angle_force)
 
-        # 碰撞惩罚 (Lennard-Jones)
+        # clash penalty (Lennard-Jones)
         lj_force = openmm.NonbondedForce()
         for i in range(L):
             lj_force.addParticle(0.0, 1.0 * unit.angstrom, 0.0)  # OpenMM 8.x: charge, sigma, epsilon
-        # 碰撞排斥
+        # clash repulsion
         for i in range(L):
-            for j in range(i + 1, min(i + 10, L)):  # 只近邻
+            for j in range(i + 1, min(i + 10, L)):  # nearest neighbors only
                 distance = np.linalg.norm(coords[i] - coords[j])
                 if distance < 3.0:
                     lj_force.addException(i, j, 10.0 * unit.kilocalorie_per_mole, 3.5 * unit.angstrom, 0.5)
         system.addForce(lj_force)
 
-        # 设置初始坐标
+        # set the initial coordinates
         positions = []
         for i in range(L):
             positions.append(openmm.Vec3(coords[i, 0], coords[i, 1], coords[i, 2]) * unit.angstrom)
 
-        # 能量最小化
+        # energy minimization
         context = openmm.Context(system, openmm.LangevinMiddleIntegrator(300 * unit.kelvin, 1 / unit.picosecond, 2 * unit.femtosecond))
         context.setPositions(positions)
         openmm.LocalEnergyMinimizer.minimize(context, maxIterations=n_steps)
 
-        # 提取结果
+        # pull out the result
         state = context.getState(getPositions=True)
         positions = state.getPositions()
         relaxed = np.array([[positions[i].x, positions[i].y, positions[i].z] for i in range(L)])
@@ -931,34 +934,35 @@ def _resolve_chunk_msa(
     rfam_cm: str = "",
     rfam_dir: str = "",
 ) -> Optional[str]:
-    """为 chunk 解析 MSA (真 MSA 优先, 伪 MSA 兜底).
+    """Resolve an MSA for a chunk (real MSA preferred, pseudo-MSA as fallback).
 
-    策略 (自适应 MSA):
-      0. 若 chunk 自带 msa_path (MSA-aware 分块产出) → 直接用它.
-      1. 若提供 rfam_cm: 用 cmsearch 搜该 chunk 在 Rfam 的同源,
-         搜到 E-value 达标的家族 → 用其 seed/full MSA (真 MSA).
-      2. 若 rfam_dir 有已知家族的 MSA 文件 (按 chunk 位置匹配) → 直接复用.
-      3. 否则: 用 ViennaRNA bpp + dot-bracket 构造伪 MSA (结构约束兜底).
+    Strategy (adaptive MSA):
+      0. If the chunk already carries msa_path (from MSA-aware segmentation) -> use it directly.
+      1. If rfam_cm is given: run cmsearch to find Rfam homologs of the chunk; when a
+         family with an acceptable E-value is found, use its seed/full MSA (real MSA).
+      2. If rfam_dir holds MSA files for known families (matched by chunk position) -> reuse directly.
+      3. Otherwise: build a pseudo-MSA from ViennaRNA base-pair probabilities + the
+         dot-bracket as a structural-constraint fallback.
 
     Args:
-        seg: chunk 信息 (含 seq, ss, start, 可带 msa_path)
-        seg_idx: chunk 索引
-        seg_dir: chunk 输出目录
-        output_dir: 总输出目录
-        rfam_cm: Rfam CM 库路径 (cmsearch)
-        rfam_dir: Rfam 数据目录 (含家族 MSA)
+        seg: chunk info (carries seq, ss, start, and optionally msa_path)
+        seg_idx: chunk index
+        seg_dir: per-chunk output directory
+        output_dir: top-level output directory
+        rfam_cm: path to the Rfam covariance-model library (for cmsearch)
+        rfam_dir: Rfam data directory (family MSAs)
 
     Returns:
-        MSA fasta 路径, 或 None (无法构造/不使用)
+        MSA fasta path, or None (could not build / not used)
     """
     seq = seg["seq"]
     ss = seg.get("ss", "")
 
-    # 0) chunk 自带真 MSA (MSA-aware 分块产出) → 直接返回
+    # 0) chunk carries a real MSA (from MSA-aware segmentation) -> return it directly
     if seg.get("msa_path") and Path(seg["msa_path"]).exists():
         return seg["msa_path"]
 
-    # 1) 真 MSA: cmsearch 搜 Rfam
+    # 1) real MSA: search Rfam with cmsearch
     if rfam_cm:
         try:
             import subprocess, tempfile
@@ -966,41 +970,41 @@ def _resolve_chunk_msa(
             if msa:
                 return msa
         except Exception as e:
-            print(f"  [MSA] cmsearch 失败: {e}")
+            print(f"  [MSA] cmsearch failed: {e}")
 
-    # 2) 已知家族 MSA 复用 (rfam_dir 按位置匹配)
+    # 2) reuse a known-family MSA (matched by position under rfam_dir)
     if rfam_dir:
         try:
             msa = _match_known_family_msa(seg, rfam_dir)
             if msa:
                 return msa
         except Exception as e:
-            print(f"  [MSA] 家族复用失败: {e}")
+            print(f"  [MSA] known-family reuse failed: {e}")
 
-    # 3) 伪 MSA: 结构约束兜底
+    # 3) pseudo-MSA: structural-constraint fallback
     try:
         msa = _build_pseudo_msa_for_chunk(seq, ss, str(seg_dir), f"seg{seg_idx}")
         if msa:
             return msa
     except Exception as e:
-        print(f"  [MSA] 伪 MSA 构造失败: {e}")
+        print(f"  [MSA] pseudo-MSA construction failed: {e}")
 
     return None
 
 
 def _search_rfam_msa(seq: str, rfam_cm: str, out_dir: str, name: str) -> Optional[str]:
-    """用 cmsearch 搜该序列在 Rfam 的同源, 返回首个命中的 MSA.
+    """Search Rfam for homologs of the sequence with cmsearch and return the first MSA hit.
 
-    通过 WSL 调用 cmsearch (Infernal), 用 rfam_cm 全库搜索.
+    Calls cmsearch (Infernal) through WSL, searching the full rfam_cm library.
     """
     import subprocess, tempfile, os
-    # 写序列 fasta
+    # write the sequence to a fasta
     tmp = Path(tempfile.mkdtemp(prefix="rfam_"))
     fa = tmp / f"{name}.fa"
     with open(fa, "w") as f:
         f.write(f">{name}\n{seq}\n")
 
-    # WSL cmsearch: 转换路径为 WSL 格式
+    # WSL cmsearch: convert the paths to WSL format
     wsl_fa = str(fa).replace("C:", "/mnt/c").replace("\\", "/")
     wsl_cm = rfam_cm.replace("C:", "/mnt/c").replace("\\", "/")
     wsl_tmp = str(tmp).replace("C:", "/mnt/c").replace("\\", "/")
@@ -1010,7 +1014,7 @@ def _search_rfam_msa(seq: str, rfam_cm: str, out_dir: str, name: str) -> Optiona
            f'--cpu 2 {wsl_cm} {wsl_fa} 2>/dev/null && cat {wsl_tmp}/hits.tbl"')
     result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=None)
 
-    # 解析 hits.tbl, 找 E-value 达标的家族
+    # parse hits.tbl and find families meeting the E-value cut-off
     hits = []
     for line in (result.stdout or "").splitlines():
         if line.startswith("#") or not line.strip():
@@ -1018,7 +1022,7 @@ def _search_rfam_msa(seq: str, rfam_cm: str, out_dir: str, name: str) -> Optiona
         parts = line.split()
         if len(parts) < 13:
             continue
-        target = parts[0]  # 家族名
+        target = parts[0]  # family name
         try:
             evalue = float(parts[12])
         except (ValueError, IndexError):
@@ -1029,9 +1033,9 @@ def _search_rfam_msa(seq: str, rfam_cm: str, out_dir: str, name: str) -> Optiona
     if not hits:
         return None
 
-    # 取最优命中, 用 cmalign 提取 MSA
+    # take the best hit and extract the MSA with cmalign
     best_fam, best_e = hits[0]
-    print(f"    [MSA] cmsearch 命中: {best_fam} (E={best_e:.1e})")
+    print(f"    [MSA] cmsearch hit: {best_fam} (E={best_e:.1e})")
 
     msa_out = str(tmp / f"{name}_msa.a3m")
     wsl_msa_out = msa_out.replace("C:", "/mnt/c").replace("\\", "/")
@@ -1042,30 +1046,30 @@ def _search_rfam_msa(seq: str, rfam_cm: str, out_dir: str, name: str) -> Optiona
     result_align = subprocess.run(cmd_align, shell=True, capture_output=True, text=True, timeout=None)
 
     if os.path.exists(msa_out) and os.path.getsize(msa_out) > 0:
-        # 拷贝到输出目录
+        # copy to the output directory
         import shutil
         msa_dest = os.path.join(out_dir, f"{name}_rfam_msa.a3m")
         shutil.copy2(msa_out, msa_dest)
-        print(f"    [MSA] 已提取: {msa_dest}")
+        print(f"    [MSA] extracted: {msa_dest}")
         return msa_dest
 
     return None
 
 
 def _match_known_family_msa(seg: dict, rfam_dir: str) -> Optional[str]:
-    """按 chunk 在序列中的位置匹配已知家族 MSA.
+    """Match a known-family MSA by the chunk's position in the sequence.
 
-    用 Rfam 家族的坐标 (如 IRES_Picorna 在 535-786) 与 chunk 区间
-    [start, end) 求交, 若重叠足够则返回该家族 MSA.
+    Intersects the Rfam family coordinates (e.g. IRES_Picorna at 535-786) with the chunk
+    interval [start, end); if the overlap is large enough, return that family's MSA.
     """
     from pathlib import Path as _P
     rfam_dir = _P(rfam_dir)
     seg_start = seg["start"]
     seg_end = seg["end"]
 
-    # 已知家族坐标 (1-based 区间) -> MSA 文件
+    # known family coordinates (1-based intervals) -> MSA files
     known = {
-        # 家族: (区间, msa文件名)
+        # family: (interval, msa filename)
         "RF00229": ((535, 786), "IRES_Picorna_RF00229.seed.fa"),   # IRES
         "RF00386": ((101, 185), "Entero_5_CRE_RF00386.seed.fa"),  # CRE
     }
@@ -1083,21 +1087,22 @@ def _match_known_family_msa(seg: dict, rfam_dir: str) -> Optional[str]:
 
 
 def _build_pseudo_msa_for_chunk(seq: str, ss: str, out_dir: str, name: str) -> Optional[str]:
-    """用 ViennaRNA bpp + dot-bracket 构造伪 MSA (结构约束兜底).
+    """Build a pseudo-MSA from ViennaRNA base-pair probabilities + the dot-bracket (structural-constraint fallback).
 
-    把序列复制成多行, 对配对的互补残基做协同变异 (保持互补),
-    模拟进化共变信号, 让 RhoFold 能把配对折叠出来.
+    Duplicates the sequence into multiple rows and applies covariant mutations to paired
+    complementary residues (preserving complementarity), simulating evolutionary
+    co-variation signal so RhoFold can fold the pairs out.
 
-    内联实现 (不依赖 scripts/pseudo_msa.py, 避免 sys.path 问题).
+    Inline implementation (does not depend on scripts/pseudo_msa.py, to avoid sys.path issues).
     """
     try:
-        # 互补配对规则 (协同变异只能在这些之间变, 保持互补)
+        # complementary-pair rules (covariant mutations may only swap within these, preserving complementarity)
         _comp = {("A", "U"), ("U", "A"), ("G", "C"), ("C", "G"),
                  ("G", "U"), ("U", "G")}
         _wc = {("A", "U"): 0, ("U", "A"): 1, ("G", "C"): 0, ("C", "G"): 1,
-               ("G", "U"): 0, ("U", "G"): 1}  # 备用 (仅配对合法性)
+               ("G", "U"): 0, ("U", "G"): 1}  # fallback (pairing legality only)
 
-        # 1) 解析配对: 优先 dot-bracket; 片段不配平则回退 bpp
+        # 1) resolve pairs: prefer the dot-bracket; if the chunk is unbalanced, fall back to bpp
         pairs = _parse_dotbracket_strict(ss)
         if not pairs:
             pairs = _bpp_pairs_fallback(seq)
@@ -1105,7 +1110,7 @@ def _build_pseudo_msa_for_chunk(seq: str, ss: str, out_dir: str, name: str) -> O
         if not pairs:
             return None
 
-        # 2) 构造伪 MSA: 主序列 + N-1 条协同变异
+        # 2) build the pseudo-MSA: the master sequence + N-1 covariant rows
         L = len(seq)
         seq_upper = seq.upper()
         rng = np.random.default_rng(42)
@@ -1119,7 +1124,7 @@ def _build_pseudo_msa_for_chunk(seq: str, ss: str, out_dir: str, name: str) -> O
                 if i < L and j < L:
                     b1, b2 = s[i], s[j]
                     if rng.random() < 0.6:
-                        # 协同变异: 换成任意互补对 (保持配对, 两个碱基都可以变)
+                        # covariant mutation: swap to any complementary pair (keeps the pairing; either base may change)
                         _all_pairs = [("A", "U"), ("U", "A"),
                                       ("G", "C"), ("C", "G"),
                                       ("G", "U"), ("U", "G")]
@@ -1128,7 +1133,7 @@ def _build_pseudo_msa_for_chunk(seq: str, ss: str, out_dir: str, name: str) -> O
                             s[i], s[j] = rng.choice(choices)
             rows.append("".join(s))
 
-        # 3) 写 fasta (确保目录存在)
+        # 3) write the fasta (make sure the directory exists)
         out_dir_p = Path(out_dir)
         out_dir_p.mkdir(parents=True, exist_ok=True)
         out_path = str(out_dir_p / f"{name}_pseudo.fa")
@@ -1141,27 +1146,27 @@ def _build_pseudo_msa_for_chunk(seq: str, ss: str, out_dir: str, name: str) -> O
 
 
 def compute_covariation_matrix(msa_seqs: List[str]) -> Tuple[np.ndarray, np.ndarray]:
-    """从 MSA 序列列表计算 co-variation 矩阵.
+    """Compute a co-variation matrix from a list of MSA sequences.
 
-    使用互信息 (Mutual Information) 度量位点间共变信号,
-    适合伪 MSA 或真 MSA 的质量评估与可视化.
+    Uses mutual information (MI) to measure the co-variation signal between sites,
+    suitable for quality assessment and visualization of pseudo- or real MSAs.
 
     Returns:
-        (mi_matrix, bg_matrix): mi_matrix 是 MI 矩阵 (L x L),
-        bg_matrix 是零模型期望 MI (用于 Z-score 标准化).
+        (mi_matrix, bg_matrix): mi_matrix is the MI matrix (L x L); bg_matrix is the
+        null-model expected MI (used for Z-score normalization).
     """
     N = len(msa_seqs)
     L = len(msa_seqs[0])
     base_idx = {'A': 0, 'U': 1, 'G': 2, 'C': 3}
 
-    # 预编码 MSA 为整数矩阵
+    # pre-encode the MSA as an integer matrix
     enc = np.full((N, L), -1, dtype=np.int8)
     for k, seq in enumerate(msa_seqs):
         for i, ch in enumerate(seq):
             if ch in base_idx:
                 enc[k, i] = base_idx[ch]
 
-    # 单位点频率
+    # single-site frequencies
     freq = np.zeros((L, 4))
     for k in range(N):
         for i in range(L):
@@ -1170,11 +1175,11 @@ def compute_covariation_matrix(msa_seqs: List[str]) -> Tuple[np.ndarray, np.ndar
                 freq[i, bi] += 1
     freq /= N
 
-    # 互信息矩阵 (逐对计算, 避免 joint 数组维度混淆)
+    # mutual-information matrix (computed pair-by-pair to avoid joint-array dimension confusion)
     mi = np.zeros((L, L))
     for i in range(L):
         for j in range(i + 1, L):
-            # 联合分布 4x4
+            # 4x4 joint distribution
             joint = np.zeros((4, 4))
             for k in range(N):
                 bi, bj = enc[k, i], enc[k, j]
@@ -1191,7 +1196,7 @@ def compute_covariation_matrix(msa_seqs: List[str]) -> Tuple[np.ndarray, np.ndar
                         mi_val += pxy * np.log2(pxy / (px * py))
             mi[i, j] = mi[j, i] = mi_val
 
-    # 零模型 MI
+    # null-model MI
     bg = np.zeros((L, L))
     for i in range(L):
         for j in range(i + 1, L):
@@ -1207,7 +1212,7 @@ def compute_covariation_matrix(msa_seqs: List[str]) -> Tuple[np.ndarray, np.ndar
 
 
 def _parse_dotbracket_strict(ss: str) -> List[Tuple[int, int]]:
-    """解析 dot-bracket, 括号不配平/非法时返回 [] (不抛异常)."""
+    """Parse a dot-bracket; return [] when brackets are unbalanced/invalid (never raises)."""
     stack: List[int] = []
     pairs: List[Tuple[int, int]] = []
     for i, ch in enumerate(ss):
@@ -1215,16 +1220,16 @@ def _parse_dotbracket_strict(ss: str) -> List[Tuple[int, int]]:
             stack.append(i)
         elif ch == ")":
             if not stack:
-                return []  # 不配平, 回退
+                return []  # unbalanced, fall back
             j = stack.pop()
             pairs.append((j, i))
     if stack:
-        return []  # 有未闭合
+        return []  # some brackets left open
     return pairs
 
 
 def _bpp_pairs_fallback(seq: str, threshold: float = 0.3) -> List[Tuple[int, int]]:
-    """ViennaRNA bpp 配对概率兜底 (不依赖 dot-bracket)."""
+    """ViennaRNA base-pair-probability fallback (independent of the dot-bracket)."""
     try:
         import RNA
         fc = RNA.fold_compound(seq)
@@ -1250,7 +1255,7 @@ def _predict_chunk(
     rfam_dir: str,
     all_boundary_pairs: List,
 ) -> Tuple[np.ndarray, float, float, str]:
-    """预测单个 chunk 的 3D 坐标 (线程安全, 可并行).
+    """Predict the 3D coordinates of a single chunk (thread-safe, parallelizable).
 
     Returns:
         (coords, confidence, uncertainty, chunk_region)
@@ -1275,7 +1280,7 @@ def _predict_chunk(
             conf = result.confidence
             uncertainty = max(0.1, 1.0 - conf)
             methods = list(result.per_predictor.keys()) if result.per_predictor else ["unknown"]
-            print(f"  段 {idx}: {len(seg['seq'])}nt, "
+            print(f"  segment {idx}: {len(seg['seq'])}nt, "
                   f"{len(coords)} P atoms, "
                   f"conf={conf:.3f}, uncertainty={uncertainty:.3f}, "
                   f"methods={methods}")
@@ -1290,9 +1295,9 @@ def _predict_chunk(
                     rfam_cm=rfam_cm, rfam_dir=rfam_dir,
                 )
                 if msa_path:
-                    print(f"  段 {idx}: 用 MSA 喂 RhoFold ({Path(msa_path).name})")
+                    print(f"  segment {idx}: feeding MSA to RhoFold ({Path(msa_path).name})")
                 else:
-                    print(f"  段 {idx}: 无 MSA, 单序列模式 (可能塌缩, 物理检查会标记)")
+                    print(f"  segment {idx}: no MSA, single-sequence mode (may collapse; the physical check will flag it)")
             _result = rhofold_predict_chunk(
                 seg["seq"], seg["ss"], str(seg_dir), seg_name,
                 msa_path=msa_path, verbose=False,
@@ -1304,13 +1309,13 @@ def _predict_chunk(
                 coords = _result
                 conf = 0.5
             uncertainty = max(0.1, 1.0 - conf)
-            print(f"  段 {idx}: RhoFold+, {len(seg['seq'])}nt, "
+            print(f"  segment {idx}: RhoFold+, {len(seg['seq'])}nt, "
                   f"{len(coords)} P atoms (conf={conf:.3f})")
             return coords, conf, uncertainty, "rhofold"
 
         elif use_trrosetta:
             chunk_region = _detect_chunk_region(seg, is_circular=True, full_length=L)
-            print(f"  段 {idx}: region_type={chunk_region}")
+            print(f"  segment {idx}: region_type={chunk_region}")
             try:
                 from .ensemble_predictor import ensemble_predict
                 ens = ensemble_predict(
@@ -1326,8 +1331,9 @@ def _predict_chunk(
                 coords = ens.coords
                 conf = ens.confidence
 
-                # ── NCM 距离反推 (ensemble 第四方证据) ──
-                # 从共识距离矩阵找 "非 WC 但预测 ~10Å" 的对 → 孤立非经典接触
+                # ── NCM distance back-inference (fourth line of ensemble evidence) ──
+                # find "non-WC yet ~10 A predicted" pairs in the consensus distance matrix
+                # -> isolate non-canonical contacts
                 if ens.dist_consensus is not None:
                     try:
                         from .ncm_ensemble import infer_ncm_from_chunk
@@ -1342,9 +1348,9 @@ def _predict_chunk(
                         )
                         if _chunk_ncms:
                             _predict_chunk._chunk_ncm_acc.extend(_chunk_ncms)
-                            print(f"  段 {idx}: [NCM-dist] {len(_chunk_ncms)} 个距离证据非经典对")
+                            print(f"  segment {idx}: [NCM-dist] {len(_chunk_ncms)} distance-evidence non-canonical pairs")
                     except Exception as e_ncm:
-                        print(f"  段 {idx}: NCM 距离反推跳过: {e_ncm}")
+                        print(f"  segment {idx}: NCM distance back-inference skipped: {e_ncm}")
 
                 if chunk_region == "bsj" and ens.dist_consensus is not None:
                     try:
@@ -1353,13 +1359,13 @@ def _predict_chunk(
                             coords, ens.dist_consensus, seg["seq"],
                             n_iterations=100, dist_weight=0.3,
                         ).coords
-                        print(f"  段 {idx}: [BSJ] RNAbpFlow 距离弱约束已应用 (dist_weight=0.3)")
+                        print(f"  segment {idx}: [BSJ] RNAbpFlow distance soft-restraint applied (dist_weight=0.3)")
                     except Exception as e:
-                        print(f"  段 {idx}: [BSJ] 距离约束失败: {e}")
+                        print(f"  segment {idx}: [BSJ] distance-restraint failed: {e}")
 
                 uncertainty = max(0.1, 1.0 - conf)
                 n_pred = len(ens.per_predictor)
-                print(f"  段 {idx}: Ensemble({n_pred} predictors), {len(seg['seq'])}nt, "
+                print(f"  segment {idx}: Ensemble({n_pred} predictors), {len(seg['seq'])}nt, "
                       f"{len(coords)} P atoms (conf={conf:.3f}, bond={ens.bond_quality:.3f})")
                 return coords, conf, uncertainty, chunk_region
             except Exception as e:
@@ -1371,7 +1377,7 @@ def _predict_chunk(
                 coords = tr_result.coords
                 conf = tr_result.confidence
                 uncertainty = max(0.1, 1.0 - conf)
-                print(f"  段 {idx}: trRNA2 fallback, {len(seg['seq'])}nt, "
+                print(f"  segment {idx}: trRNA2 fallback, {len(seg['seq'])}nt, "
                       f"conf={conf:.3f}")
                 return coords, conf, uncertainty, "trrna2"
 
@@ -1379,12 +1385,12 @@ def _predict_chunk(
             coords = _geometric_init(seg["seq"])
             conf = 0.3
             uncertainty = 0.8
-            print(f"  段 {idx}: 几何初始化, {len(seg['seq'])}nt, "
+            print(f"  segment {idx}: geometric initialization, {len(seg['seq'])}nt, "
                   f"{len(coords)} P atoms (conf={conf:.3f})")
             return coords, conf, uncertainty, "geometric"
 
     except Exception as e:
-        print(f"  段 {idx} 失败: {e}, 用默认坐标")
+        print(f"  segment {idx} failed: {e}; using default coordinates")
         coords = _geometric_init(seg["seq"])
         return coords, 0.0, 1.0, "unknown"
 
@@ -1407,45 +1413,49 @@ def segmented_vfold3d_pipeline(
     global_bpp: Optional[np.ndarray] = None,
     far_pairs: Optional[List] = None,
 ) -> Tuple[np.ndarray, str, List[float], float]:
-    """分段 3D 预测 + Kabsch 拼装完整管线.
+    """Full segmented 3D-prediction + Kabsch-assembly pipeline.
 
-    改进 (v2):
-    1. 集成预测: RhoFold+ + trRosettaRNA2
-    2. 置信度加权融合: 高质量预测占更大权重
-    3. 不确定性估计: 预测器分歧作为不确定性指标
+    Improvements (v2):
+    1. Ensemble prediction: RhoFold+ + trRosettaRNA2
+    2. Confidence-weighted fusion: high-quality predictions carry more weight
+    3. Uncertainty estimation: predictor disagreement as an uncertainty signal
 
-    自适应 MSA (v3):
-    - RhoFold+ 单序列在工程序列上会"塌缩"(残基挤成一团, 物理不合理).
-      喂 MSA (真/伪) 是避免塌缩、让配对折叠出来的关键.
-    - 每个 chunk 优先用 Rfam 真 MSA (cmsearch 搜索, 需 rfam_cm 路径),
-      搜不到时用 ViennaRNA 结构约束构造伪 MSA 兜底.
-    - 保证每个 chunk 都有 MSA → RhoFold 永不塌缩.
+    Adaptive MSA (v3):
+    - RhoFold+ on a single sequence tends to "collapse" on engineered sequences
+      (residues clump together, physically implausible). Feeding an MSA (real or
+      pseudo) is what prevents collapse and lets pairing fold out.
+    - Each chunk prefers a real Rfam MSA (cmsearch; requires the rfam_cm path); when
+      none is found, a pseudo-MSA is built from ViennaRNA structural constraints.
+    - Every chunk is guaranteed an MSA, so RhoFold never collapses.
 
-    边界约束 (Level 1):
-    - 传入 global_bpp 时, 自动提取跨 segment 边界的配对作为硬约束,
-      传给 RhoFold+ 的距离约束层, 缓解分段边界的拓扑断裂.
+    Boundary restraints (Level 1):
+    - When global_bpp is provided, pairs that straddle segment boundaries are
+      automatically extracted as hard restraints and passed to the RhoFold+
+      distance-restraint layer, easing the topology break at segment boundaries.
 
     Args:
-        sequence: RNA 序列
-        secondary_structure: 二级结构
-        output_dir: 输出目录
-        max_seg_len: 段最大长度
-        overlap: 重叠长度
-        n_candidates: 每段候选数 (>1 时选最优)
-        quality_threshold: chunk 最低质量阈值
-        use_ensemble: 是否使用集成预测 (默认 True)
-        use_rhofold: 是否使用 RhoFold+ (默认 True)
-        use_trrosetta: 是否使用 trRosettaRNA2 (默认 True)
-        use_msa: 是否启用自适应 MSA (真/伪). True 时每个 chunk 都有 MSA 喂,
-            避免 RhoFold 塌缩.
-        rfam_cm: Rfam CM 库路径 (cmsearch 用). 提供时优先搜真 MSA.
-        rfam_dir: Rfam 数据目录 (家族 MSA 缓存). 有已知家族 MSA 时直接复用.
-        msa_blocks: 可选, MSA-aware 分块锚定区间
-            [{"start","end","msa_path","source"}, ...].
-            提供时 split_sequence 按锚定区间分块, 锚定 chunk 带真 MSA.
-        global_bpp: 可选, (L, L) 全局配对概率矩阵.
-            提供时自动提取边界约束对, 传给 RhoFold+ 做距离约束.
-        far_pairs: 可选远端配对列表, 传递给后处理弛豫.
+        sequence: RNA sequence
+        secondary_structure: secondary structure
+        output_dir: output directory
+        max_seg_len: maximum segment length
+        overlap: overlap length
+        n_candidates: number of candidates per segment (>1 picks the best)
+        quality_threshold: minimum per-chunk quality threshold
+        use_ensemble: whether to use ensemble prediction (default True)
+        use_rhofold: whether to use RhoFold+ (default True)
+        use_trrosetta: whether to use trRosettaRNA2 (default True)
+        use_msa: whether to enable adaptive MSA (real/pseudo). When True, every chunk
+            is fed an MSA to keep RhoFold from collapsing.
+        rfam_cm: path to the Rfam covariance-model library (for cmsearch). When set,
+            real MSAs are searched first.
+        rfam_dir: Rfam data directory (family-MSA cache). Known-family MSAs are reused directly.
+        msa_blocks: optional MSA-aware anchor intervals
+            [{"start","end","msa_path","source"}, ...]. When provided, split_sequence
+            chunks by anchor intervals and anchored chunks carry a real MSA.
+        global_bpp: optional (L, L) global base-pair-probability matrix. When provided,
+            boundary-restraint pairs are extracted automatically and passed to RhoFold+
+            as distance restraints.
+        far_pairs: optional list of far/long-range pairs, passed to post-relaxation.
 
     Returns:
         (full_coords, output_pdb_path, chunk_confidences, uncertainty)
@@ -1455,24 +1465,24 @@ def segmented_vfold3d_pipeline(
 
     L = len(sequence)
 
-    # 分段
+    # split into segments
     segments = split_sequence(sequence, secondary_structure, max_seg_len, overlap, msa_blocks=msa_blocks)
-    print(f"分段: {len(segments)} 段, 长度 {[s['end']-s['start'] for s in segments]}")
+    print(f"split into {len(segments)} segments, lengths {[s['end']-s['start'] for s in segments]}")
 
-    # 边界约束提取 (Level 1)
+    # extract boundary restraints (Level 1)
     from .boundary_constraints import build_boundary_pairs
     if global_bpp is not None:
         all_boundary_pairs = build_boundary_pairs(
             global_bpp, segments, L,
         )
         total_boundary = sum(len(bp) for bp in all_boundary_pairs)
-        print(f"边界约束: {total_boundary} 个跨段配对")
+        print(f"boundary restraints: {total_boundary} cross-segment pairs")
     else:
         all_boundary_pairs = [None] * len(segments)
 
-    # ── 并行 3D 建模 (ThreadPoolExecutor) ──
-    max_workers = min(len(segments), 8)  # 最多8个并行, 避免 GPU 显存溢出
-    print(f"  并行预测 {len(segments)} chunks (workers={max_workers})...")
+    # ── parallel 3D modeling (ThreadPoolExecutor) ──
+    max_workers = min(len(segments), 8)  # at most 8 parallel workers to avoid GPU memory overflow
+    print(f"  predicting {len(segments)} chunks in parallel (workers={max_workers})...")
 
     segment_coords = [None] * len(segments)
     chunk_confidences = [0.0] * len(segments)
@@ -1480,8 +1490,8 @@ def segmented_vfold3d_pipeline(
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {}
-        # NCM 距离反推需要全局 WC 配对集 (排除已知经典对)
-        # 来源: global_bpp 高概率 + secondary_structure 点括号
+        # NCM distance back-inference needs the global WC pair set (to exclude known canonical pairs)
+        # source: high-probability global_bpp + the secondary-structure dot-bracket
         _global_wc_set: set = set()
         if global_bpp is not None:
             try:
@@ -1519,27 +1529,27 @@ def segmented_vfold3d_pipeline(
                 chunk_confidences[idx] = conf
                 chunk_uncertainties[idx] = uncertainty
             except Exception as e:
-                print(f"  段 {idx} 并行执行失败: {e}")
+                print(f"  segment {idx} failed during parallel execution: {e}")
                 segment_coords[idx] = _geometric_init(segments[idx]["seq"])
                 chunk_confidences[idx] = 0.0
                 chunk_uncertainties[idx] = 1.0
 
-    # ── 合并各 chunk 的 NCM 距离反推结果 ──
+    # ── merge the per-chunk NCM distance back-inference results ──
     ncm_ensemble_pairs: List[Tuple[int, int, str, float]] = []
     try:
         from .ncm_ensemble import merge_chunk_ncms
         _acc = getattr(_predict_chunk, "_chunk_ncm_acc", [])
         if _acc:
             ncm_ensemble_pairs = merge_chunk_ncms([_acc])
-            print(f"  [NCM-dist] ensemble 距离反推合并: {len(ncm_ensemble_pairs)} 个非经典对")
+            print(f"  [NCM-dist] merged ensemble distance back-inference: {len(ncm_ensemble_pairs)} non-canonical pairs")
     except Exception as e_ncm_merge:
-        print(f"  [NCM-dist] 合并跳过: {e_ncm_merge}")
+        print(f"  [NCM-dist] merge skipped: {e_ncm_merge}")
 
-    # ── 双向上下文精修 (第二轮) ──
-    # 每个 chunk 用相邻 chunk 的重叠区坐标做边界约束精修,
-    # 缓解分段独立预测导致的全局拓扑不连续.
+    # ── bidirectional context refinement (second pass) ──
+    # Each chunk is refined against the overlap-region coordinates of its neighbors,
+    # easing the global topology discontinuity from independent per-segment prediction.
     if len(segment_coords) > 2:
-        print(f"  双向上下文精修 ({len(segment_coords)} chunks)...")
+        print(f"  bidirectional context refinement ({len(segment_coords)} chunks)...")
         refined_coords = []
         for idx, (seg, coords) in enumerate(zip(segments, segment_coords)):
             neighbor_context = []
@@ -1564,20 +1574,20 @@ def segmented_vfold3d_pipeline(
                 refined_coords.append(coords)
         segment_coords = refined_coords
 
-    # 置信度加权拼装 (改进: 高质量 chunk 占更大权重)
+    # confidence-weighted assembly (improvement: high-quality chunks carry more weight)
     full_coords = confidence_weighted_assemble(
         segment_coords, segments, chunk_confidences, L,
     )
 
-    # 样条平滑边界
+    # spline-smooth the boundaries
     boundaries = [seg["end"] for seg in segments[:-1]]
     full_coords = spline_smooth_dihedral(full_coords, boundaries)
 
-    # 跨片段后处理弛豫 (改进: 键长/键角约束)
-    # 长序列减少步数: <500nt 用5000步, 500-2000nt 用1000步, >2000nt 用500步
+    # cross-chunk post-relaxation (improvement: bond-length/bond-angle restraints)
+    # relaxation steps scale down for very long sequences (default 5000, >2000 nt -> 3000)
     _relax_steps = 5000 if len(sequence) <= 500 else (5000 if len(sequence) <= 2000 else 3000)
     if len(sequence) > 50:
-        print(f"  后处理弛豫 ({_relax_steps} steps, {len(sequence)}nt)...")
+        print(f"  post-relaxation ({_relax_steps} steps, {len(sequence)}nt)...")
         from .physical_relaxation import relax_structure
         full_coords, relax_metrics = relax_structure(
             full_coords, sequence,
@@ -1585,14 +1595,14 @@ def segmented_vfold3d_pipeline(
             n_steps=_relax_steps, use_openmm=True,
         )
 
-    # 写输出 PDB
+    # write the output PDB
     output_pdb = str(output_dir / "assembled.pdb")
     _write_coords_pdb(full_coords, sequence, output_pdb)
 
-    # 计算整体不确定性
+    # compute the overall uncertainty
     overall_uncertainty = np.mean(chunk_uncertainties) if chunk_uncertainties else 0.5
 
-    # 打印质量摘要
+    # print the quality summary
     low_conf = [i for i, c in enumerate(chunk_confidences) if c < quality_threshold]
     uncertain = [i for i, u in enumerate(chunk_uncertainties) if u > 0.5]
     if low_conf:
@@ -1600,7 +1610,7 @@ def segmented_vfold3d_pipeline(
     if uncertain:
         print(f"  [WARN] High uncertainty chunks: {uncertain} (uncertainty > 0.5)")
 
-    # NCM ensemble 检出随主结果返回 (isrnaclong Level 1 合并进 pairs)
+    # NCM ensemble detections are returned with the main result (isrnaclong Level 1 merges them into pairs)
     return full_coords, output_pdb, chunk_confidences, overall_uncertainty, ncm_ensemble_pairs
 
 
@@ -1612,43 +1622,44 @@ def _refine_with_context(
     alpha: float = 0.3,
     n_context: int = 50,
 ) -> np.ndarray:
-    """用邻居 chunk 坐标做边界约束精修 (坐标混合).
+    """Refine against neighbor-chunk coordinates (coordinate blending).
 
-    在重叠区, 将当前 chunk 的坐标与邻居坐标做加权混合,
-    使相邻 chunk 的边界处坐标连续. 不使用 OpenMM, 纯坐标操作.
+    In the overlap region, blend the current chunk's coordinates with its neighbors'
+    so the chain is continuous at chunk boundaries. Pure coordinate manipulation;
+    does not use OpenMM.
 
     Args:
-        coords: (L, 3) 当前 chunk 的 P 坐标
-        neighbor_context: 邻居坐标列表, 每项 ("prev"/"next", coords)
-        sequence: 当前 chunk 序列
-        secondary_structure: 当前 chunk 二级结构
-        alpha: 混合权重 (0=全保留当前, 1=全用邻居). 默认 0.3
-        n_context: 最多取邻居多少个残基做混合. 默认 50
+        coords: (L, 3) P coordinates of the current chunk
+        neighbor_context: list of neighbor coordinates, each ("prev"/"next", coords)
+        sequence: current chunk sequence
+        secondary_structure: secondary structure of the current chunk
+        alpha: blend weight (0 = keep the current chunk entirely, 1 = use the neighbor entirely). Default 0.3
+        n_context: max number of neighbor residues to blend. Default 50
 
     Returns:
-        (L, 3) 精修后的坐标
+        (L, 3) refined coordinates
     """
     refined = coords.copy()
     L = len(refined)
 
     for label, neighbor_coords in neighbor_context:
         if label == "prev":
-            # 前 chunk 的最后 n_context 个残基 → 对应当前 chunk 的前 n_context 个
+            # last n_context residues of the previous chunk -> correspond to the first n_context of the current chunk
             ctx_len = min(n_context, len(neighbor_coords), L)
             if ctx_len <= 0:
                 continue
-            # 邻居坐标在重叠区: 取尾部 ctx_len 个
+            # neighbor coordinates in the overlap: take the trailing ctx_len
             neighbor_tail = neighbor_coords[-ctx_len:]
-            # 当前 chunk 的前 ctx_len 个残基与邻居混合
-            # 使用线性衰减权重: 越靠近重叠边界 alpha 越大, 越远越小
+            # blend the first ctx_len residues of the current chunk with the neighbor
+            # use a linear decay weight: alpha is largest at the overlap boundary and fades inward
             for i in range(ctx_len):
-                # 衰减: 从边界 1.0 衰减到内部 0.0
+                # decay: from 1.0 at the boundary down to 0.0 inward
                 fade = 1.0 - i / ctx_len
                 w = alpha * fade
                 refined[i] = (1.0 - w) * refined[i] + w * neighbor_tail[i]
 
         elif label == "next":
-            # 后 chunk 的最前 n_context 个残基 → 对应当前 chunk 的后 n_context 个
+            # first n_context residues of the next chunk -> correspond to the last n_context of the current chunk
             ctx_len = min(n_context, len(neighbor_coords), L)
             if ctx_len <= 0:
                 continue
@@ -1664,16 +1675,16 @@ def _refine_with_context(
 
 
 def _geometric_init(sequence: str) -> np.ndarray:
-    """几何初始化: 生成扩展链坐标."""
+    """Geometric initialization: generate an extended-chain coordinate."""
     n = len(sequence)
     coords = np.zeros((n, 3))
     for i in range(n):
-        coords[i] = [i * 5.9, 0, 0]  # P-P 键长 5.9A
+        coords[i] = [i * 5.9, 0, 0]  # P-P bond length 5.9 A
     return coords
 
 
 def _read_vfold_pdb(pdb_path: str) -> np.ndarray:
-    """从 Vfold3D 输出 PDB 读取 P 坐标."""
+    """Read the P coordinates from a Vfold3D-output PDB."""
     coords = []
     with open(pdb_path) as f:
         for line in f:
@@ -1683,7 +1694,7 @@ def _read_vfold_pdb(pdb_path: str) -> np.ndarray:
                 z = float(line[46:54])
                 coords.append([x, y, z])
     if not coords:
-        # 尝试读取所有原子，取 P 或第一个原子
+        # try reading every atom; take the P atom or the first atom
         with open(pdb_path) as f:
             for line in f:
                 if line.startswith("ATOM"):
@@ -1696,11 +1707,11 @@ def _read_vfold_pdb(pdb_path: str) -> np.ndarray:
 
 
 def _default_helix_coords(L: int) -> np.ndarray:
-    """生成默认 A-form 螺旋坐标 (回退用)."""
+    """Generate default A-form helix coordinates (fallback)."""
     coords = np.zeros((L, 3))
-    R = 4.4  # Å, 螺旋半径
-    pitch = 2.8  # Å, 螺距
-    turn = 33.0 * math.pi / 180  # rad, 每残基旋转
+    R = 4.4  # A, helix radius
+    pitch = 2.8  # A, helical pitch
+    turn = 33.0 * math.pi / 180  # rad, rotation per residue
 
     for i in range(L):
         z = i * pitch
@@ -1713,7 +1724,7 @@ def _default_helix_coords(L: int) -> np.ndarray:
 
 
 def _write_coords_pdb(coords: np.ndarray, sequence: str, output_path: str):
-    """把坐标写成 PDB. CG_to_allatom.exe 需要 3字母残基名."""
+    """Write the coordinates to a PDB file. CG_to_allatom.exe requires 3-letter residue names."""
     _BM = {"A": "ADE", "U": "URA", "G": "GUA", "C": "CYT"}
     lines = ["HEADER    Segmented Vfold3D assembly"]
     for i, (x, y, z) in enumerate(coords):

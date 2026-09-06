@@ -1,20 +1,24 @@
 """
-pair_graph.py - circRNA 配对图构建 + 互补性扫描 + 拓扑距离。
+pair_graph.py - circRNA pairing-graph construction + complementarity scan + topological distance.
 
-RL 远端配对优化的前置模块。给 ViennaRNA 配对 + 序列, 补充互补性扫描
-漏掉的长程配对 (如 HA 反向重复), 建图 (骨架相邻 + 配对边), BFS 算
-拓扑距离, 标记远端配对 (dist > 50), 提取茎块。
+Front-end module for RL far/long-range-pair optimization. Given ViennaRNA pairs
++ a sequence, it supplements the long-range pairs the complementarity scan
+misses (e.g. HA inverted repeats), builds a graph (backbone adjacency + pairing
+edges), computes topological distances with BFS, flags far/long-range pairs
+(dist > 50), and extracts stem blocks.
 
-circRNA 环形拓扑: 骨架相邻边含 (L-1, 0) BSJ 闭合边。
-|i-j| 绝对值在环上有跨 BSJ 误判 (如 L=2013 的 (5,2010) |i-j|=2005
-但环距 8), 用图距离 (骨架边+配对边 BFS) 正确判定远端。
+circRNA circular topology: the backbone adjacency includes the (L-1, 0) BSJ
+closure edge. The absolute |i-j| is misleading across the BSJ on a ring (e.g.
+for L=2013, (5,2010) has |i-j|=2005 but a ring distance of 8), so graph distance
+(BFS over backbone + pairing edges) is used to classify far/long-range pairs
+correctly.
 
-参数 (2026-07-21 定稿, 见 docs/scheme2_rl_design.md):
-  W = 6            滑窗长度 (RNA 稳定茎最小长度)
-  WC_RATE = 0.80   Watson-Crick 配对率阈值 (允许 1 个 G·U wobble)
-  DG_THRESHOLD = -5.0   简单 NN 自由能阈值 (kcal/mol, 去假阳性)
-  MIN_STEM = 4     连续配对最小长度 (茎块提取)
-  FAR_DIST = 50    拓扑距离阈值 (dist > 50 = 远端)
+Parameters (frozen 2026-07-21; see docs/scheme2_rl_design.md):
+  W = 6            sliding-window length (minimum length of a stable RNA stem)
+  WC_RATE = 0.80   Watson-Crick pairing-rate threshold (allows one G.U wobble)
+  DG_THRESHOLD = -5.0   simple NN free-energy threshold (kcal/mol; removes false positives)
+  MIN_STEM = 4     minimum number of consecutive pairs (stem-block extraction)
+  FAR_DIST = 50    topological-distance threshold (dist > 50 = far/long-range)
 """
 from __future__ import annotations
 
@@ -23,28 +27,28 @@ from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
-# ---------- Watson-Crick 配对规则 ----------
-# 标准 WC: A-U, G-C, G-U(wobble)
+# ---------- Watson-Crick pairing rules ----------
+# Standard WC: A-U, G-C, plus G-U (wobble)
 _WC_PAIRS: Set[Tuple[str, str]] = {
     ("A", "U"), ("U", "A"),
     ("G", "C"), ("C", "G"),
 }
 _GU_WOBBLE: Set[Tuple[str, str]] = {("G", "U"), ("U", "G")}
 
-# ---------- 算法参数 ----------
-W = 6                 # 滑窗长度
-WC_RATE = 0.80        # WC 配对率阈值
-DG_THRESHOLD = -3.0   # NN 自由能阈值 (kcal/mol, 粗参数表故放宽)
-MIN_STEM = 4          # 茎块最小连续配对数
-MIN_WC_IN_WIN = 4     # 方案 E: 扫描窗口内连续 WC 对数门槛 (6中≥4)
-FAR_DIST = 50         # 远端拓扑距离阈值
-MAX_KMER_FREQ = 20    # 方案 H: 单个 k-mer 出现 > 此值跳过 rc 匹配 (滤重复序列)
+# ---------- Algorithm parameters ----------
+W = 6                 # sliding-window length
+WC_RATE = 0.80        # WC pairing-rate threshold
+DG_THRESHOLD = -3.0   # NN free-energy threshold (kcal/mol; relaxed for the coarse parameter table)
+MIN_STEM = 4          # minimum consecutive pairs in a stem block
+MIN_WC_IN_WIN = 4     # scheme E: min consecutive WC pairs inside a scan window (>=4 of 6)
+FAR_DIST = 50         # far/long-range topological-distance threshold
+MAX_KMER_FREQ = 20    # scheme H: skip rc matching when a single k-mer appears more than this (filters repeats)
 
-# ---------- 简单 RNA nearest-neighbor 自由能参数 ----------
-# RNA NN model (SantaLucia 1998 近似值, kcal/mol at 37°C)
-# 用于过滤互补扫描的假阳性: ΔG < -5 才算稳定茎
+# ---------- Simple RNA nearest-neighbor free-energy parameters ----------
+# RNA NN model (SantaLucia 1998 approximations, kcal/mol at 37 deg C)
+# Used to filter complementarity-scan false positives: only DG < -5 counts as a stable stem
 _NN_DG: Dict[Tuple[str, str, str, str], float] = {
-    # 5'-XY-3' / 3'-X'Y'-5' 的 stacking free energy
+    # stacking free energy of 5'-XY-3' / 3'-X'Y'-5'
     ("A", "U", "A", "U"): -1.0, ("U", "A", "U", "A"): -1.0,
     ("A", "U", "C", "G"): -2.0, ("C", "G", "A", "U"): -2.0,
     ("G", "C", "A", "U"): -2.0, ("A", "U", "G", "C"): -2.0,
@@ -57,24 +61,24 @@ _NN_DG: Dict[Tuple[str, str, str, str], float] = {
     ("G", "U", "U", "A"): -0.5, ("U", "A", "G", "U"): -0.5,
     ("G", "U", "G", "C"): -1.5, ("C", "G", "G", "U"): -1.5,
 }
-# 默认 stack 能量 (查不到的 fallback)
+# Default stack energy (fallback when not found in the table)
 _NN_DEFAULT = -1.0
 
 
 def _is_wc_pair(b1: str, b2: str) -> bool:
-    """标准 Watson-Crick 配对 (A-U, G-C)。"""
+    """Canonical Watson-Crick pairing (A-U, G-C)."""
     return (b1, b2) in _WC_PAIRS
 
 
 def _is_complementary(b1: str, b2: str) -> bool:
-    """Watson-Crick 或 G·U wobble 配对。"""
+    """Watson-Crick or G.U wobble pairing."""
     return (b1, b2) in _WC_PAIRS or (b1, b2) in _GU_WOBBLE
 
 
 def _wc_count(seq_a: str, seq_b: str) -> int:
-    """seq_a 与 seq_b 反向平行互补的 WC 配对数。
+    """Number of WC pairs between seq_a and its antiparallel complement seq_b.
 
-    win_b 是 win_a 的反向互补候选: seq_a[k] 配 seq_b[W-1-k]。
+    win_b is the reverse-complement candidate of win_a: seq_a[k] pairs with seq_b[W-1-k].
     """
     n = min(len(seq_a), len(seq_b))
     cnt = 0
@@ -85,9 +89,9 @@ def _wc_count(seq_a: str, seq_b: str) -> int:
 
 
 def _nn_free_energy(seq_a: str, seq_b: str) -> float:
-    """简单 nearest-neighbor stacking 自由能 (kcal/mol)。
+    """Simple nearest-neighbor stacking free energy (kcal/mol).
 
-    seq_a[k] 配 seq_b[n-1-k] (反向平行)。stack = 相邻两个配对。
+    seq_a[k] pairs with seq_b[n-1-k] (antiparallel). A stack is two consecutive pairs.
     """
     n = min(len(seq_a), len(seq_b))
     if n < 2:
@@ -95,48 +99,53 @@ def _nn_free_energy(seq_a: str, seq_b: str) -> float:
     dg = 0.0
     for k in range(n - 1):
         x, y = seq_a[k], seq_a[k + 1]
-        # 配对伙伴: seq_b[n-1-k], seq_b[n-1-(k+1)] = seq_b[n-2-k]
+        # Pairing partners: seq_b[n-1-k], seq_b[n-1-(k+1)] = seq_b[n-2-k]
         xp, yp = seq_b[n - 1 - k], seq_b[n - 2 - k]
         dg += _NN_DG.get((x, y, xp, yp), _NN_DEFAULT)
     return dg
 
 
-# ---------- 功能分区解析 (大小写 mask) ----------
+# ---------- Functional-region parsing (case mask) ----------
 def parse_case_annotation(
     sequence: str,
     *,
     default_coding: bool = False,
 ) -> np.ndarray:
-    """从序列大小写解析出 coding mask。
+    """Parse a coding mask from the letter case of the sequence.
 
-    人工载体序列常有大写/小写混排: 大写段 = 功能元件(ORF/IRES/关键 motif),
-    小写段 = UTR/linker/调控/限制酶位点。RL 后 amber 精修时, coding 区
-    残基位置钉死(物理约束拉回 CG 原坐标), 非 coding 区接受 RL 优化 + 物理收敛。
+    Engineered vector sequences are often a mix of upper/lowercase: uppercase
+    segments are functional elements (ORF/IRES/key motifs) and lowercase
+    segments are UTR/linker/regulatory/restriction sites. During the post-RL
+    amber refinement, residues in coding regions are pinned (physical restraints
+    pull them back to the original CG coordinates), while non-coding regions
+    accept the RL optimization plus physical convergence.
 
-    当序列无大小写区分 (全大写或全小写) 时, 整段按 default_coding 处理。
-    CircBase 真样本通常全小写, default_coding=False 即全非 coding
-    (RL 全序列可优化); 人工载体有大小写, 直接按字母大小写解析。
+    When the sequence has no case distinction (all upper or all lower), the
+    whole sequence is treated according to default_coding. CircBase real samples
+    are usually all lowercase, so default_coding=False makes everything
+    non-coding (RL may optimize the whole sequence); engineered vectors carry
+    case, so parse directly by letter case.
 
     Args:
-        sequence: 序列 (大小写混排或纯字母)
-        default_coding: 序列无大小写区分时的默认
-            False (默认) = 默认全非 coding
+        sequence: the sequence (mixed case or plain letters)
+        default_coding: default used when the sequence has no case distinction
+            False (default) = everything is non-coding by default
 
     Returns:
-        np.ndarray[bool], shape (L,). True = coding 区残基。
+        np.ndarray[bool], shape (L,). True = residue in a coding region.
     """
     mask = np.zeros(len(sequence), dtype=bool)
-    # 检测序列有无大小写区分
+    # Detect whether the sequence has a case distinction
     has_upper = any(c.isupper() for c in sequence)
     has_lower = any(c.islower() for c in sequence)
     no_case_distinction = not (has_upper and has_lower)
 
     if no_case_distinction:
-        # 无大小写区分: 整段按 default
+        # No case distinction: apply default to the whole sequence
         mask[:] = default_coding
         return mask
 
-    # 有大小写区分: 按字母大小写解析
+    # Case distinction present: parse by letter case
     for i, c in enumerate(sequence):
         if c.isalpha() and c.isupper():
             mask[i] = True
@@ -145,7 +154,7 @@ def parse_case_annotation(
     return mask
 
 
-# ---------- 互补性扫描 ----------
+# ---------- Complementarity scan ----------
 def complementarity_scan(
     sequence: str,
     window: int = W,
@@ -153,39 +162,43 @@ def complementarity_scan(
     dg_threshold: float = DG_THRESHOLD,
     min_gap: int = 10,
 ) -> List[Tuple[int, int, float]]:
-    """滑窗互补扫描 (方案 H: k-mer 索引, 从 O(L²) 降到 O(L×4^W))。
+    """Sliding-window complementarity scan (scheme H: k-mer indexing, O(L^2) -> O(L*4^W)).
 
-    旧版 O(L²) 双循环在 L=3000 时 4.5M 次迭代, 纯 Python。
-    新版: 预索引所有窗口的 reverse_complement k-mer → 用 k-mer
-    反向查找候选 → 只在候选上验 dg, 复杂度 O(L×4^W)。
+    The old O(L^2) double loop runs 4.5M pure-Python iterations at L=3000. The
+    new version pre-indexes the reverse-complement k-mer of every window, uses
+    the k-mer to look up candidates in reverse, and only validates dg on those
+    candidates - complexity O(L*4^W).
 
     Args:
-        sequence: ACGU 字符串 (circRNA, 环形)
-        window: 滑窗长度 (默认 6)
-        wc_rate: WC 配对率阈值 (允许 G·U wobble)
-        dg_threshold: NN 自由能阈值, ΔG < 此值才算稳定 (kcal/mol)
-        min_gap: 环距 < 此值跳过 (避免自配/相邻)
+        sequence: ACGU string (circRNA, circular)
+        window: sliding-window length (default 6)
+        wc_rate: WC pairing-rate threshold (allows G.U wobble)
+        dg_threshold: NN free-energy threshold; only DG below this counts as
+            stable (kcal/mol)
+        min_gap: skip ring distances below this (avoids self-pairing / adjacent)
 
     Returns:
-        [(i, j, dg), ...] 配对起始位置对 + 自由能。
-        i, j 是窗口起始 (0-based), 代表 seq[i:i+W] 与 seq[j:j+W] 反向平行互补。
+        [(i, j, dg), ...] window-start position pairs + free energy.
+        i, j are window starts (0-based), meaning seq[i:i+W] and seq[j:j+W] are
+        antiparallel complements.
     """
     L = len(sequence)
     if L < window * 2 + min_gap:
         return []
 
-    # 环形序列缓存 (窗口跨末尾时用)
+    # Circular-sequence buffer (used when a window crosses the end)
     seq_ext = sequence + sequence[:window - 1]
 
-    # 预索引: k-mer → [起始位置列表]
+    # Pre-index: k-mer -> [list of start positions]
     kmer_idx: Dict[str, List[int]] = {}
     for i in range(L):
         kmer = seq_ext[i:i + window]
         if len(kmer) == window:
             kmer_idx.setdefault(kmer, []).append(i)
 
-    # 反向映射: 对每个 k-mer, 找它的 reverse_complement
-    # 只匹配低频 k-mer (方案 H: 避免 poly-G 等重复序列互相爆炸匹配)
+    # Reverse mapping: for each k-mer, find its reverse complement
+    # Only match low-frequency k-mers (scheme H: avoids repetitive sequences
+    # such as poly-G exploding into mutual matches)
     rc_map: Dict[str, str] = {}
     for kmer, positions in kmer_idx.items():
         if len(positions) > MAX_KMER_FREQ:
@@ -211,14 +224,15 @@ def complementarity_scan(
                 if key in seen:
                     continue
                 seen.add(key)
-                # 反向平行: win_b = seq[j:j+W] 配 win_a 的反向
+                # Antiparallel: win_b = seq[j:j+W] pairs against the reverse of win_a
                 win_a = seq_ext[i:i + window]
                 win_b = seq_ext[j:j + window]
-                # 全匹配验证 (k-mer RC 已保证全 WC, 但需确认反向平行)
+                # Full-match validation (k-mer RC already guarantees all-WC, but the
+                # antiparallel orientation still needs confirming)
                 wc = _wc_count(win_a, win_b)
                 if wc / window < wc_rate:
                     continue
-                # 能量过滤
+                # Energy filter
                 dg = _nn_free_energy(win_a, win_b)
                 if dg >= dg_threshold:
                     continue
@@ -228,46 +242,46 @@ def complementarity_scan(
 
 
 def _reverse_complement(seq: str) -> str:
-    """返回 seq 的反向互补 (ACGU)。"""
+    """Return the reverse complement of seq (ACGU)."""
     comp = {'A': 'T', 'T': 'A', 'G': 'C', 'C': 'G',
             'U': 'A', 'A': 'U', 'N': 'N'}
     return "".join(comp.get(b, 'N') for b in reversed(seq))
 
 
-# ---------- 配对图构建 ----------
+# ---------- Pairing-graph construction ----------
 def build_pair_graph(
     sequence: str,
     vienna_pairs: List[Tuple[int, int, float]],
     scan_pairs: Optional[List[Tuple[int, int, float]]] = None,
 ) -> Dict[int, List[int]]:
-    """建配对图邻接表。
+    """Build the pairing-graph adjacency list.
 
-    节点 = 残基 0..L-1。
-    边 = 骨架相邻 (i, (i+1) mod L) + ViennaRNA 配对 + 互补扫描补充。
+    Nodes = residues 0..L-1.
+    Edges = backbone adjacency (i, (i+1) mod L) + ViennaRNA pairs + complementarity-scan additions.
 
     Returns:
-        adj: {node: [neighbor, ...]} 无向图邻接表。
+        adj: {node: [neighbor, ...]} undirected graph adjacency list.
     """
     L = len(sequence)
     adj: Dict[int, List[int]] = {i: [] for i in range(L)}
 
-    # 骨架相邻边 (含 BSJ 闭合 (L-1, 0))
+    # Backbone adjacency edges (including the (L-1, 0) BSJ closure)
     for i in range(L):
         nxt = (i + 1) % L
         adj[i].append(nxt)
         adj[nxt].append(i)
 
-    # ViennaRNA 配对边
+    # ViennaRNA pairing edges
     for (i, j, _w) in vienna_pairs:
         if 0 <= i < L and 0 <= j < L and i != j:
             adj[i].append(j)
             adj[j].append(i)
 
-    # 互补扫描补充 (扫描返回窗口起始, 展开成逐残基配对)
-    # 方案 E: 质量门控 — 只在连续窗口内 ≥4/6 是 WC 对才展开
+    # Complementarity-scan additions (scan returns window starts; expand them into per-residue pairs)
+    # Scheme E: quality gate - expand only windows with >= 4/6 WC pairs in a row
     if scan_pairs:
         for (i0, j0, _dg) in scan_pairs:
-            # 高质量门: 要求 ≥ MIN_WC_IN_WIN 个连续 WC 对才算真远端茎
+            # Quality gate: require >= MIN_WC_IN_WIN consecutive WC pairs for a genuine far stem
             seq = sequence
             win_a = seq[i0:i0 + W] if len(seq[i0:i0 + W]) == W else (seq + seq[:W - 1])[i0:i0 + W]
             win_b = seq[j0:j0 + W] if len(seq[j0:j0 + W]) == W else (seq + seq[:W - 1])[j0:j0 + W]
@@ -284,26 +298,27 @@ def build_pair_graph(
                     adj[ik].append(jk)
                     adj[jk].append(ik)
 
-    # 去重 (同一对多次添加)
+    # Deduplicate (the same pair may have been added multiple times)
     for v in adj:
         adj[v] = list(set(adj[v]))
 
     return adj
 
 
-# ---------- BFS 拓扑距离 ----------
+# ---------- BFS topological distance ----------
 def topological_distance(
     adj: Dict[int, List[int]], i: int, j: int,
     *,
     exclude_edge: Optional[Tuple[int, int]] = None,
 ) -> int:
-    """BFS 算图距离 dist(i, j)。边权=1。
+    """Compute the graph distance dist(i, j) by BFS. Unit edge weights.
 
-    exclude_edge: 若指定 (a, b), BFS 时跳过 a-b 这条边 (去自身配对边)。
-    用于"去自身配对边的图距离": 衡量这对配对能否被其他配对快速连通。
+    exclude_edge: if given (a, b), the BFS skips the a-b edge (removing a pair's own edge).
+    Used for the "graph distance without the pair's own edge": measures whether
+    this pair can be connected quickly through other pairs.
 
-    circRNA 环形: (5, 2010) 在 L=2013 上走骨架 8 步到达, dist=8 (近端);
-    HA 反向重复拓扑远, dist 大。
+    circRNA ring: on L=2013, (5, 2010) is reached in 8 backbone steps, dist=8
+    (near); an HA inverted repeat is topologically far, so dist is large.
     """
     if i == j:
         return 0
@@ -316,7 +331,7 @@ def topological_distance(
     while queue:
         node, d = queue.popleft()
         for nb in adj.get(node, []):
-            # 跳过要排除的边 (双向)
+            # Skip the edge to exclude (in both directions)
             if exclude_edge is not None:
                 if (node == ea and nb == eb) or (node == eb and nb == ea):
                     continue
@@ -327,13 +342,13 @@ def topological_distance(
                 queue.append((nb, d + 1))
         if len(visited) >= L:
             break
-    return -1  # 不可达 (异常)
+    return -1  # unreachable (unexpected)
 
 
 def ring_distance(i: int, j: int, L: int) -> int:
-    """环距 = min(|i-j|, L-|i-j|)。纯骨架最短路径, 不含配对边。
+    """Ring distance = min(|i-j|, L-|i-j|). Pure-backbone shortest path, no pairing edges.
 
-    跨 BSJ 正确: L=2013 的 (5, 2010) 环距 = min(2005, 8) = 8。
+    Correct across the BSJ: for L=2013, (5, 2010) has ring distance min(2005, 8) = 8.
     """
     return min(abs(i - j), L - abs(i - j))
 
@@ -344,19 +359,25 @@ def far_end_pairs(
     scan_pairs: Optional[List[Tuple[int, int, float]]] = None,
     far_dist: int = FAR_DIST,
 ) -> List[Tuple[int, int]]:
-    """标记远端配对 = 环距远 且 拓扑孤立。
+    """Flag far/long-range pairs = far in ring distance AND topologically isolated.
 
-    两个条件都满足才算远端 (1 与 2 不矛盾, 互补):
-      - 环距 = min(|i-j|, L-|i-j|) > far_dist  (纯骨架远)
-      - 去自身配对边的图距离 > far_dist  (不被其他配对快速连通)
+    Both conditions must hold for a pair to be far (conditions 1 and 2 are not
+    contradictory; they are complementary):
+      - ring distance = min(|i-j|, L-|i-j|) > far_dist  (far along the backbone)
+      - graph distance without the pair's own edge > far_dist  (not quickly
+        connected through other pairs)
 
-    合并 ViennaRNA + 扫描的所有配对, 逐对判定。
+    Merges all pairs from ViennaRNA + the scan and evaluates each pair.
 
-    降级兜底 (2026-07-22 加): 若上述强判定 0 产出, 说明配对图被扫描
-    假阳性织成小世界 (实测 circBase 4000nt+ 上拓扑距 max=4-5, 全判近端)。
-    此时拓扑孤立判失效, 降级到「环距远 且 配对来自 ViennaRNA 真配对」:
-      ring_dist > max(far_dist, L//4)  且  (i,j) ∈ vienna_pairs
-    只信 ViennaRNA 真配对, 规避扫描假阳性污染。无 ViennaRNA 时仍返回 []。
+    Degraded fallback (added 2026-07-22): if the strong test above yields
+    nothing, the pairing graph has been woven into a small world by scan false
+    positives (measured: on circBase 4000nt+ the topological distance maxes at
+    4-5, so everything is judged near). The topological-isolation test is then
+    unreliable, so degrade to "far in ring distance AND pair comes from a true
+    ViennaRNA pair":
+      ring_dist > max(far_dist, L//4)  AND  (i,j) in vienna_pairs
+    Only true ViennaRNA pairs are trusted, avoiding scan false-positive
+    contamination. Still returns [] when there is no ViennaRNA input.
     """
     L = len(adj)
     all_pairs: Set[Tuple[int, int]] = set()
@@ -370,13 +391,13 @@ def far_end_pairs(
                 if ik != jk:
                     all_pairs.add((min(ik, jk), max(ik, jk)))
 
-    # 强判定: 环距远 且 拓扑孤立
+    # Strong test: far in ring distance AND topologically isolated
     far = []
     for (i, j) in all_pairs:
-        # 条件 1: 环距远
+        # Condition 1: far in ring distance
         if ring_distance(i, j, L) <= far_dist:
             continue
-        # 条件 2: 去自身配对边的图距离远 (拓扑孤立)
+        # Condition 2: graph distance without the pair's own edge is large (topologically isolated)
         d = topological_distance(adj, i, j, exclude_edge=(i, j))
         if d > far_dist:
             far.append((i, j))
@@ -384,7 +405,8 @@ def far_end_pairs(
     if far:
         return far
 
-    # 降级: 拓扑判失效 (图织密), 改用环距 + ViennaRNA 真配对
+    # Degrade: the topological test is unreliable (densely connected graph); use
+    # ring distance + true ViennaRNA pairs instead
     vienna_set: Set[Tuple[int, int]] = {
         (min(i, j), max(i, j)) for (i, j, _w) in vienna_pairs
     }
@@ -398,30 +420,31 @@ def far_end_pairs(
     return far_fallback
 
 
-# ---------- 茎块提取 ----------
+# ---------- Stem-block extraction ----------
 def extract_stem_blocks(
     vienna_pairs: List[Tuple[int, int, float]],
     scan_pairs: Optional[List[Tuple[int, int, float]]] = None,
     min_stem: int = MIN_STEM,
 ) -> List[List[Tuple[int, int]]]:
-    """提取茎块 (连续配对 ≥ min_stem 的段)。
+    """Extract stem blocks (runs of >= min_stem consecutive pairs).
 
-    扫描返回窗口对, 展开成逐残基配对后, 按位置连续性聚类。
-    一个茎块 = 一串连续 i 配一串连续 j (反向平行)。
+    The scan returns window pairs; after expanding them into per-residue pairs,
+    cluster them by positional continuity. A stem block is a run of consecutive
+    i residues pairing with a run of consecutive j residues (antiparallel).
 
     Returns:
-        [[(i, j), ...], ...] 每个茎块的逐残基配对列表。
+        [[(i, j), ...], ...] per-residue pair lists, one per stem block.
     """
-    # 合并所有配对 (展开扫描窗口)
+    # Merge all pairs (expand scan windows)
     pair_set: Set[Tuple[int, int]] = set()
     for (i, j, _w) in vienna_pairs:
         pair_set.add((min(i, j), max(i, j)))
     if scan_pairs:
-        # 扫描窗口对展开成逐残基配对 (此处简化: 只用窗口代表对)
+        # Expand scan-window pairs into per-residue pairs (simplified here: use only the window representative pair)
         for (i0, j0, _dg) in scan_pairs:
             pair_set.add((min(i0, j0), max(i0, j0)))
 
-    # 按 i 排序, 找连续 i + 连续 j 的段
+    # Sort by i and find runs of consecutive i + consecutive j
     sorted_pairs = sorted(pair_set)
     blocks: List[List[Tuple[int, int]]] = []
     current: List[Tuple[int, int]] = []
@@ -431,7 +454,8 @@ def extract_stem_blocks(
             current = [p]
             continue
         prev = current[-1]
-        # 连续: i 递增 1, j 递减 1 (反向平行) 或 j 递增 1 (平行, 少见)
+        # Consecutive: i increases by 1 and j decreases by 1 (antiparallel), or j
+        # increases by 1 (parallel, rare)
         if (p[0] == prev[0] + 1 and p[1] == prev[1] - 1) or \
            (p[0] == prev[0] + 1 and p[1] == prev[1] + 1):
             current.append(p)
@@ -444,7 +468,7 @@ def extract_stem_blocks(
     return blocks
 
 
-# ---------- 假结检测 (Pseudoknot Detection) ----------
+# ---------- Pseudoknot detection ----------
 
 def detect_pseudoknots_from_bpp(
     sequence: str,
@@ -455,28 +479,30 @@ def detect_pseudoknots_from_bpp(
     min_confidence: float = 0.3,
     is_circular: bool = True,
 ) -> List[Tuple[int, int, float]]:
-    """从 BPP 矩阵检测假结候选 (交叉配对).
+    """Detect pseudoknot candidates (crossing pairs) from the BPP matrix.
 
-    假结定义: 两对 (i,j) 和 (k,l) 在序列上线性交叉 (i<k<j<l),
-    或在环形拓扑上交叉 (环形交叉检测).
+    A pseudoknot is defined as two pairs (i,j) and (k,l) that cross linearly in
+    the sequence (i<k<j<l), or that cross on the circular topology (circular
+    crossing detection).
 
-    对 circRNA 特别重要: 环形拓扑天然产生跨 BSJ 的假结.
+    Especially important for circRNA: the circular topology naturally creates
+    pseudoknots across the BSJ.
 
     Args:
-        sequence: RNA 序列
-        pp_matrix: (L, L) BPP 概率矩阵
-        existing_pairs: 已有配对 (避免重复)
-        pk_threshold: BPP 最低概率阈值
-        min_confidence: 假结置信度阈值
-        is_circular: 是否环形拓扑
+        sequence: RNA sequence
+        pp_matrix: (L, L) BPP probability matrix
+        existing_pairs: already-known pairs (to avoid duplicates)
+        pk_threshold: minimum BPP probability threshold
+        min_confidence: pseudoknot confidence threshold
+        is_circular: whether the topology is circular
 
     Returns:
-        [(i, j, confidence), ...] 假结候选配对
+        [(i, j, confidence), ...] pseudoknot candidate pairs
     """
     L = len(sequence)
     wc = {('A', 'U'), ('U', 'A'), ('G', 'C'), ('C', 'G'), ('G', 'U'), ('U', 'G')}
 
-    # 收集所有高概率配对
+    # Collect all high-probability pairs
     all_pairs = []
     for i in range(L):
         for j in range(i + 1, L):
@@ -484,13 +510,13 @@ def detect_pseudoknots_from_bpp(
             if p >= pk_threshold:
                 all_pairs.append((i, j, float(p)))
 
-    # 已有配对集合 (用于排除, 兼容2元组和3元组)
+    # Set of existing pairs (for exclusion; accepts 2- and 3-tuples)
     existing_set = set()
     for p in existing_pairs:
         i, j = p[0], p[1]
         existing_set.add((min(i, j), max(i, j)))
 
-    # 检测交叉 (假结)
+    # Detect crossings (pseudoknots)
     pk_candidates = []
     n = len(all_pairs)
     for a in range(n):
@@ -498,52 +524,51 @@ def detect_pseudoknots_from_bpp(
         for b in range(a + 1, n):
             k, l, pk = all_pairs[b]
             if k == i or k == j or l == i or l == j:
-                continue  # 共享残基, 不是假结
+                continue  # shared residue, not a pseudoknot
 
-            # 线性交叉: i<k<j<l 或 k<i<l<j
+            # Linear crossing: i<k<j<l or k<i<l<j
             linear_cross = (i < k < j < l) or (k < i < l < j)
 
-            # 环形交叉: 在环形拓扑上两对交叉
+            # Circular crossing: the two pairs cross on the circular topology
             circ_cross = False
             if is_circular and not linear_cross:
-                # 环形上, 两对交叉的条件:
-                # 将 (i,j) 和 (k,l) 按环形顺序排列,
-                # 如果它们交替出现则交叉
+                # On the ring, two pairs cross when:
+                # ordering (i,j) and (k,l) around the circle, they interleave
                 pos = sorted([i, j, k, l])
-                # 检查是否交替: i,k,j,l 或 i,l,j,k 等
+                # Check for interleaving: i,k,j,l or i,l,j,k, etc.
                 order = [0] * 4
                 for idx, p in enumerate([i, j, k, l]):
                     order[pos.index(p)] = idx
-                # 交叉: 0和1之间夹着2或3中的一个
+                # Crossing: 2 or 3 sits between 0 and 1
                 circ_cross = (order[0] < order[2] < order[1]) or \
                              (order[0] < order[3] < order[1]) or \
                              (order[2] < order[0] < order[3]) or \
                              (order[2] < order[1] < order[3])
 
             if linear_cross or circ_cross:
-                # 检查碱基互补性
+                # Check base complementarity
                 b1, b2 = sequence[i], sequence[j]
                 is_wc_pair = (b1, b2) in wc
 
-                # 假结置信度: BPP 概率 × 互补性加权
+                # Pseudoknot confidence: BPP probability x complementarity weight
                 if is_wc_pair:
                     confidence = min(pi, pk) * 1.0
                 else:
-                    confidence = min(pi, pk) * 0.7  # 非 WC 降低置信度
+                    confidence = min(pi, pk) * 0.7  # non-WC lowers the confidence
 
                 if confidence >= min_confidence:
-                    # 避免与已有配对重复
+                    # Avoid duplicating existing pairs
                     pair_key = (min(i, j), max(i, j))
                     if pair_key not in existing_set:
                         pk_candidates.append((i, j, confidence))
                         existing_set.add(pair_key)
 
-    # 按置信度排序
+    # Sort by confidence
     pk_candidates.sort(key=lambda x: -x[2])
     return pk_candidates
 
 
-# ---------- 端到端入口 ----------
+# ---------- End-to-end entry point ----------
 def build_full_pair_graph(
     sequence: str,
     vienna_pairs: List[Tuple[int, int, float]],
@@ -553,12 +578,12 @@ def build_full_pair_graph(
     wc_rate: float = WC_RATE,
     dg_threshold: float = DG_THRESHOLD,
 ) -> Tuple[Dict[int, List[int]], List[Tuple[int, int, float]], List[Tuple[int, int]]]:
-    """端到端: 序列 + ViennaRNA 配对 -> 配对图 + 扫描补充 + 远端配对列表。
+    """End to end: sequence + ViennaRNA pairs -> pairing graph + scan additions + far/long-range pair list.
 
     Returns:
-        adj: 配对图邻接表
-        scan_pairs: 互补扫描补充的配对 [(i, j, dg), ...]
-        far_pairs: 远端配对 [(i, j), ...] (拓扑距离 > FAR_DIST)
+        adj: pairing-graph adjacency list
+        scan_pairs: complementarity-scan pairs [(i, j, dg), ...]
+        far_pairs: far/long-range pairs [(i, j), ...] (topological distance > FAR_DIST)
     """
     scan = complementarity_scan(sequence, window, wc_rate, dg_threshold) if do_scan else []
     adj = build_pair_graph(sequence, vienna_pairs, scan)
@@ -567,35 +592,35 @@ def build_full_pair_graph(
 
 
 if __name__ == "__main__":
-    # 自测: 含已知反向重复的合成序列
-    # 构造: 一段 poly-A 反向重复 + 一段随机
+    # Self-test: a synthetic sequence containing a known inverted repeat
+    # Construction: an inverted repeat of poly-A plus a random segment
     import random
     random.seed(42)
 
-    # stem1: 5'-AUGCAUGC-3' / 3'-UACGUACG-5' (完全互补, 反向重复)
+    # stem1: 5'-AUGCAUGC-3' / 3'-UACGUACG-5' (fully complementary, inverted repeat)
     stem = "AUGCAUGC"
     complement = stem[::-1].translate(str.maketrans("AUGC", "UACG"))
-    # 序列 = stem + linker + complement (反向重复, 应被扫描捕获)
+    # Sequence = stem + linker + complement (an inverted repeat, expected to be caught by the scan)
     linker = "AAAA" * 5  # 20nt poly-A linker
     seq = stem + linker + complement + linker + stem + linker + complement
 
-    print(f"序列长度: {len(seq)}")
+    print(f"sequence length: {len(seq)}")
     print(f"stem: {stem}")
-    print(f"complement (反向): {complement}")
+    print(f"complement (reverse): {complement}")
 
-    # 假 ViennaRNA 配对 (空, 模拟漏掉反向重复)
+    # Fake ViennaRNA pairs (empty, simulating that the inverted repeat is missed)
     vienna_pairs: List[Tuple[int, int, float]] = []
     scan = complementarity_scan(seq)
-    print(f"\n互补扫描命中: {len(scan)} 对")
+    print(f"\ncomplementarity-scan hits: {len(scan)} pairs")
     for (i, j, dg) in scan[:10]:
         print(f"  ({i}, {j}) ΔG={dg:.2f}")
 
     adj = build_pair_graph(seq, vienna_pairs, scan)
-    print(f"\n图节点: {len(adj)}")
-    print(f"平均度数: {sum(len(v) for v in adj.values())/len(adj):.2f}")
+    print(f"\ngraph nodes: {len(adj)}")
+    print(f"average degree: {sum(len(v) for v in adj.values())/len(adj):.2f}")
 
     far = far_end_pairs(adj, vienna_pairs, scan)
-    print(f"\n远端配对 (dist>{FAR_DIST}): {len(far)} 对")
+    print(f"\nfar/long-range pairs (dist>{FAR_DIST}): {len(far)}")
     for (i, j) in far[:5]:
         print(f"  ({i}, {j})")
 
@@ -604,18 +629,18 @@ def vienna_pair_probs(
     sequence: str,
     threshold: float = 0.5,
 ) -> Tuple[np.ndarray, List[Tuple[int, int, float]], List[Tuple[int, int, float]], float]:
-    """ViennaRNA Partition Function 配对概率 + MFE。
+    """ViennaRNA partition-function pair probabilities + MFE.
 
     Args:
-        sequence: RNA 序列
-        threshold: 配对概率阈值 (用于 pairs_pf 过滤)
+        sequence: RNA sequence
+        threshold: pair-probability threshold (for filtering pairs_pf)
 
     Returns:
         (bpp_matrix, pairs_pf, pairs_mfe, pf_energy)
-        - bpp_matrix: (L, L) 配对概率矩阵
-        - pairs_pf: [(i, j, p)] PF 配对列表
-        - pairs_mfe: [(i, j)] MFE 配对列表
-        - pf_energy: PF 自由能 (kcal/mol)
+        - bpp_matrix: (L, L) pair-probability matrix
+        - pairs_pf: [(i, j, p)] PF pair list
+        - pairs_mfe: [(i, j)] MFE pair list
+        - pf_energy: PF free energy (kcal/mol)
     """
     import RNA
 
@@ -626,15 +651,15 @@ def vienna_pair_probs(
     fc.pf()
     bpp = np.zeros((L, L), dtype=np.float64)
 
-    # 提取配对概率矩阵
-    # RNA.bpp() 返回 (L+1) x (L+1) 矩阵 (1-indexed)
+    # Extract the pair-probability matrix
+    # RNA.bpp() returns an (L+1) x (L+1) matrix (1-indexed)
     bpp_raw = np.array(fc.bpp())
     if bpp_raw.shape[0] > L:
-        bpp = bpp_raw[1:, 1:]  # 去掉 0-indexed 行列
+        bpp = bpp_raw[1:, 1:]  # drop the 0-indexed row and column
     else:
         bpp = bpp_raw
 
-    # PF 配对列表
+    # PF pair list
     pairs_pf = []
     for i in range(L):
         for j in range(i + 1, L):
@@ -653,7 +678,7 @@ def vienna_pair_probs(
             j = stack.pop()
             pairs_mfe.append((j, i))
 
-    # PF 能量
-    pf_energy = mfe_energy  # fc.mfe() 返回 (ss, energy)
+    # PF energy
+    pf_energy = mfe_energy  # fc.mfe() returns (ss, energy)
 
     return bpp, pairs_pf, pairs_mfe, pf_energy
