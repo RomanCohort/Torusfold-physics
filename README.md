@@ -29,6 +29,20 @@ circular RNA.
 > If you use an AI assistant here, please read
 > [.claude/RESPONSIBLE_AI_USE.md](.claude/RESPONSIBLE_AI_USE.md) first.
 
+## Visual overview
+
+<p align="center">
+  <img src="docs/images/torusfold_architecture.png" alt="TorusFold end-to-end pipeline" width="100%"/>
+  <br/>
+  <em>TorusFold end-to-end pipeline: circRNA sequence → multi-source secondary-structure consensus → base-pair constraints → segmented 3D ensemble prediction (RhoFold+ · trRosettaRNA2 · RNAbpFlow) → RL-guided coarse-grained folding & sampling → all-atom reconstruction → Amber14-OL3 refinement.</em>
+</p>
+
+<p align="center">
+  <img src="docs/images/cg_forcefield.png" alt="Multi-resolution coarse-grained representation" width="100%"/>
+  <br/>
+  <em>Multi-resolution coarse-grained representation. The physics core folds each window at increasing resolution (3-bead → 5-bead → all-atom), activating more detailed interaction terms at each level.</em>
+</p>
+
 ## Description
 
 circRNA back-splicing creates covalently closed circular RNA molecules whose
