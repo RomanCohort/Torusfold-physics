@@ -1,6 +1,6 @@
 # TorusFold-Hybrid
 
-_Team JLU-FBH · iGEM 2026 Software & AI_
+_Team JLU-FBH · iGEM 2026 · Oncology Village — structure-prediction engine of the CirCure project_
 
 > *"We choose to go to the Moon in this decade, not because it is easy, but
 > because it is hard."* — J. F. Kennedy, 1962
@@ -24,7 +24,10 @@ force field — producing experimentally plausible models for long (1000+ nt)
 circular RNA.
 
 > This repository is the official software deliverable of Team JLU-FBH
-> (iGEM 2026, Software & AI village). All source code lives on `main`; a
+> (iGEM 2026, Oncology Village). It is the structure-prediction engine of
+> CirCure, our multi-epitope circRNA vaccine platform for triple-negative
+> breast cancer — see the wiki Software page for how predicted 3D models
+> feed the CirCure design loop. All source code lives on `main`; a
 > release is created automatically at Wiki Freeze as the judging artifact.
 > If you use an AI assistant here, please read
 > [.claude/RESPONSIBLE_AI_USE.md](.claude/RESPONSIBLE_AI_USE.md) first.

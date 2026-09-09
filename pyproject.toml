@@ -13,7 +13,7 @@ authors = [{ name = "Ziyi Yan", email = "yanzy8225@mails.jlu.edu.cn" }]
 keywords = ["circRNA", "RNA", "3D-structure", "molecular-dynamics", "OpenMM", "RL"]
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Topic :: Scientific/Engineering :: Chemistry",
 ]
