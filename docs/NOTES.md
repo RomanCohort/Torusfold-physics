@@ -103,3 +103,20 @@ Completed: starting from the 2OIU X-ray structure, the Level-2 relaxation
 does not distort known structures. Note this is a force-field integrity test
 from the X-ray structure, not a from-sequence "recovery" benchmark; the
 from-sequence recovery question above remains open.
+
+## 2026-09-09 — verification backlog & status update
+
+- **Replica-exchange acceptance (measured):** 30–50% on recent runs (the
+  "~10–30 %" figure above is outdated). Dated update — retest after any
+  exchange-criterion change.
+- **Explicit-force vs autograd cross-check (TODO):** the autograd
+  implementation (`cg_forces_autograd`) is the free ground truth; add a
+  short-trajectory force comparison (max relative error) before claiming the
+  no-autograd forces are verified. "Runs fine" is not a gradient check.
+- **Async CPU force injection latency (scoped):** only active with
+  `use_trirnasp_force=True` (preview, off by default) — no stale-force risk
+  on the default path. No timing claim is made in public docs.
+- **RL scheduling evidence (roadmap):** the RL controller is deliberately
+  conservative (design choice, see README implementation notes); its benefit
+  over rule-based scheduling / fixed budgets is not yet quantified — plan a
+  short-sequence energy-vs-time comparison.
