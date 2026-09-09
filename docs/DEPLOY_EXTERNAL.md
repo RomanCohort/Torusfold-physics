@@ -94,9 +94,26 @@ export TRRNA2_RUNNER=/path/to/trrna2_runner.py
 > network.* Nat. Commun. 2021;12:5934. Provide a runner script that invokes
 > the matching trRosettaRNA2 install.
 
-## Statistical potentials & refiners (optional)
+## DivideFold (optional Level-0 SS evidence)
 
-### TriRNASP — three-body potential
+DivideFold is an external RNA folding predictor used as third-party evidence
+in the Level-0 secondary-structure consensus (`ss_divide` in
+`scheme2/isrnaclong.py`, invoked as a pure-CPU subprocess with GPU devices
+hidden). It is fully optional — if it fails, the pipeline falls back to the
+ViennaRNA-based two-source vote.
+
+- Source: paper-based method; the team's checkout is `DivideFold-main`.
+  **Citation TBD:** copy the exact reference from the checkout's README and
+  paste it here before Wiki Freeze (README's AI-disclosure table links to
+  this section).
+- Configuration (environment variables, no hard-coded paths):
+  | Variable | Purpose |
+  |---|---|
+  | `TF_DIVIDEFOLD_ROOT` | checkout dir (default: `DivideFold-main/` next to this repo) |
+  | `TF_DIVIDEFOLD_PYTHON` | interpreter for the SS subprocess (default: current interpreter) |
+  | `TF_DIVIDEFOLD_RUNNER` | runner script (default: `scripts/_dd_runner.py` in this repo — note: the runner is not yet committed; until it is, set this to your local copy or the stage is skipped with a logged warning) |
+
+## Statistical potentials & refiners (optional)
 
 - Source: <https://github.com/Tan-group/TriRNASP>
   (development checkout pinned at `69e999a`).

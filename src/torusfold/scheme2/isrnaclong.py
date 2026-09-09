@@ -680,16 +680,16 @@ def isrnaclong_pipeline(
         # DivideFold: recursively split into blocks and predict independent structures
         ss_divide = None
         try:
-            sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "DivideFold-main" / "src"))
+            _dd_root = os.environ.get("TF_DIVIDEFOLD_ROOT") or str(Path(__file__).resolve().parents[3] / "DivideFold-main")
+            sys.path.insert(0, os.path.join(_dd_root, "src"))
             import RNA as _RNA_DL
             def _rnafold_api(seq):
                 md = _RNA_DL.md(); fc = _RNA_DL.fold_compound(seq, md)
                 ss, _ = fc.mfe(); return ss
-            # DivideFold needs a pure-CPU subprocess (ROCm compiles MIOpen kernels on import)
-            _dd_runner = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "scripts", "_dd_runner.py")
-            _sys_python = os.path.join(os.path.expanduser("~"), "AppData", "Local", "Python", "bin", "python3.exe")
-            if not os.path.exists(_sys_python):
-                _sys_python = sys.executable
+            # DivideFold runs as a pure-CPU subprocess (GPU devices hidden in its env)
+            _dd_runner = os.environ.get("TF_DIVIDEFOLD_RUNNER") or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "scripts", "_dd_runner.py")
+            _sys_python = os.environ.get("TF_DIVIDEFOLD_PYTHON") or sys.executable
             try:
                 _dd_result = subprocess.run(
                     [_sys_python, _dd_runner, "--seq", sequence, "--max-frag", "200"],

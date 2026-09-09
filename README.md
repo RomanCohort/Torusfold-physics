@@ -166,6 +166,9 @@ variables (no hard-coded machine paths in this repository):
 | `TF_SCHEME2_SRC` | optional extra source dir injected into the server `sys.path` |
 | `PPR_INPUT_PDB` / `PPR_OUT_PDB` | input / output PDB for the PPR repair script |
 | `RFAM_CM` | `Rfam.cm` path for cmsearch-based MSA (optional) |
+| `TF_DIVIDEFOLD_ROOT` | DivideFold checkout dir (default: `DivideFold-main/` next to this repo) |
+| `TF_DIVIDEFOLD_PYTHON` | Python used to launch the DivideFold SS subprocess (default: current interpreter) |
+| `TF_DIVIDEFOLD_RUNNER` | path to the DivideFold SS runner script (default: `scripts/_dd_runner.py`) |
 
 **Repository layout**
 
@@ -237,7 +240,7 @@ tools**; it does **not** train them, and it ships no trained weights:
 | trRosettaRNA2 | Li et al., *Nat. Commun.* 2021;12:5934 | per-chunk 3D prediction (`trrna2_wrapper`) | external checkpoint |
 | RNAbpFlow | Bhattacharya-Lab/RNAbpFlow | 3D flow prediction / distance evidence (`ensemble_predictor`) | `RNA3DB.ckpt` (trained on RNA3DB/bpRNA), archived separately |
 | structRFM | inspired by Zhai et al., *Nat. Commun.* 2024 | optional multi-task heads (`multitask_heads`) | external checkpoint |
-| DivideFold | external RNA folding predictor | SS evidence for the Level 0 consensus (`ss_divide`, CPU subprocess) | external checkout (`DivideFold-main`, sibling of this repo) |
+| DivideFold | external RNA folding predictor (paper-based method; exact citation to be confirmed from the checkout README — see DEPLOY_EXTERNAL.md) | SS evidence for the Level 0 consensus (`ss_divide`, CPU subprocess) | external checkout (`DivideFold-main`; `TF_DIVIDEFOLD_ROOT`) |
 
 The folding/refinement core of this repository is **physics-based
 (zero-training)**: CG MD, REST2×T-REMD, metadynamics and Amber14-OL3 — no
