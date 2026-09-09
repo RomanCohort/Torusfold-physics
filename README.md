@@ -196,6 +196,17 @@ predictor checkouts are *not* committed:
 - Datasets and trained models used for the iGEM season will be archived on
   Zenodo and linked here (DOI added at Wiki Freeze).
 
+**Planned asset — a circRNA design-element library.** Beyond raw structures,
+we plan to publish a curated, schema-documented element library that dissects
+predicted structures into reusable design elements — back-splice junction
+geometries, IRES-containing domains, exposure/immunogenicity-relevant motifs —
+each with its 3D context. The goal is that teams designing circRNA payloads
+can look up "how does this element fold" the way they look up a sequence
+motif today. First entries ship with the Wiki Freeze release / Zenodo
+archive; the underlying data layer (`circrna_library/`) already enforces
+provenance separation between experimental structures, experimental
+constraints, and physics-generated hypotheses.
+
 ## Contributing
 
 Issues and merge requests are welcome. This is an active research codebase;
