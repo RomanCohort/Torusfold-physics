@@ -109,9 +109,11 @@ circRNA library), `[plot]` (analysis scripts), `[pyrosetta]` (full-atom
 refinement; Linux/WSL).
 
 > **Scope note.** This repository ships the physics/refinement core plus the
-> web frontend. The three sequence predictors (RhoFold+, trRosettaRNA2,
-> RNAbpFlow) are *external* tools invoked as subprocesses — point to your own
-> checkouts via the environment variables below. Two legacy aggregator modules
+> web frontend. The sequence/structure predictors it consults — RhoFold+,
+> trRosettaRNA2, RNAbpFlow and the DivideFold SS subprocess — are *external*
+> tools. Point to the first three via the environment variables below;
+> DivideFold is resolved from a `DivideFold-main/` checkout next to this
+> repository (see the AI/model disclosure table). Two legacy aggregator modules
 > referenced by `predict_3d_allatom` (`cg_forcefield`, `modification_aware`)
 > are not yet published and are under active development.
 >
@@ -130,7 +132,14 @@ python run_2013nt.py
 ```
 
 Run flags (RL close, REST2 replicas, REMD rounds, PyRosetta, PPR repair,
-pseudo-MSA fallback) are configured at the top of `run_2013nt.py`.
+pseudo-MSA fallback) are configured as call arguments in `run_2013nt.py`.
+
+**Reproducing the headline result (≈7 h).** The pre-built viewer structure was
+produced with the low configuration `n_rest2_replicas=8`,
+`rest2_nsteps=20000`, `nrep=2`, `n_relax_rounds=8` in `run_2013nt.py`.
+The checked-in defaults (`n_rest2_replicas=16`, `rest2_nsteps=100000`,
+`nrep=16`) form a higher configuration that takes substantially longer —
+adjust these arguments if you want the 7 h run.
 
 **Web server.**
 
@@ -228,6 +237,7 @@ tools**; it does **not** train them, and it ships no trained weights:
 | trRosettaRNA2 | Li et al., *Nat. Commun.* 2021;12:5934 | per-chunk 3D prediction (`trrna2_wrapper`) | external checkpoint |
 | RNAbpFlow | Bhattacharya-Lab/RNAbpFlow | 3D flow prediction / distance evidence (`ensemble_predictor`) | `RNA3DB.ckpt` (trained on RNA3DB/bpRNA), archived separately |
 | structRFM | inspired by Zhai et al., *Nat. Commun.* 2024 | optional multi-task heads (`multitask_heads`) | external checkpoint |
+| DivideFold | external RNA folding predictor | SS evidence for the Level 0 consensus (`ss_divide`, CPU subprocess) | external checkout (`DivideFold-main`, sibling of this repo) |
 
 The folding/refinement core of this repository is **physics-based
 (zero-training)**: CG MD, REST2×T-REMD, metadynamics and Amber14-OL3 — no
@@ -236,10 +246,13 @@ assistant; see [.claude/RESPONSIBLE_AI_USE.md](.claude/RESPONSIBLE_AI_USE.md)
 for the team's responsibility policy.
 
 **Evaluation & limitations.** No experimental (wet-lab) validation has been
-performed yet for the demo construct. Independent validation is pending:
-2OIU crystal-structure recovery and replica-exchange acceptance checks. Known
-dead ends and open problems are recorded in
-[docs/NOTES.md](docs/NOTES.md) — please read it before extending the code.
+performed yet for the demo construct. A 2OIU force-field integrity test
+(X-ray structure → Level-2 relaxation, 17 min CPU, final RMSD 1.83 Å) is
+completed and shows the force field does not distort known structures;
+independent validation is otherwise pending (2OIU from-sequence recovery and
+replica-exchange acceptance checks — dated status in
+[docs/NOTES.md](docs/NOTES.md), which also records known dead ends; please
+read it before extending the code).
 
 ## Data formats & synthetic-biology standards
 

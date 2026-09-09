@@ -13,7 +13,7 @@ flowchart TB
         direction TB
         PF["ViennaRNA PF (circ=1)<br/>plist_from_probs(0.01)<br/>bpp_high P>0.9 / bpp_mid 0.5-0.9 / bpp_low"]
         MFE["ViennaRNA MFE<br/>vienna_pair_probs"]
-        DIV["DivideFold subprocess<br/>--max-frag 200<br/>GPU disabled for ROCm compat"]
+        DIV["DivideFold subprocess (CPU)<br/>--max-frag 200<br/>ML-based SS evidence (see README AI disclosure)"]
         VOTE["Vote consensus<br/>>=2 methods agree = hard constraint<br/>soft: MFE 0.8 / PF-mid p / DivideFold 0.6"]
         NCM["NCM detection<br/>detect_ncms_from_bpp<br/>reuses BPP matrix"]
         PG["pair_graph<br/>build_full_pair_graph<br/>long-range pairs + stem_blocks"]
@@ -58,7 +58,7 @@ flowchart TB
         SCHED["RuleScheduler + SimulationState<br/>multifidelity_scheduler"]
         RLRL["RelaxationRL<br/>rl_policy_b0.pth / bootstrap<br/>decide() -> nstep, pair_weights<br/>L>1000: steps x 0.25 length scaling"]
         MERGE_AA["_segmented_cg_to_allatom<br/>parallel CG->allatom<br/>_merge_allatom_pdbs assembly"]
-        TORCH2["torch_gpu_refine<br/>BatchedREMD2D 16 replicas<br/>use_trirnasp=True use_trirnasp_force=True<br/>trirnasp_scale=0.1<br/>async CPU force injection (multiprocessing)<br/>spatial hash neighbor list O(N) clash"]
+        TORCH2["torch_gpu_refine<br/>BatchedREMD2D (replicas in one batched tensor)<br/>statistical potential term (TriRNASP): preview<br/>async CPU force injection (multiprocessing)<br/>spatial hash neighbor list O(N) clash"]
         MULTI_TASK["structRFM multi-task head (opt-in)<br/>clash_scores fused into pair_weights"]
         SCHED --- RLRL
         RLRL -.->|"scheduling params"| TORCH2
@@ -92,7 +92,7 @@ flowchart TB
         direction TB
         META_SAMPLER["MetaDynamicsSampler<br/>well-tempered bias_factor=5.0<br/>hill_height=1.0 hill_freq=100<br/>max_hills=5000"]
         META_CV["CVs: BSJ_dist(2nm) / nc(0.1nm) / Rg(1nm)"]
-        META_GPU["_compute_bias_forces_gpu (torch)<br/>hill accumulation + CV gradient vectorized<br/>ROCm/CUDA auto-detect"]
+        META_GPU["_compute_bias_forces_gpu (torch)<br/>hill accumulation + CV gradient vectorized<br/>CUDA/HIP auto-detect"]
         META_CPU["_add_bias_numpy (fallback)<br/>pure numpy CPU path"]
         META_SELECT["2 replicas, pick lowest energy<br/>perturbation noise sigma=0.5A avoids duplicates"]
         META_SAMPLER --> META_CV
@@ -106,7 +106,7 @@ flowchart TB
     subgraph L4["Level 4 — REST2 Refinement (2D REMD)"]
         direction TB
         REMD2D["rest2_remd_2d.REMD2DSampler<br/>8T x 4lambda = 32 replicas<br/>T: 300->550K geometric<br/>lambda: 1.0/0.82/0.67/0.55"]
-        TRI["TriRNASP statistical potential<br/>sigmoid(T) x lambda coupling<br/>energy_dir=external/TriRNASP"]
+        TRI["statistical potential (TriRNASP) — preview<br/>optional sigmoid(T) x lambda coupling"]
         EXCHANGE["2-axis Metropolis exchange<br/>T-axis: beta_i * deltaU<br/>lambda-axis: beta * deltaLambda * U_solute<br/>exchange_interval=1000"]
         CLUSTER["_cluster_and_select<br/>RMSD threshold 5A clustering"]
         REMD2D --> TRI --> EXCHANGE --> CLUSTER
@@ -157,11 +157,12 @@ flowchart TB
     INFRA -.-> L4
     INFRA -.-> L5
 
-    %% ===== AMD ROCm =====
-    subgraph ROCM["AMD ROCm GPU Modules"]
+    %% ===== Dual backend =====
+    subgraph ROCM["GPU / CPU dual backend (runtime-detected)"]
         direction TB
-        TORCH_CG["torch_cgsim.py<br/>BatchedREMD (B,N,3) tensor<br/>BatchedREMD2D 32-replica single tensor<br/>autograd forces / HIP-safe factories<br/>~10x faster than CPU OpenMM"]
-        TORCH_MD["torch_md.py<br/>LangevinCG GPU Langevin<br/>LBFGS minimization + thermal bath"]
+        TORCH_CG["GPU path — torch_cgsim.py<br/>TorchMD-style explicit forces, no autograd<br/>BatchedREMD / BatchedREMD2D: replicas in one (B,N,3) tensor<br/>cell-list neighbor table, O(N) memory"]
+        TORCH_MD["GPU path — torch_md.py<br/>Langevin MD + LBFGS, TorchMD-style"]
+        CPU_EQ["CPU path — OpenMM equivalents<br/>openmm_gpu_refiner / rest2_remd_2d / metadynamics_sampler<br/>equivalent sampling, no GPU required"]
     end
     ROCM -.- L2
     ROCM -.- L4

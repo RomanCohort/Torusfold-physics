@@ -11,13 +11,15 @@
 | Platform | AMD Ryzen AI MAX 395 (APU, unified memory), Windows |
 | GPU mode | GPU-accelerated path of the pipeline (REMD/MetaD/torch CG); peak unified-memory use ≈ **60 GB** |
 | CPU mode | CPU-only path (OpenMM CPU platform, multi-replica parallel); peak RAM ≈ **30 GB** |
-| Wall time, low config (CPU) | ≈ **7 h** — 2,013 nt end-to-end, 8 replicas × 20,000 steps (measured) |
+| Wall time, low config (CPU) | ≈ **7 h** — 2,013 nt end-to-end, low config (REST2 ×8 × 20,000 steps; REMD ×2 × 8 relax rounds), measured |
 | Wall time, full config (GPU, default) | ≈ **14 days** (estimated — not measured) on this APU; highly GPU-dependent, ≈ **8× faster on an NVIDIA A100** (≈ 2 days) |
 
-*The 7 h figure is the measured "low configuration" (8 replicas × 20,000 steps),
+*The 7 h figure is the measured "low configuration" — `n_rest2_replicas=8`,
+`rest2_nsteps=20000`, `nrep=2`, `n_relax_rounds=8` in `run_2013nt.py` —
 whose output is shown in the pre-built viewer (Level 4.9, PPR repaired). The
-GPU default is a different (full) configuration, so the two wall times are not
-directly comparable. The ≈ 14 days GPU estimate has not been measured yet.
+checked-in defaults (`n_rest2_replicas=16`, `rest2_nsteps=100000`, `nrep=16`)
+are a higher (full) configuration that takes substantially longer, so the two
+wall times are not directly comparable. The ≈ 14 days GPU estimate has not been measured yet.
 Why is the CPU path the measured reference? On the team's AMD APU (Radeon
 8060S integrated GPU), the GPU-accelerated path required substantial
 ROCm-specific adaptation, and its measured throughput did not beat the CPU
@@ -31,12 +33,13 @@ NVIDIA hardware (e.g. A100), the GPU path is expected to run ≈8× faster
 |---|---|---|---|
 | GPU path (full config, default) | ≈ 60 GB (unified memory) | ≈ 14 days (estimated, not measured); ≈ 2 days on an NVIDIA A100 (est., 8×) | Default is the full configuration; wall time highly GPU-dependent |
 | GPU path (low config) | ≈ 60 GB (unified memory) | [TBD — not run] | Low-config timing was only measured on the CPU path |
-| CPU path | ≈ 30 GB | ≈ 7 h (8 replicas × 20,000 steps, measured) | Fully reproducible without a discrete GPU |
+| CPU path (low config) | ≈ 30 GB | ≈ 7 h (REST2 ×8 × 20,000 steps; REMD ×2 × 8 rounds), measured | Fully reproducible without a discrete GPU |
 
-The ≈7 h wall time is dominated by the **Level-2 REMD sampling** stage
-(8 replicas × 20,000 steps). Scaling rule of thumb: wall time scales with the
-number of parallel replicas and per-replica steps; see the flags at the top of
-`run_2013nt.py`.
+The ≈7 h wall time was measured with the low configuration above and is
+dominated by the **Level-2 REMD sampling** stage (2 replicas × 8 relax rounds)
+together with the Level-4 REST2 run (8 replicas × 20,000 steps). Wall time
+scales with the number of parallel replicas and per-replica steps; configure
+the call arguments in `run_2013nt.py`.
 
 ## 3. Three-level access for judges (no one needs to run the full pipeline)
 
@@ -45,7 +48,7 @@ number of parallel replicas and per-replica steps; see the flags at the top of
 | L0 — View | Interactive 3D of the predicted 2,013 nt structure (42,831 atoms, Level 4.9 PPR repaired) | Open a file in a browser | `docs/circrna_3d_viewer.html` (structure embedded; needs internet for the two CDN scripts) |
 | L1 — Download | Full-atom PDB + per-level outputs + quality JSON | 1 click | GitLab release artifact at Wiki Freeze + Zenodo (DOI at freeze) |
 | L2 — Force-field check | 2OIU (≈100 nt; only experimentally resolved circRNA): X-ray structure → Level-2 relaxation → RMSD vs crystal | **17 min (CPU), measured** — final RMSD **1.83 Å** | Evidence that the force field does not distort known structures; see wiki Validation page |
-| L3 — Full run | End-to-end 2,013 nt all-atom structure | 7 h + 30–60 GB on the machine above | `python run_2013nt.py` (see README + DEPLOY_EXTERNAL.md) |
+| L3 — Full run | End-to-end 2,013 nt all-atom structure | Low config ≈ 7 h + 30–60 GB (defaults are a higher config, much longer) | `python run_2013nt.py` — set the low-config arguments first (see README) |
 
 ## 4. External tools (why setup is non-trivial, and what it costs)
 
@@ -86,7 +89,8 @@ All machine-specific paths are environment variables — no hard-coded paths.
 ## 6. One-liner for the wiki / software page
 
 "Run anywhere with 30 GB RAM (CPU) or ~60 GB unified memory (GPU); the
-2,013 nt demo takes ≈ 7 h at low configuration — or skip the run entirely:
+2,013 nt demo takes ≈ 7 h with the documented low configuration (README shows
+which arguments to set) — or skip the run entirely:
 inspect the embedded 3D structure in your browser, download the PDB, and
 see the 2OIU force-field check (17 min, RMSD 1.83 Å): known structures are
 not distorted by the relaxation stages."
