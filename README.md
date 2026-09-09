@@ -16,6 +16,15 @@ _Team JLU-FBH · iGEM 2026 · Oncology Village — structure-prediction engine o
 > exist without a structure. TorusFold exists so a future team can choose
 > circRNA confidently — without wondering whether the job is even doable.
 
+**The gap.** The 1980s–90s ribozyme era put RNA at the centre of biology, but
+RNA 3D structure determination then fell two decades behind proteins:
+RNA-only PDB entries remain a tiny fraction, and for circular RNA exactly
+**one** complete structure exists (PDB: 2OIU). Template-based prediction
+inherited the drought — 3dRNA yields locally irrational models on circular
+constructs (PLoS Comput. Biol. 2024, doi:10.1371/journal.pcbi.1012293) —
+while physics-based *de novo* folding stayed out of reach for 1000+ nt
+circular RNA. That is the gap TorusFold fills.
+
 Physics-based **circRNA 3D structure prediction**. A multi-predictor ensemble
 (RhoFold+ · trRosettaRNA2 · RNAbpFlow) feeds a coarse-grained folding engine
 that is relaxed with OpenMM molecular dynamics, replica-exchange and
