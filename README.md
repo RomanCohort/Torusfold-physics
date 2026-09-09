@@ -17,11 +17,12 @@ _Team JLU-FBH · iGEM 2026 · Oncology Village — structure-prediction engine o
 > circRNA confidently — without wondering whether the job is even doable.
 
 Physics-based **circRNA 3D structure prediction**. A multi-predictor ensemble
-(RhoFold+ · trRosettaRNA2 · RNAbpFlow) feeds an RL-guided coarse-grained folding
-engine that is relaxed with OpenMM molecular dynamics, replica-exchange and
+(RhoFold+ · trRosettaRNA2 · RNAbpFlow) feeds a coarse-grained folding engine
+that is relaxed with OpenMM molecular dynamics, replica-exchange and
 metadynamics, then reconstructed to all atoms and refined under the Amber14-OL3
 force field — producing experimentally plausible models for long (1000+ nt)
-circular RNA.
+circular RNA. (An RL-based sampling scheduler exists as a preview feature —
+see Implementation notes below.)
 
 > This repository is the official software deliverable of Team JLU-FBH
 > (iGEM 2026, Oncology Village). It is the structure-prediction engine of
@@ -286,17 +287,13 @@ entry points to the module that implements it.
    (`metadynamics_gpu.py`) computes CVs (e.g. radius of gyration) with
    hand-written analytic gradients and deposits well-tempered hills as batched
    tensor updates — no autograd on the sampling loop.
-5. **How the RL scheduler was bootstrapped.** The relaxation controller
-   (`RelaxationRL`) starts from a heuristic policy: ViennaRNA is known to
-   fold long RNAs poorly, but it can be run cheaply at scale — so the initial
-   policy was trained on a large batch of long (>2,000 nt) circBase sequences
-   as a weak-but-available prior, then refined by online learning
-   (`enable_online_learning`) on the rewards actually observed during
-   sampling.
-6. **The RL has deliberately little authority.** The controller only suggests
-   sampling budgets and pair weights (nstep / pair_weights); the physics
-   (force field, replica exchange) is never bypassed. Conservative guardrails
-   plus online learning are the intended development path — see NOTES.md.
+5. **RL-based sampling scheduling — preview feature.** A reinforcement-
+   learning controller can suggest sampling budgets and pair weights
+   (nstep / pair_weights). It starts from a heuristic policy (ViennaRNA run at
+   scale on long circBase sequences as a weak-but-available prior) and is
+   refined by online learning; it is deliberately conservative and never
+   overrides the physics. Like the TriRNASP statistical potential, it is a
+   documented preview idea rather than a headline claim — see NOTES.md.
 7. **Length scaling of the sampling budget.** For very long chains the total
    budget is halved at L > 500 and halved again at L > 1,000
    (`isrnaclong.py`, length scaling). Rationale: sampling bottlenecks are

@@ -53,10 +53,10 @@ flowchart TB
     end
 
     %% ===== Level 2 =====
-    subgraph L2["Level 2 — RL-scheduled REMD + torch GPU"]
+    subgraph L2["Level 2 — REMD + torch GPU (RL sampling scheduler: preview)"]
         direction TB
         SCHED["RuleScheduler + SimulationState<br/>multifidelity_scheduler"]
-        RLRL["RelaxationRL<br/>rl_policy_b0.pth / bootstrap<br/>decide() -> nstep, pair_weights<br/>L>1000: steps x 0.25 length scaling"]
+        RLRL["RelaxationRL (preview)<br/>rl_policy_b0.pth / bootstrap<br/>decide() -> nstep, pair_weights<br/>L>1000: steps x 0.25 length scaling"]
         MERGE_AA["_segmented_cg_to_allatom<br/>parallel CG->allatom<br/>_merge_allatom_pdbs assembly"]
         TORCH2["torch_gpu_refine<br/>BatchedREMD2D (replicas in one batched tensor)<br/>statistical potential term (TriRNASP): preview<br/>async CPU force injection (multiprocessing)<br/>spatial hash neighbor list O(N) clash"]
         MULTI_TASK["structRFM multi-task head (opt-in)<br/>clash_scores fused into pair_weights"]
@@ -81,7 +81,7 @@ flowchart TB
     end
 
     %% ===== Level 3 =====
-    subgraph L3["Level 3 — RL Fine-tuning (Continuous PPO)"]
+    subgraph L3["Level 3 — RL fine-tuning (Continuous PPO, preview)"]
         DIM_GUARD["Dimension guard: len(best_coords)!=len(seq) -> skip<br/>(when IsRNAcirc outputs all-atom)"]
         RL3["rl_optimizer.optimize_far_pairs<br/>Continuous PPO<br/>rl_n_simulations=50 epochs<br/>far_pairs + stem_blocks"]
         DIM_GUARD --> RL3
