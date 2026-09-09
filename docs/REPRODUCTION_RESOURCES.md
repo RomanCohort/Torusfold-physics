@@ -33,8 +33,10 @@ NVIDIA hardware (e.g. A100), the GPU path is expected to run ≈8× faster
 | GPU path (low config) | ≈ 60 GB (unified memory) | [TBD — not run] | Low-config timing was only measured on the CPU path |
 | CPU path | ≈ 30 GB | ≈ 7 h (8 replicas × 20,000 steps, measured) | Fully reproducible without a discrete GPU |
 
-Scaling rule of thumb: wall time scales with number of parallel replicas and
-per-replica steps; see the flags at the top of `run_2013nt.py`.
+The ≈7 h wall time is dominated by the **Level-2 REMD sampling** stage
+(8 replicas × 20,000 steps). Scaling rule of thumb: wall time scales with the
+number of parallel replicas and per-replica steps; see the flags at the top of
+`run_2013nt.py`.
 
 ## 3. Three-level access for judges (no one needs to run the full pipeline)
 
