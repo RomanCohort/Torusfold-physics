@@ -102,10 +102,11 @@ in the Level-0 secondary-structure consensus (`ss_divide` in
 hidden). It is fully optional — if it fails, the pipeline falls back to the
 ViennaRNA-based two-source vote.
 
-- Source: paper-based method; the team's checkout is `DivideFold-main`.
-  **Citation TBD:** copy the exact reference from the checkout's README and
-  paste it here before Wiki Freeze (README's AI-disclosure table links to
-  this section).
+- Source: DivideFold+ — Omnes L, Angel E, Tahi F. *DivideFold+: an
+  AI-based tool for RNA secondary structure prediction with subdomains
+  identification and visualization and data augmentation*. J Mol Biol.
+  2026;438(18):169865. doi:10.1016/j.jmb.2026.169865. The team's checkout is
+  named `DivideFold-main` (same lineage).
 - Configuration (environment variables, no hard-coded paths):
   | Variable | Purpose |
   |---|---|
