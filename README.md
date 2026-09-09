@@ -212,6 +212,11 @@ You do **not** need to run the full pipeline to evaluate this tool:
 Running the full ensemble needs external predictors and (ideally) a GPU — see
 [docs/DEPLOY_EXTERNAL.md](docs/DEPLOY_EXTERNAL.md).
 
+Hardware requirements, measured runtime profiles (≈7 h CPU for the 2,013 nt
+demo, dominated by the Level-2 REMD sampling; GPU-mode notes) and a
+three-level access guide — view-only / download / reproduce — are in
+[docs/REPRODUCTION_RESOURCES.md](docs/REPRODUCTION_RESOURCES.md).
+
 ## AI / model disclosure
 
 This software **calls machine-learning RNA structure predictors as external
