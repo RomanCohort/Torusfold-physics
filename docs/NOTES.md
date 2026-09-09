@@ -87,3 +87,19 @@ performed yet for the 2013-nt construct. Validation is limited to internal
 consistency + a handful of published-sequence tests. Treat predicted
 structures as hypotheses until the 2OIU recovery and replica-exchange checks
 above are completed.
+
+## 2026-09-09 — GPU platform notes (internal)
+
+Measured on an AMD Ryzen AI MAX 395 (Radeon 8060S iGPU): ROCm compatibility
+was poor and required extensive patching (a large time cost); iGPU throughput
+measured far below an RTX 3080. The CPU path is therefore the reference for
+all measured runs. GPU full-configuration wall time (~14 d estimated on this
+APU; ≈2 d on an NVIDIA A100 at the ≈8× estimate) is not yet measured.
+
+## 2026-09-09 — 2OIU force-field integrity test (update)
+
+Completed: starting from the 2OIU X-ray structure, the Level-2 relaxation
+(CPU) took 17 min and ended at RMSD 1.83 Å vs the crystal — the force field
+does not distort known structures. Note this is a force-field integrity test
+from the X-ray structure, not a from-sequence "recovery" benchmark; the
+from-sequence recovery question above remains open.

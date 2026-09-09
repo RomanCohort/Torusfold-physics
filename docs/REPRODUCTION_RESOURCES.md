@@ -18,11 +18,12 @@
 whose output is shown in the pre-built viewer (Level 4.9, PPR repaired). The
 GPU default is a different (full) configuration, so the two wall times are not
 directly comparable. The ≈ 14 days GPU estimate has not been measured yet.
-Why is the CPU path the reference in practice? On this AMD platform, ROCm
-compatibility with the Radeon 8060S integrated GPU is poor (measured
-performance far below an RTX 3080), and ROCm bugs required extensive patching
-that further slows the GPU path — so all measured reference runs use the CPU
-path.*
+Why is the CPU path the measured reference? On the team's AMD APU (Radeon
+8060S integrated GPU), the GPU-accelerated path required substantial
+ROCm-specific adaptation, and its measured throughput did not beat the CPU
+path on this platform — so all measured reference runs use CPU. On discrete
+NVIDIA hardware (e.g. A100), the GPU path is expected to run ≈8× faster
+(estimate, not yet measured).*
 
 ## 2. Runtime profiles of the headline demo (2,013 nt circRNA)
 
