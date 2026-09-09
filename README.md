@@ -257,6 +257,69 @@ replica-exchange acceptance checks — dated status in
 [docs/NOTES.md](docs/NOTES.md), which also records known dead ends; please
 read it before extending the code).
 
+
+## Implementation notes (why it works)
+
+Short answers to the questions a computational reviewer usually asks. Each
+entry points to the module that implements it.
+
+1. **Batched replica exchange on one tensor.** In `torch_cgsim.py`
+   (`BatchedREMD` / `BatchedREMD2D`), all replicas live in a single
+   `(B, N, 3)` tensor and a Metropolis swap is a **tensor-index permutation**
+   — no coordinate copies, no process pipes. The classical CPU alternative is
+   one OpenMM process per replica (~200 ms/step) with pipe-based swaps.
+   Energy and forces are computed by the same explicit-force function, so the
+   swap criterion and the dynamics are consistent by construction.
+2. **Asynchronous CPU-side force injection.** Statistical-potential forces
+   (TriRNASP, optional preview feature) are evaluated on a CPU process pool
+   (`_refresh_cpu_forces_async`) and injected into the GPU force cache;
+   when replicas are exchanged the force cache is permuted together with the
+   coordinates (`_swap_tri_force_cache`), so replica identity stays
+   consistent across the swap.
+3. **No-autograd explicit forces.** Forces follow the TorchMD recipe:
+   analytic, autograd-free force evaluation with a cell-list neighbor table
+   (O(N) memory instead of O(N²)). Because each force function returns energy
+   and forces together, the two can never drift apart, and `_require_finite`
+   guards every stage. An autograd implementation is kept alongside
+   (`cg_forces_autograd`) for cross-checking.
+4. **Analytic CV gradients for metadynamics.** The GPU metadynamics sampler
+   (`metadynamics_gpu.py`) computes CVs (e.g. radius of gyration) with
+   hand-written analytic gradients and deposits well-tempered hills as batched
+   tensor updates — no autograd on the sampling loop.
+5. **How the RL scheduler was bootstrapped.** The relaxation controller
+   (`RelaxationRL`) starts from a heuristic policy: ViennaRNA is known to
+   fold long RNAs poorly, but it can be run cheaply at scale — so the initial
+   policy was trained on a large batch of long (>2,000 nt) circBase sequences
+   as a weak-but-available prior, then refined by online learning
+   (`enable_online_learning`) on the rewards actually observed during
+   sampling.
+6. **The RL has deliberately little authority.** The controller only suggests
+   sampling budgets and pair weights (nstep / pair_weights); the physics
+   (force field, replica exchange) is never bypassed. Conservative guardrails
+   plus online learning are the intended development path — see NOTES.md.
+7. **Length scaling of the sampling budget.** For very long chains the total
+   budget is halved at L > 500 and halved again at L > 1,000
+   (`isrnaclong.py`, length scaling). Rationale: sampling bottlenecks are
+   local — segments are fixed at 200 nt and each segment relaxes
+   independently of total length, while long-range pairing is handled by
+   constraints plus the temperature ladder — so the total need grows slower
+   than linearly. This is a working heuristic: it is guarded by early
+   stopping and energy gates, and a formal scaling benchmark is on the
+   roadmap.
+8. **Chunk fusion is confidence-weighted, with bidirectional context.**
+   Segment predictions (200 nt, 30 nt overlap, raised to ease boundary
+   effects) are fused by confidence-weighted assembly (Kabsch alignment,
+   `segmented_vfold3d.py`), then refined with bidirectional context
+   (NLP-style: each boundary is corrected by neighbors on both sides, ±50 nt
+   with linear decay, `_refine_with_context`) before the final global
+   relaxation.
+9. **NCM candidates are filtered by a thermodynamic cost.** Non-canonical
+   pair candidates survive only if their local folding cost is affordable:
+   `ncm_thermo_filter.py` refolds the local window with and without the
+   candidate and suppresses it when ΔΔG > 2.0 kcal/mol, down-weights to 0.5
+   between 1.0 and 2.0 kcal/mol. The thresholds are empirical, but the
+   quantity being thresholded is a physical free-energy cost.
+
 ## Data formats & synthetic-biology standards
 
 Input: FASTA-like plain sequence (`sequence.txt`, `T`→`U` handled);
