@@ -20,12 +20,15 @@ whose output is shown in the pre-built viewer (Level 4.9, PPR repaired). The
 checked-in defaults (`n_rest2_replicas=16`, `rest2_nsteps=100000`, `nrep=16`)
 are a higher (full) configuration that takes substantially longer, so the two
 wall times are not directly comparable. The ≈ 14 days GPU estimate has not been measured yet.
-Why is the CPU path the measured reference? On the team's AMD APU (Radeon
-8060S integrated GPU), the GPU-accelerated path required substantial
-ROCm-specific adaptation, and its measured throughput did not beat the CPU
-path on this platform — so all measured reference runs use CPU. On discrete
-NVIDIA hardware (e.g. A100), the GPU path is expected to run ≈8× faster
-(estimate, not yet measured).*
+Why is the CPU path the measured reference? Two reasons. First, the
+pipeline is heavily vectorized (batched NumPy/Torch kernels, multi-replica
+parallelism), and the reference CPU — AMD Ryzen AI MAX 395 (Zen 5) — has wide
+SIMD/AVX-512 support that these vectorized kernels exploit well, so the CPU
+path is unusually strong on this specific chip. Second, on the same APU the
+GPU-accelerated path required substantial ROCm-specific adaptation and its
+measured throughput did not beat the CPU path — so all measured reference
+runs use CPU. On discrete NVIDIA hardware (e.g. A100), the GPU path is
+expected to run ≈8× faster (estimate, not yet measured).*
 
 ## 2. Runtime profiles of the headline demo (2,013 nt circRNA)
 

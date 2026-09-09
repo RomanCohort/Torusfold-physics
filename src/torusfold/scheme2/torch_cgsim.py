@@ -651,11 +651,16 @@ def _clash_f(pos, cell_list, k, r_cut):
 
 
 def _sigmoid_f(dist, r0, k, width):
-    """Sigmoid guiding force: E = -k * log(1+exp(-(r0-r)/width))."""
-    x = -(r0-dist)/width
+    """Bounded near-attraction guide: E = -k*softplus(x), x = (r0-dist)/width.
+
+    r >> r0: x << 0 -> E -> 0 (no action far away); r < r0: x > 0 -> finite
+    attraction reward (bounded by -k*r0/width). dE/dr = +k*sig/width, so
+    F = -dE/dr * delta/r = -k*sig/width * delta/r (pulls paired residues
+    together). Returns (e, sig).
+    """
+    x = (r0-dist)/width
     sig = torch.sigmoid(x)
     e = -k * _stable_softplus(x)
-    # dE/dr = -k * sig / width
     return e, sig
 
 
@@ -750,8 +755,8 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         dist_g = _safe_norm(delta_g, dim=-1, keepdim=True, eps=eps)
         e_g, sig_g = _sigmoid_f(dist_g, PAIR_NN, K_PAIR_GUIDE, 0.2)
         total_E += e_g.squeeze(-1).sum(dim=-1)
-        # E = -K*log(1+exp(-(r0-r)/w)), dE/dr = -K*sig/w, F = -dE/dx = K*sig/w * delta/r
-        f_g = -K_PAIR_GUIDE/0.2*sig_g*delta_g/(dist_g*dist_g)
+        # E = -K*softplus((r0-r)/w), dE/dr = +K*sig/w, F = -dE/dx = -K*sig/w * delta/r
+        f_g = -K_PAIR_GUIDE/0.2*sig_g*delta_g/dist_g
         total_F[:,P(pi)] += f_g.squeeze(-1); total_F[:,P(pj)] -= f_g.squeeze(-1)
 
     # ── 10. BSJ guide: O(1) analytic ──
@@ -759,7 +764,7 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
     dist_bg = _safe_norm(d_bg, dim=-1, keepdim=True, eps=eps)
     e_bg, sig_bg = _sigmoid_f(dist_bg, PAIR_NN, K_BSJ_GUIDE, 0.2)
     total_E += e_bg.squeeze(dim=-1) if e_bg.dim() > 1 else e_bg
-    f_bg = -K_BSJ_GUIDE/0.2*sig_bg*d_bg/(dist_bg*dist_bg)
+    f_bg = -K_BSJ_GUIDE/0.2*sig_bg*d_bg/dist_bg  # F = -K*sig/w * delta/r = -dE/dx
     total_F[:,P(0)] += f_bg.squeeze(-1); total_F[:,P(L-1)] -= f_bg.squeeze(-1)
 
     # ── 11. BSJ contact: O(1) analytic ──
@@ -781,11 +786,11 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         d_bpp = pos_nm[:,NN(pi)]-pos_nm[:,NN(pj)]
         r_bpp = _safe_norm(d_bpp, dim=-1, keepdim=True, eps=eps)
         bpp_w = pair_w[:len(pi)].to(dev).float()
-        x_bpp = -(PAIR_NN-r_bpp)/0.3
+        x_bpp = (PAIR_NN-r_bpp)/0.3
         sig_bpp = torch.sigmoid(x_bpp)
         total_E += (-K_BPP*bpp_w[None,:,None]*_stable_softplus(x_bpp)).sum(dim=1).squeeze(-1)
-        # dE/dr = -K*bpp*width*sig * delta/r²
-        f_bpp = -K_BPP/0.3*bpp_w[None,:,None]*sig_bpp*d_bpp/(r_bpp*r_bpp)
+        # x = (r0-r)/0.3, dE/dr = +K*bpp*sig/0.3, F = -dE/dx = -K*bpp*sig/0.3 * delta/r
+        f_bpp = -K_BPP/0.3*bpp_w[None,:,None]*sig_bpp*d_bpp/r_bpp
         total_F[:,NN(pi)] += f_bpp.squeeze(-1); total_F[:,NN(pj)] -= f_bpp.squeeze(-1)
 
     # ── 13-17. GB/SA/Mg2+: O(L·K) cell-list optimized ──
@@ -961,26 +966,25 @@ def cg_forces_explicit_batched(
     e_a, f_a = _angle(pos_nm, _K_ANGLE, math.cos(ANGLE_PPP))
     total_E += e_a; total_F += f_a
 
-    # ── 5. Dihedrals: O(N) — small autograd blocks ──
+    # ── 5. Dihedrals: O(N) — local autograd block for the 4-atom windows ──
+    # (F = -dE/dx must hold on this term too; the force is derived from the
+    #  same expression as the energy via a small autograd block over the
+    #  P-atom windows only.)
     if L > 3:
-        dih_idx = torch.arange(L-3, device=dev)
-        pp0 = pos_nm[:, P(dih_idx)]
-        pp1 = pos_nm[:, P(dih_idx+1)]
-        pp2 = pos_nm[:, P(dih_idx+2)]
-        pp3 = pos_nm[:, P(dih_idx+3)]
-        bb0, bb1, bb2 = pp1-pp0, pp2-pp1, pp3-pp2
-        nn0 = _safe_cross(bb0, bb1, dim=-1)
-        nn1 = _safe_cross(bb1, bb2, dim=-1)
-        n0n = _safe_norm(nn0, dim=-1, keepdim=True, eps=eps)
-        n1n = _safe_norm(nn1, dim=-1, keepdim=True, eps=eps)
-        cos_d = (nn0*nn1).sum(-1, keepdim=True)/(n0n*n1n)
-        cos_d = cos_d.clamp(-1+eps, 1-eps)
-        e_dih = (0.5*_K_DIH*(cos_d.squeeze(-1)-math.cos(DIH_PPPP))**2).sum(dim=-1)
-        # The dihedral force is complex; use a small autograd block (only for the 4 atoms)
-        dp = pp0.detach().requires_grad_(True)
-        d0, d1, d2 = dp[1:]-dp[:-1], pp1-pp0, pp2-pp1  # simplified
-        # Skip the exact dihedral force and use an approximation (error <5%)
-        total_E += e_dih
+        p_chain = pos_nm[:, P(torch.arange(L, device=dev))]
+        p_ref = p_chain.detach().clone().requires_grad_(True)
+        v0 = p_ref[:, :-3]; v1 = p_ref[:, 1:-2]; v2 = p_ref[:, 2:-1]; v3 = p_ref[:, 3:]
+        b0 = v1 - v0; b1 = v2 - v1; b2 = v3 - v2
+        n0 = _safe_cross(b0, b1, dim=-1)
+        n1 = _safe_cross(b1, b2, dim=-1)
+        n0n = _safe_norm(n0, dim=-1, keepdim=True, eps=eps)
+        n1n = _safe_norm(n1, dim=-1, keepdim=True, eps=eps)
+        cos_d = ((n0 * n1).sum(-1, keepdim=True) / (n0n * n1n)).clamp(-1 + eps, 1 - eps)
+        e_dih = (0.5 * _K_DIH * (cos_d.squeeze(-1) - math.cos(DIH_PPPP)) ** 2)
+        e_dih.sum().backward()
+        total_E += e_dih.sum(dim=-1).detach()
+        if p_ref.grad is not None:
+            total_F[:, P(torch.arange(L, device=dev))] += -p_ref.grad
 
     # ── 6. WC pairing: O(P) ──
     if pairs_ij.numel() > 0:
@@ -1008,10 +1012,13 @@ def cg_forces_explicit_batched(
     # ── 9. BSJ guide: O(1) ──
     d_bsj_g = pos_nm[:,P(0)]-pos_nm[:,P(L-1)]
     dist_bg = _safe_norm(d_bsj_g, dim=-1, keepdim=True, eps=eps)
+    # Bounded near-attraction guide: E = -K*softplus(x), x = (R0-dist)/0.2.
+    # dE/dr = +K*sig/0.2, so F = -dE/dr * delta/r = -K*sig/0.2 * delta/r
+    # (pulls the BSJ ends together; far away the force vanishes).
     sig = torch.sigmoid((_R0_PAIR-dist_bg)/0.2)
     e_bg = (-_K_BSJ_GUIDE*_stable_softplus(
-        -(_R0_PAIR-dist_bg)/0.2)).sum(dim=-1)
-    f_bg = (_K_BSJ_GUIDE*sig/dist_bg*d_bsj_g).squeeze(-1)
+        (_R0_PAIR-dist_bg)/0.2)).sum(dim=-1)
+    f_bg = (-_K_BSJ_GUIDE/0.2*sig/dist_bg*d_bsj_g).squeeze(-1)
     total_E += e_bg
     total_F[:,P(0)] += f_bg; total_F[:,P(L-1)] -= f_bg
 
@@ -1388,12 +1395,14 @@ def cg_forces_explicit(
     total_E += e_clash; total_F += f_clash
 
     # ── BSJ guide (single pair) ──
+    # Bounded near-attraction: x = (R0 - dist)/0.2; E = -K*softplus(x);
+    # dE/dr = +K*sig/0.2 -> F = -K*sig/0.2 * delta/r (pulls together)
     delta_bsj_g = pos_nm[:, P(0)] - pos_nm[:, P(L - 1)]
     dist_bsj_g = delta_bsj_g.norm(dim=-1, keepdim=True).clamp(min=eps)
     sig = torch.sigmoid((_R0_PAIR - dist_bsj_g) / 0.2)
     e_bsj_guide = -_K_BSJ_GUIDE * _stable_softplus(
-        -(_R0_PAIR - dist_bsj_g) / 0.2).sum(dim=-1)
-    f_bsj_guide_mag = _K_BSJ_GUIDE * sig / (dist_bsj_g + eps)
+        (_R0_PAIR - dist_bsj_g) / 0.2).sum(dim=-1)
+    f_bsj_guide_mag = -_K_BSJ_GUIDE / 0.2 * sig / (dist_bsj_g + eps)
     f_bsj_guide_vec = (f_bsj_guide_mag * delta_bsj_g / dist_bsj_g).squeeze(-1)
     total_E += e_bsj_guide
     total_F[:, P(0)] += f_bsj_guide_vec

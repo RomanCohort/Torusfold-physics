@@ -25,7 +25,7 @@ def _make_system(L=6, seed=7):
     B, N = 1, 3 * L
     pos = (torch.rand(B, N, 3) * 1.2 + 0.3).to(torch.float32)  # nm
     pairs = torch.tensor([[0, 2], [1, 3], [2, 5], [0, 4]], dtype=torch.long)  # residue-index pairs
-    pair_w = torch.ones(B, pairs.shape[0], dtype=torch.float32)
+    pair_w = torch.ones(pairs.shape[0], dtype=torch.float32)  # (P,) 1-D, as expected by the force functions
     return pos, pairs, pair_w
 
 
