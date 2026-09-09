@@ -1,0 +1,39 @@
+SHORT-TRAJECTORY COMPARISON — 2026-09-10 (CPU, torch 2.10.0)
+Script: short_traj_cmp.py  |  old = 8eaaf7f (pre-fix) vs new = 450605d (post-fix)
+
+=== Experiment 1: full force field, 24-nt CG helix, pairs pulled to 1.5/2.0/2.5 nm,
+    pre-equilibrated, 200 overdamped steps ===
+  Both old and new end at ~2.1-2.7 nm: chain elasticity dominates; neither
+  guide can pull sequence-distant pairs across 12 residues in a short run.
+  Conclusion: guide terms alone cannot close far pairs in this geometry —
+  range (~1.6 nm) and strength (K=100 vs chain stiffness ~500) are the real
+  bottleneck, NOT the force sign (consistent with the observed far-pair
+  closure difficulty).
+
+=== Experiment 2: guide terms ONLY (all other constants zeroed), one pair
+    pulled to 1.3 nm, 150 steps ===
+  OLD(8eaaf7f): 1.26 -> 0.30 -> 0.189 -> 0.183 nm
+  NEW(450605d): 1.28 -> 0.025 -> 0.025 -> 0.015 nm
+
+=== IMPORTANT CORRECTION to the earlier claim ===
+The pre-fix guide force did NOT simply "repel" far pairs: its force sign was
+opposite to its own potential gradient, so it pulled pairs INWARD at almost
+every distance — all the way to overlap (~0.18 nm, where sigmoid saturates)
+when other terms were absent. With the unbounded potential
+E=-k*softplus((r-r0)/w), the correct gradient would push outward, but the
+implemented force pulled inward regardless. Net effect in the real pipeline:
+incoherent guide behaviour (energy says one thing, force does another), plus
+no working range beyond ~r0.
+
+The fix (450605d) makes guide = bounded near-attraction:
+E=-k*softplus((r0-r)/w), F=-k/w*sig*delta/r. Verified: force matches the
+potential gradient (direction checks PASS, isolated-term FD matches), it no
+longer collapses pairs beyond r0, and it is inert beyond ~1.6 nm.
+
+=== What this means for far-pair closure ===
+The sign/potential bug is real and fixed, but closing pairs at >2 nm needs
+more than the current guides: either a longer-range steering term, stronger
+K, or the RL/steering path that operates before CG relaxation. Re-run the
+2OIU Level-2 job (or a real segment) with 450605d and compare the far-pair
+satisfaction metric; expect improvements only for pairs already within
+~1.5 nm of pairing geometry.

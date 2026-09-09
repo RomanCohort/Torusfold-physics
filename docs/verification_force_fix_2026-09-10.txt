@@ -1,0 +1,39 @@
+VERIFICATION RESULTS — 2026-09-10 (CPU, torch 2.10.0)
+
+Files tested: src/torusfold/scheme2/torch_cgsim.py (with the six-term fix),
+tests/test_force_gradcheck.py, verify_force_fd.py. Near-equilibrium +
+term-isolated checks; per-particle force caps (200/50) disabled by isolation.
+
+PASSED (clean isolation, direction/sign of forces):
+1. cg_energy_forces pair guide  : pulls paired residues together  (F_P1=+186, F_P6=-191)
+2. cg_energy_forces BSJ guide   : pulls BSJ ends together         (F_P0=+185, F_P7=-200)
+3. cg_energy_forces BPP         : pulls WC N-N pairs together     (F_N1=+200, F_N6=-200)
+4. cg_forces_explicit_batched dihedral: FD match on the dominant
+   components (rel 0.2% - 3.4%; x-component ~0 is the correct helix
+   axial-translation null direction, previously mis-flagged by a
+   zero-denominator test)
+5. cg_forces_explicit_batched BSJ guide: attracts in the full default
+   force field (first run: F_P0=+875); its isolated-run magnitude is
+   contaminated by implicit-solvent literals not reachable via module
+   constants — direction is correct where it matters.
+
+KEY FINDINGS BEYOND THE ORIGINAL SIX:
+A. The guide potential was pathological as written: E = -k*softplus((r-r0)/w)
+   is unbounded below (r->inf stable), i.e. it pushed pairs apart no matter
+   the force sign. Fixed to the bounded near-attraction form
+   E = -k*softplus((r0-r)/w), force F = -k/w*sig*delta/r. All three
+   implementations (unified, batched, cell-list) updated, energies AND
+   forces (so REMD swap criteria now see the corrected surface too).
+B. Working range of the guides is ~r0 + 3w ~ 1.6 nm; pairs beyond ~2 nm
+   feel no guide force. If far-pair closure relies on these terms, the
+   range itself is a design limit to revisit (consistent with far-pair
+   closure difficulties).
+C. The per-particle force caps (200 global / 50 GB) fire routinely for
+   these terms (guide K/w up to 500 kJ/mol/nm), so F = -dE/dx is
+   deliberately violated during most sampling steps. That is a stability
+   choice; be aware REMD acceptance then samples a capped-force dynamics
+   with uncapped swap energies.
+
+REMAINING ACTION: run a short production-ish trajectory (or the 2OIU
+Level-2 run) with the fix and compare far/long-range pair satisfaction
+against the previous numbers.
