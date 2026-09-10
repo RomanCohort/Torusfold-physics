@@ -2114,7 +2114,7 @@ def isrnaclong_pipeline(
             from torusfold.scheme2.amber_refine import amber_refine as _amber_refine_full
 
             # CG P coords (Å) -> AllAtomStructure (1EHZ crystal template)
-            _structure_5 = reconstruct_all_atom(best_coords, sequence)
+            _structure_5 = reconstruct_all_atom(best_coords, sequence, pairs=pairs)
             # amber_refine: C1'-C1' pair restraints (K=100 kJ/mol/nm²) + A-form torsions
             _refined_coords_5, _e0_5, _e1_5, _info_5 = _amber_refine_full(
                 _structure_5, pairs,
