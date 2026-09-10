@@ -1,86 +1,115 @@
-"""Accuracy of aform_from_template.reconstruct_all_atom with 1EHZ chain A as truth.
+"""Accuracy of aform_from_template.reconstruct_all_atom, with 1EHZ chain A as truth.
 
 Only the true P trace is supplied; the reconstruction is superposed onto the truth using
-P atoms alone. Templates come from 1EHZ, so residue shape is perfect by construction and
-all remaining error is the placement rule. Self-inclusion caveat: this measures the
-placement rule, not generalisation.
+P atoms alone. Templates come from 1EHZ, so shape is perfect by construction and all
+remaining error is the placement rule. Self-inclusion caveat: measures the rule, not
+generalisation. Loads through truth_1ehz.py, which includes the HETATM modified residues.
 """
-import sys, collections, numpy as np
-sys.path.insert(0, r"D:\torusfold-hybrid\src")
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+import truth_1ehz
+import torusfold.scheme2.aform_from_template as A
 from torusfold.scheme2.aform_from_template import reconstruct_all_atom
 
-PDB = r"D:\Torusfold-Templates\_tools\1ehz.pdb"
-GLY = {"A": "N9", "G": "N9", "C": "N1", "U": "N1"}
-WCP = {("A", "U"), ("U", "A"), ("G", "C"), ("C", "G"), ("G", "U"), ("U", "G")}
+order, res, base_of, ps, partner, meta = truth_1ehz.load()
+L = len(order)
+seq = "".join(base_of)
+print(f"1EHZ truth: {meta['n_residues']} residues, {meta['n_atoms']} atoms, "
+      f"contiguous={meta['contiguous']}, paired={meta['n_paired']}")
+pairs = [(a, b) for a, b in partner.items() if a < b]
 
-order, res = [], collections.OrderedDict()
-for line in open(PDB):
-    if not line.startswith("ATOM") or line[16] not in (" ", "A"):
-        continue
-    key = (line[21], line[22:27].strip(), line[17:20].strip())
-    try:
-        xyz = np.array([float(line[30:38]), float(line[38:46]), float(line[46:54])])
-    except ValueError:
-        continue
-    if key not in res:
-        res[key] = {}; order.append(key)
-    res[key].setdefault(line[12:16].strip(), xyz)
 
-runs, cur = [], []
-for k in order:
-    if k[2] in "ACGU" and "P" in res[k]:
-        cur.append(k)
-    else:
-        if len(cur) > len(runs):
-            runs = cur
-        cur = []
-if len(cur) > len(runs):
-    runs = cur
-run = runs
-seq = "".join(k[2] for k in run)
-ps = np.array([res[k]["P"] for k in run])
-L = len(run)
-wc = []
-for a in range(L):
-    for b in range(a + 3, L):
-        if (seq[a], seq[b]) in WCP and 9.0 <= np.linalg.norm(res[run[a]]["C1'"] - res[run[b]]["C1'"]) <= 11.5:
-            wc.append((a, b))
-paired = {i for pr in wc for i in pr}
-print(f"run: {L} residues, {len(wc)} WC pairs -> {len(paired)} paired, {L - len(paired)} unpaired")
+def frame(i, sign=None, window=None):
+    b = ps[i + 1] - ps[i]
+    b = b / np.linalg.norm(b)
+    j = partner.get(i)
+    if j is not None:
+        d = ps[j] - ps[i]
+        r = d - np.dot(d, b) * b
+        rn = np.linalg.norm(r)
+        if rn > 1e-6:
+            return b, r / rn
+    w = min(max(1, int(A._FALLBACK_WINDOW if window is None else window)), L)
+    sg = A._FALLBACK_SIGN if sign is None else sign
+    c = ps[[(i + k) % L for k in range(-w, w + 1)]].mean(axis=0)
+    r = (ps[i] - c) * sg
+    r = r - np.dot(r, b) * b
+    rn = np.linalg.norm(r)
+    return b, (r / rn if rn > 1e-6 else np.array([0.0, 0.0, 1.0]))
 
-s = reconstruct_all_atom(ps, seq, pairs=wc)
-m = []
-for i, k in enumerate(run):
+
+print()
+print("measured anchor offsets (along b, along r, along n), Angstrom")
+for nm in ("C1'", "C4'"):
+    rows = []
+    for i in range(L - 1):
+        if partner.get(i) is None or base_of[i] not in "ACGU" or nm not in res[order[i]]:
+            continue
+        b, r = frame(i)
+        v = res[order[i]][nm] - ps[i]
+        rows.append([float(np.dot(v, b)), float(np.dot(v, r)), float(np.dot(v, np.cross(b, r)))])
+    a = np.array(rows)
+    print(f"  {nm:4s} n={len(a):3d}  {a[:,0].mean():6.2f}+/-{a[:,0].std():5.2f}  "
+          f"{a[:,1].mean():6.2f}+/-{a[:,1].std():5.2f}  {a[:,2].mean():6.2f}+/-{a[:,2].std():5.2f}")
+print("  module now:", A._ANCHOR_OFFSETS)
+
+
+def rmsd_by_group(label):
+    s = reconstruct_all_atom(ps, seq, pairs=pairs)
+    m = []
+    for i, k in enumerate(order):
+        a = s.residue_atom_index[i]
+        for nm, serial in a.items():
+            if nm in res[k]:
+                m.append((i, np.asarray(s.atoms[serial].xyz, float), res[k][nm]))
+    rP = np.array([s.atoms[s.residue_atom_index[i]["P"]].xyz for i in range(L)], dtype=float)
+    rc, tc = rP.mean(0), ps.mean(0)
+    H = (rP - rc).T @ (ps - tc)
+    U, _, Vt = np.linalg.svd(H)
+    d = np.sign(np.linalg.det(Vt.T @ U.T))
+    R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+    ap = lambda c: (c - rc) @ R.T + tc
+    g = {"all": [], "paired": [], "unpaired": []}
+    for i, rr, tt in m:
+        e = float(np.linalg.norm(ap(rr) - tt))
+        g["all"].append(e)
+        g["paired" if i in partner else "unpaired"].append(e)
+    print(f"  {label:30s} overall {np.mean(g['all']):6.3f}  paired {np.mean(g['paired']):6.3f}  "
+          f"unpaired {np.mean(g['unpaired']):6.3f}")
+    return g
+
+
+print()
+print("accuracy (per-atom RMSD after P-superposition)")
+rmsd_by_group("as shipped")
+keep = (A._FALLBACK_SIGN, A._FALLBACK_WINDOW)
+print()
+print("fallback sweep (sign x window); only the unpaired group moves")
+for sign in (-1.0, +1.0):
+    for win in (2, 4, 8, 16, L):
+        A._FALLBACK_SIGN, A._FALLBACK_WINDOW = sign, win
+        rmsd_by_group(f"sign {sign:+.0f} window {'L' if win >= L else win}")
+A._FALLBACK_SIGN, A._FALLBACK_WINDOW = keep
+
+print()
+print("upper bound (per-residue optimal orientation)")
+s = reconstruct_all_atom(ps, seq, pairs=pairs)
+g2 = []
+for i in range(L):
     a = s.residue_atom_index[i]
-    for nm, serial in a.items():
-        if nm in res[k]:
-            m.append((i, nm, np.asarray(s.atoms[serial].xyz, float), res[k][nm]))
-rP = np.array([x[2] for x in m if x[1] == "P"])
-tP = np.array([x[3] for x in m if x[1] == "P"])
-rc, tc = rP.mean(0), tP.mean(0)
-H = (rP - rc).T @ (tP - tc)
-U, _, Vt = np.linalg.svd(H)
-d = np.sign(np.linalg.det(Vt.T @ U.T))
-R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
-ap = lambda c: (c - rc) @ R.T + tc
-
-g, ang, bypart = collections.defaultdict(list), collections.defaultdict(list), {"paired": [], "unpaired": []}
-for i, nm, rr, tt in m:
-    e = float(np.linalg.norm(ap(rr) - tt))
-    g[nm].append(e)
-    bypart["paired" if i in paired else "unpaired"].append(e)
-    if nm in ("C1'", "C4'") or nm == GLY[seq[i]]:
-        v1, v2 = rr - ps[i], tt - ps[i]
-        c = float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-12))
-        ang[nm].append(float(np.degrees(np.arccos(np.clip(c, -1, 1)))))
-
-allr = np.array([v for vs in g.values() for v in vs])
-print()
-print(f"overall per-atom RMSD after P-superposition: {allr.mean():.3f} +/- {allr.std():.3f} A")
-for show, disp in (("P", "P"), ("C1'", "C1'"), ("C4'", "C4'"), ("O3'", "O3'"), ("N9", "N9"), ("N1", "N1"), ("O2'", "O2'"), ("C5'", "C5'"), ("O5'", "O5'")):
-    if show in g:
-        a2 = f"{np.mean(ang[show]):6.1f} +/- {np.std(ang[show]):4.1f}" if show in ang else ""
-        print(f"  {disp:6s} {len(g[show]):4d} {np.mean(g[show]):8.3f}   {a2:>22s}")
-print()
-for k, v in bypart.items():
-    print(f"  {k:9s} n={len(v):4d}  RMSD {np.mean(v):6.3f} +/- {np.std(v):5.3f} A")
+    names = [nm for nm in a if nm in res[order[i]]]
+    rc2 = np.array([np.asarray(s.atoms[a[nm]].xyz, float) for nm in names])
+    tc2 = np.array([res[order[i]][nm] for nm in names])
+    c1, c2 = rc2.mean(0), tc2.mean(0)
+    H2 = (rc2 - c1).T @ (tc2 - c2)
+    U2, _, Vt2 = np.linalg.svd(H2)
+    d2 = np.sign(np.linalg.det(Vt2.T @ U2.T))
+    R2 = Vt2.T @ np.diag([1.0, 1.0, d2]) @ U2.T
+    for nm, rr, tt in zip(names, rc2, tc2):
+        g2.append(float(np.linalg.norm((rr - c1) @ R2.T + c2 - tt)))
+print(f"  {np.mean(g2):.3f} A")

@@ -84,14 +84,14 @@ def _kabsch_align(
 # Per-base constants were tried and are not better (2.867 A vs 2.820 A overall on the
 # 62-residue 1EHZ test), so the pooled means are used.
 _ANCHOR_OFFSETS = {
-    "C1'": (3.29, 2.95, -2.39),
-    "C4'": (2.89, 0.86, -2.21),
+    "C1'": (3.36, 2.63, -2.35),
+    "C4'": (2.97, 0.65, -2.07),
 }
 
 # Half-width (in residues) of the P-trace window whose centroid is used as a local
 # axis point for residues without a base-pair partner. Set to >= L to recover the old
 # global-centroid behaviour.
-_FALLBACK_WINDOW = 4
+_FALLBACK_WINDOW = 2
 
 # Sign of the fallback radial axis. The offsets were measured with r pointing at the
 # base-pair partner, i.e. inward across the helix; the axis-radial direction for an
