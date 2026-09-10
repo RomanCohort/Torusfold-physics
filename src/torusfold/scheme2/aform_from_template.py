@@ -73,10 +73,20 @@ def _kabsch_align(
     return aligned.astype(np.float32)
 
 
-# 1EHZ-measured anchor offsets, decomposed along the backbone direction b
-# (61 standard residues, chain A; docs/reconstruction_anchor_audit.md)
-_C1_ALONG, _C1_PERP = 3.25, 4.16
-_C4_ALONG, _C4_PERP = 2.79, 2.63
+# 1EHZ-measured anchor offsets in a full local frame
+#   b = P[i] -> P[i+1] (unit)
+#   r = direction to the base-pair partner, orthogonalized against b (unit)
+#   n = b x r
+# Offset = (along b, along r, along n) of (X - P[i]), Angstrom.
+# Measured on 45 paired standard residues of 1EHZ chain A (scripts/measure_frame3d.py).
+# C4-prime sits mostly along n (-2.2) and hardly along r (0.9), while C1-prime is spread
+# over both - which is why one shared perpendicular axis could not place both.
+# Per-base constants were tried and are not better (2.867 A vs 2.820 A overall on the
+# 62-residue 1EHZ test), so the pooled means are used.
+_ANCHOR_OFFSETS = {
+    "C1'": (3.29, 2.95, -2.39),
+    "C4'": (2.89, 0.86, -2.21),
+}
 
 
 def reconstruct_all_atom(
@@ -175,8 +185,10 @@ def reconstruct_all_atom(
             rn = np.linalg.norm(r)
             r = r / rn if rn > 1e-6 else np.array([0.0, 0.0, 1.0])
 
-        c1_dst = p_coords[i] + b * _C1_ALONG + r * _C1_PERP
-        c4_dst = p_coords[i] + b * _C4_ALONG + r * _C4_PERP
+        n_axis = np.cross(b, r)  # r is already orthogonal to b and unit
+        _o1, _o4 = _ANCHOR_OFFSETS["C1'"], _ANCHOR_OFFSETS["C4'"]
+        c1_dst = p_coords[i] + b * _o1[0] + r * _o1[1] + n_axis * _o1[2]
+        c4_dst = p_coords[i] + b * _o4[0] + r * _o4[1] + n_axis * _o4[2]
         o3_dst = nxt - b * 1.6  # O3'[i] consistent with the geometry of P[i+1]
         dst_anchors = np.stack([p_coords[i], c1_dst, c4_dst, o3_dst])
 

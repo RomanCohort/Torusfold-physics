@@ -1,7 +1,12 @@
-"""Accuracy of aform_from_template.reconstruct_all_atom with 1EHZ chain A as truth."""
+"""Accuracy of aform_from_template.reconstruct_all_atom with 1EHZ chain A as truth.
+
+Only the true P trace is supplied; the reconstruction is superposed onto the truth using
+P atoms alone. Templates come from 1EHZ, so residue shape is perfect by construction and
+all remaining error is the placement rule. Self-inclusion caveat: this measures the
+placement rule, not generalisation.
+"""
 import sys, collections, numpy as np
 sys.path.insert(0, r"D:\torusfold-hybrid\src")
-import torusfold.scheme2.aform_from_template as A
 from torusfold.scheme2.aform_from_template import reconstruct_all_atom
 
 PDB = r"D:\Torusfold-Templates\_tools\1ehz.pdb"
@@ -35,75 +40,47 @@ run = runs
 seq = "".join(k[2] for k in run)
 ps = np.array([res[k]["P"] for k in run])
 L = len(run)
-
 wc = []
 for a in range(L):
     for b in range(a + 3, L):
-        if (seq[a], seq[b]) not in WCP:
-            continue
-        if 9.0 <= np.linalg.norm(res[run[a]]["C1'"] - res[run[b]]["C1'"]) <= 11.5:
+        if (seq[a], seq[b]) in WCP and 9.0 <= np.linalg.norm(res[run[a]]["C1'"] - res[run[b]]["C1'"]) <= 11.5:
             wc.append((a, b))
-print(f"run: {L} residues ({run[0][1]}..{run[-1][1]}), geometry-derived WC pairs: {len(wc)}")
+paired = {i for pr in wc for i in pr}
+print(f"run: {L} residues, {len(wc)} WC pairs -> {len(paired)} paired, {L - len(paired)} unpaired")
 
-
-def evaluate(pairs, label):
-    s = reconstruct_all_atom(ps, seq, pairs=pairs) if pairs is not None else reconstruct_all_atom(ps, seq)
-    m = []
-    for i, k in enumerate(run):
-        a = s.residue_atom_index[i]
-        for nm, serial in a.items():
-            if nm in res[k]:
-                m.append((i, nm, np.asarray(s.atoms[serial].xyz, float), res[k][nm]))
-    rP = np.array([x[2] for x in m if x[1] == "P"])
-    tP = np.array([x[3] for x in m if x[1] == "P"])
-    rc, tc = rP.mean(0), tP.mean(0)
-    H = (rP - rc).T @ (tP - tc)
-    U, _, Vt = np.linalg.svd(H)
-    d = np.sign(np.linalg.det(Vt.T @ U.T))
-    R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
-    ap = lambda c: (c - rc) @ R.T + tc
-    g, ang = collections.defaultdict(list), collections.defaultdict(list)
-    for i, nm, rr, tt in m:
-        g[nm].append(float(np.linalg.norm(ap(rr) - tt)))
-        if nm in ("C1'", "C4'") or nm == GLY[seq[i]]:
-            v1, v2 = rr - ps[i], tt - ps[i]
-            c = float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-12))
-            ang[nm].append(float(np.degrees(np.arccos(np.clip(c, -1, 1)))))
-    allr = np.array([v for vs in g.values() for v in vs])
-    print()
-    print(f"=== {label} ===")
-    print(f"overall per-atom RMSD after P-superposition: {allr.mean():.3f} +/- {allr.std():.3f} A")
-    for nm in ["P", "C1'", "C4'", "O3'", "N9", "N1", "O2'", "C5'", "O5'"]:
-        if nm in g:
-            a = f"{np.mean(ang[nm]):6.1f} +/- {np.std(ang[nm]):4.1f}" if nm in ang else ""
-            print(f"  {nm:6s} {len(g[nm]):4d} {np.mean(g[nm]):8.3f}   {a:>22s}")
-
-
-evaluate(None, "A. measured anchors + radial roll")
-evaluate(wc, "B. measured anchors + partner-directed roll")
-
-keep = (A._C1_ALONG, A._C1_PERP, A._C4_ALONG, A._C4_PERP)
-A._C1_ALONG, A._C1_PERP = 5.5, 1.5
-A._C4_ALONG, A._C4_PERP = 4.2, 0.0
-evaluate(wc, "C. ABLATION: legacy anchors + partner-directed roll")
-A._C1_ALONG, A._C1_PERP, A._C4_ALONG, A._C4_PERP = keep
-
-print()
-print("=== E. upper bound: each residue superposed optimally on its own truth ===")
 s = reconstruct_all_atom(ps, seq, pairs=wc)
-g2 = collections.defaultdict(list)
+m = []
 for i, k in enumerate(run):
     a = s.residue_atom_index[i]
-    names = [nm for nm in a if nm in res[k]]
-    rc2 = np.array([np.asarray(s.atoms[a[nm]].xyz, float) for nm in names])
-    tc2 = np.array([res[k][nm] for nm in names])
-    c1, c2 = rc2.mean(0), tc2.mean(0)
-    H2 = (rc2 - c1).T @ (tc2 - c2)
-    U2, _, Vt2 = np.linalg.svd(H2)
-    d2 = np.sign(np.linalg.det(Vt2.T @ U2.T))
-    R2 = Vt2.T @ np.diag([1.0, 1.0, d2]) @ U2.T
-    for nm, rr, tt in zip(names, rc2, tc2):
-        g2[nm].append(float(np.linalg.norm((rr - c1) @ R2.T + c2 - tt)))
-allg = np.array([v for vs in g2.values() for v in vs])
-print(f"per-atom RMSD with perfect per-residue orientation: {allg.mean():.3f} A")
-print("  (non-zero only because 1EHZ residues differ slightly from the templates' shapes)")
+    for nm, serial in a.items():
+        if nm in res[k]:
+            m.append((i, nm, np.asarray(s.atoms[serial].xyz, float), res[k][nm]))
+rP = np.array([x[2] for x in m if x[1] == "P"])
+tP = np.array([x[3] for x in m if x[1] == "P"])
+rc, tc = rP.mean(0), tP.mean(0)
+H = (rP - rc).T @ (tP - tc)
+U, _, Vt = np.linalg.svd(H)
+d = np.sign(np.linalg.det(Vt.T @ U.T))
+R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+ap = lambda c: (c - rc) @ R.T + tc
+
+g, ang, bypart = collections.defaultdict(list), collections.defaultdict(list), {"paired": [], "unpaired": []}
+for i, nm, rr, tt in m:
+    e = float(np.linalg.norm(ap(rr) - tt))
+    g[nm].append(e)
+    bypart["paired" if i in paired else "unpaired"].append(e)
+    if nm in ("C1'", "C4'") or nm == GLY[seq[i]]:
+        v1, v2 = rr - ps[i], tt - ps[i]
+        c = float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-12))
+        ang[nm].append(float(np.degrees(np.arccos(np.clip(c, -1, 1)))))
+
+allr = np.array([v for vs in g.values() for v in vs])
+print()
+print(f"overall per-atom RMSD after P-superposition: {allr.mean():.3f} +/- {allr.std():.3f} A")
+for show, disp in (("P", "P"), ("C1'", "C1'"), ("C4'", "C4'"), ("O3'", "O3'"), ("N9", "N9"), ("N1", "N1"), ("O2'", "O2'"), ("C5'", "C5'"), ("O5'", "O5'")):
+    if show in g:
+        a2 = f"{np.mean(ang[show]):6.1f} +/- {np.std(ang[show]):4.1f}" if show in ang else ""
+        print(f"  {disp:6s} {len(g[show]):4d} {np.mean(g[show]):8.3f}   {a2:>22s}")
+print()
+for k, v in bypart.items():
+    print(f"  {k:9s} n={len(v):4d}  RMSD {np.mean(v):6.3f} +/- {np.std(v):5.3f} A")
