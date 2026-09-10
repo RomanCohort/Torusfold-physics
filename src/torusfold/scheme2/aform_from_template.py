@@ -73,14 +73,24 @@ def _kabsch_align(
     return aligned.astype(np.float32)
 
 
+# 1EHZ-measured anchor offsets, decomposed along the backbone direction b
+# (61 standard residues, chain A; docs/reconstruction_anchor_audit.md)
+_C1_ALONG, _C1_PERP = 3.25, 4.16
+_C4_ALONG, _C4_PERP = 2.79, 2.63
+
+
 def reconstruct_all_atom(
-    p_coords: np.ndarray, sequence: str,
+    p_coords: np.ndarray, sequence: str, pairs=None,
 ) -> AllAtomStructure:
     """CG P coordinates -> all-atom RNA (1EHZ crystal template).
 
     Args:
         p_coords: (L, 3) Å, one P atom per nucleotide (CG solver output)
         sequence: ACGU string of length L
+        pairs: optional base pairs, any of (i, j) / (i, j, w). When given, a paired
+            residue's perpendicular anchor axis points at its partner, so the base
+            faces the base it pairs with instead of radiating from the centroid.
+            Unpaired residues keep the radial fallback.
     Returns:
         AllAtomStructure whose per-residue all-atom coordinates are Kabsch-superposed
         1EHZ standard residues.
@@ -95,6 +105,18 @@ def reconstruct_all_atom(
     bad = [c for c in sequence if c not in "ACGU"]
     if bad:
         raise ValueError(f"sequence contains invalid letters {set(bad)}; only ACGU allowed")
+
+    # base-pair partner map (first partner wins); absent pairs -> radial fallback
+    partner_of: Dict[int, int] = {}
+    if pairs:
+        for pr in pairs:
+            try:
+                i0, j0 = int(pr[0]), int(pr[1])
+            except (TypeError, IndexError, ValueError):
+                continue
+            if 0 <= i0 < L and 0 <= j0 < L and i0 != j0:
+                partner_of.setdefault(i0, j0)
+                partner_of.setdefault(j0, i0)
 
     templates = _load_templates()
     centroid = p_coords.mean(axis=0)
@@ -119,25 +141,42 @@ def reconstruct_all_atom(
         src_anchors = np.stack([tcoords[idx_P], tcoords[idx_C1],
                                 tcoords[idx_C4], tcoords[idx_O3]])
 
-        # CG only supplies P[i]; the C1'/C4'/O3' targets are inferred in the local frame (approximate A-form geometry):
+        # CG supplies only P[i]; the C1'/C4'/O3' targets are inferred in the local frame.
         #   backbone direction b = P[i+1] - P[i] (the last residue uses P[0]-P[L-1])
-        #   radial r = P[i] - centroid (bases point outward)
-        #   C1' lies +5.5Å along the backbone and +1.5Å radially from P (A-form statistics)
-        #   C4' lies +4.2Å along the backbone and 0 radially from P
-        #   O3' is placed 1.6Å back from P[i+1] (A-form O3'-P bond length of 1.6Å)
+        #   perpendicular r = direction to the base-pair partner, projected off b;
+        #     unpaired residues fall back to the radial direction P[i] - centroid
+        # The C1'/C4' offsets are the 1EHZ-measured means decomposed along b
+        # (61 standard residues, chain A; see docs/reconstruction_anchor_audit.md):
+        #   C1': 3.25 along + 4.16 perpendicular  (|C1'-P| = 5.33 +/- 0.19)
+        #   C4': 2.79 along + 2.63 perpendicular  (|C4'-P| = 3.90 +/- 0.04)
+        # The previous constants (5.5/1.5 and 4.2/0.0) put every anchor on the backbone
+        # axis and made two of the four targets coincide with O3' at P[i+1]-1.6b:
+        # 0.01 A apart against a real |C4'-O3'| of 2.44 +/- 0.04 A. With a degenerate
+        # target tetrahedron the roll about b is undetermined, which misplaced the base
+        # atoms by 6-9 A.
         nxt = p_coords[(i + 1) % L]
         b = nxt - p_coords[i]
         bn = np.linalg.norm(b)
         b = b / bn if bn > 1e-6 else np.array([1.0, 0.0, 0.0])
-        r = p_coords[i] - centroid
-        rn = np.linalg.norm(r)
-        r = r / rn if rn > 1e-6 else np.array([0.0, 0.0, 1.0])
-        r = r - np.dot(r, b) * b  # orthogonalize into the plane normal to b
-        rn = np.linalg.norm(r)
-        r = r / rn if rn > 1e-6 else np.array([0.0, 0.0, 1.0])
 
-        c1_dst = p_coords[i] + b * 5.5 + r * 1.5
-        c4_dst = p_coords[i] + b * 4.2
+        r = None
+        j = partner_of.get(i)
+        if j is not None and 0 <= j < L:
+            d = p_coords[j] - p_coords[i]
+            d = d - np.dot(d, b) * b
+            dn = np.linalg.norm(d)
+            if dn > 1e-6:
+                r = d / dn
+        if r is None:
+            r = p_coords[i] - centroid
+            rn = np.linalg.norm(r)
+            r = r / rn if rn > 1e-6 else np.array([0.0, 0.0, 1.0])
+            r = r - np.dot(r, b) * b  # orthogonalize into the plane normal to b
+            rn = np.linalg.norm(r)
+            r = r / rn if rn > 1e-6 else np.array([0.0, 0.0, 1.0])
+
+        c1_dst = p_coords[i] + b * _C1_ALONG + r * _C1_PERP
+        c4_dst = p_coords[i] + b * _C4_ALONG + r * _C4_PERP
         o3_dst = nxt - b * 1.6  # O3'[i] consistent with the geometry of P[i+1]
         dst_anchors = np.stack([p_coords[i], c1_dst, c4_dst, o3_dst])
 
