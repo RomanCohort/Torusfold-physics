@@ -9,7 +9,7 @@
 | 文献 | 做了什么 | 对我们 |
 | :-- | :-- | :-- |
 | **IsRNA / IsRNA1 / IsRNA2**（PMC9731381） | CG 力场的参数化方法叫 **iterative simulated reference state approach**。`E_total = E_bond(b) + E_angle(θ) + E_torsion(φ) + E_bp(r,θ,φ) + E_pair(r)`，简谐 + 高斯 + LJ 型，参数由统计方法确定 | **我们的 CG 力场本身就是统计参数化的**（同一血统）|
-| **cgRNASP**（NAR Genom Bioinform 2023;5(1):lqad016, doi:10.1093/nargab/lqad016, PMC9985339） | "a series of residue-separation-based CG statistical potentials at **different CG levels**"，短程/长程按残基间距分开。与全原子 rsRNASP 性能相当，RNA-Puzzles 上略好，且"strikingly more efficient" | TriRNASP 失败的解法 |
+| **cgRNASP**（NAR Genom Bioinform 2023;5(1):lqad016, doi:10.1093/nargab/lqad016, PMC9985339） | 在**三个 CG 层级**上做的统计势：① **3 珠 = P / C4\' / N9(嘌呤) 或 N1(嘧啶)** —— 代表作；② cgRNASP-PC，2 珠 = P / C4\'；③ cgRNASP-C，1 珠 = C4\'。短程/长程按残基间距分开。与全原子 rsRNASP 性能相当，RNA-Puzzles 上略好，"strikingly more efficient" | **①的珠子定义与我们的 P/C4\'/N 是同一约定** —— 分辨率错配这一条被它填掉了 |
 | **cgRNASP-CN**（Commun. Theor. Phys. 2022, doi:10.1088/1572-9494/ac7042；GitHub `Tan-group/cgRNASP-CN`） | 最小 CG 表示上的统计势 | 同上 |
 | **IsRNA2+**（JCTC, doi:10.1021/acs.jctc.6c01116） | 标题即方法："Developing Explicit Base Stacking Potentials for the IsRNA2+ Coarse-Grained RNA Force Field **Using Iterative Reweighting**" —— 给现成 CG 力场加显式项 | 这就是"注入"本身 |
 | **综述** Building RNA coarse-grained force fields: Design principles and training strategies（Biophys J 2026, doi:10.1016/j.bpj.2026.03.041） | CG 力场的设计考量、训练策略；序列依赖、二级结构、三级模体等结构信息如何并入；ML 方向的展望 | 该先读的入门 |
@@ -57,10 +57,16 @@ cgRNASP 原文：
 
 ## 3. 重写后的三个问题
 
-1. **在哪一级计数？** 我们的珠子是 P / C4' / N（三颗），比 IsRNA2 的九类还粗。
-   在 P/C4'/N 上直接统计的势，本轮检索**没找到先例**。可能是机会（更省、副本更多），
-   也可能是死路（太粗、无判别力）。可测。
-2. **怎么加才不打架？** 走迭代（IsRNA2+ / IsRNA 路线），而不是固定系数。
+1. **在哪一级计数？** 答案已经有了，我上一轮写的“没找到先例”是错的：
+   **cgRNASP 的 3 珠表示就是 P / C4' / N9(嘌呤) 或 N1(嘧啶)**，与 `openmm_gpu_refiner.py`
+   里 `P(i)=3i, C4(i)=3i+1, N(i)=3i+2` 是同一约定；同文还指出这个 3 珠表示正是 SimRNA、
+   Vfold、Shapiro 模型用的那一套。
+
+   **但有一件事必须先确认，它是整个方案的开关**：我们那个 `N` 珠子到底对应糖苷氮（N9/N1），
+   还是只是沿骨架方向的几何偏移 —— `torch_gpu_refine.py:125-135` 是按骨架方向 `-0.15 nm`
+   摆出来的。若是前者，cgRNASP 的统计可以直接用；若是后者，得先把珠子定义统一了再统计。
+2. **怎么加才不打架？** 走迭代（IsRNA2+ / IsRNA 路线），而不是固定系数。剩下两件没人替我们做：
+   把 cgRNASP 的统计转成**可微**形式（它原本是打分用的距离依赖势，不是力），以及定标。
 3. **加成，还是重参数化？** 底层场已经是统计的，所以"再加一层"和"重新拟合"是两条不同的路。
 
 ## 4. 证据空缺（诚实标注）
