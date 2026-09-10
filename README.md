@@ -144,12 +144,16 @@ python run_2013nt.py
 Run flags (RL close, REST2 replicas, REMD rounds, PyRosetta, PPR repair,
 pseudo-MSA fallback) are configured as call arguments in `run_2013nt.py`.
 
-**Reproducing the headline result (≈7 h).** The pre-built viewer structure was
-produced with the low configuration `n_rest2_replicas=8`,
-`rest2_nsteps=20000`, `nrep=2`, `n_relax_rounds=8` in `run_2013nt.py`.
-The checked-in defaults (`n_rest2_replicas=16`, `rest2_nsteps=100000`,
-`nrep=16`) form a higher configuration that takes substantially longer —
-adjust these arguments if you want the 7 h run.
+**Shorter runs, and the provenance of the ≈7 h figure.** The pre-built viewer
+structure was produced by an **earlier internal build** of the pipeline (OpenMM
+CPU path) that is no longer in this repository, so its ≈7 h wall time is a
+historical measurement, not a figure reproducible from this checkout. The
+checked-in `run_2013nt.py` carries a higher configuration (`n_rest2_replicas=16`,
+`rest2_nsteps=100000`, `nrep=16`, `n_relax_rounds=20`). To run shorter, pass
+smaller values explicitly — e.g. `n_rest2_replicas=8`, `rest2_nsteps=20000`,
+`nrep=2`, `n_relax_rounds=8` — and budget the wall time from a fresh measurement.
+Per-stage step counts for the current code are tabulated in
+`docs/REPRODUCTION_RESOURCES.md` §2.1.
 
 **Web server.**
 

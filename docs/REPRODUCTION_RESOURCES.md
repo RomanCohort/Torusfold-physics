@@ -11,15 +11,21 @@
 | Platform | AMD Ryzen AI MAX 395 (APU, unified memory), Windows |
 | GPU mode | GPU-accelerated path of the pipeline (REMD/MetaD/torch CG); peak unified-memory use ≈ **60 GB** |
 | CPU mode | CPU-only path (OpenMM CPU platform, multi-replica parallel); peak RAM ≈ **30 GB** |
-| Wall time, low config (CPU) | ≈ **7 h** — 2,013 nt end-to-end, low config (REST2 ×8 × 20,000 steps; REMD ×2 × 8 relax rounds), measured |
+| Wall time, low config (CPU) | ≈ **7 h** — 2,013 nt end-to-end (REST2 ×8 × 20,000 steps; REMD ×2 × 8 relax rounds), measured on an **earlier build** (see provenance note below) |
 | Wall time, full config (GPU, default) | ≈ **14 days** (estimated — not measured) on this APU; highly GPU-dependent, ≈ **8× faster on an NVIDIA A100** (≈ 2 days) |
 
-*The 7 h figure is the measured "low configuration" — `n_rest2_replicas=8`,
-`rest2_nsteps=20000`, `nrep=2`, `n_relax_rounds=8` in `run_2013nt.py` —
-whose output is shown in the pre-built viewer (Level 4.9, PPR repaired). The
-checked-in defaults (`n_rest2_replicas=16`, `rest2_nsteps=100000`, `nrep=16`)
-are a higher (full) configuration that takes substantially longer, so the two
-wall times are not directly comparable. The ≈ 14 days GPU estimate has not been measured yet.
+*Provenance of the ≈ 7 h figure. It was measured on an **earlier internal build**
+of the pipeline, which ran the OpenMM CPU path. That build is no longer in this
+repository, so the figure is a historical measurement rather than something
+reproducible from the current checkout: the argument values passed at the time
+(`n_rest2_replicas=8`, `rest2_nsteps=20000`, `nrep=2`, `n_relax_rounds=8`) are
+**not** the values in the checked-in `run_2013nt.py`, which carries a higher
+configuration (`n_rest2_replicas=16`, `rest2_nsteps=100000`, `nrep=16`,
+`n_relax_rounds=20`). The pre-built viewer structure (Level 4.9, PPR repaired)
+is attributed to that run. A re-measurement on the current code is pending, so
+the two wall times are not directly comparable. The ≈ 14 days GPU estimate has
+not been measured either. Per-stage step counts for the current pipeline are
+tabulated in §2.1.*
 Why is the CPU path the measured reference? Two reasons. First, the
 pipeline is heavily vectorized (batched NumPy/Torch kernels, multi-replica
 parallelism), and the reference CPU — AMD Ryzen AI MAX 395 (Zen 5) — has wide
@@ -36,22 +42,60 @@ expected to run ≈8× faster (estimate, not yet measured).*
 |---|---|---|---|
 | GPU path (full config, default) | ≈ 60 GB (unified memory) | ≈ 14 days (estimated, not measured); ≈ 2 days on an NVIDIA A100 (est., 8×) | Default is the full configuration; wall time highly GPU-dependent |
 | GPU path (low config) | ≈ 60 GB (unified memory) | [TBD — not run] | Low-config timing was only measured on the CPU path |
-| CPU path (low config) | ≈ 30 GB | ≈ 7 h (REST2 ×8 × 20,000 steps; REMD ×2 × 8 rounds), measured | Fully reproducible without a discrete GPU |
+| CPU path (low config) | ≈ 30 GB | ≈ 7 h (REST2 ×8 × 20,000 steps; REMD ×2 × 8 rounds), measured on an earlier build | Runs without a discrete GPU; wall time not yet re-measured on the current code |
 
 The ≈7 h wall time was measured with the low configuration above and is
 dominated by the **Level-2 REMD sampling** stage (2 replicas × 8 relax rounds)
 together with the Level-4 REST2 run (8 replicas × 20,000 steps). Wall time
 scales with the number of parallel replicas and per-replica steps; configure
 the call arguments in `run_2013nt.py`.
+### 2.1 Per-stage step counts and physical time (current pipeline, 2,013 nt)
+
+Every number below is read from the current source at the listed locations, so
+this table describes **this** checkout — not the earlier build behind the ≈ 7 h
+figure. "MD steps" counts integrator steps only: minimization iterations and
+gradient-optimizer steps are not molecular dynamics and have no physical time.
+
+| Stage | Source | Nominal steps | Step kind | MD steps | Physical time |
+|---|---|---:|---|---:|---:|
+| Level 1 cross-segment post-relaxation | `segmented_vfold3d.py:1588,1592` | 3,000 | minimize 3,000 + MD 600 + minimize 1,500 | 600 | 1.2 ps |
+| Level 1.5 global CG relaxation | `isrnaclong.py:1059,1062` | 5,000 | minimize 5,000 + MD 1,000 + minimize 2,500 | 1,000 | 2.0 ps |
+| Level 2 pre-fold | `torch_gpu_refine.py:141-157` | 6 × 2,000 | **Adam optimizer** (lr = 1e-3) — not MD, no timestep | 0 | — |
+| Level 2 REMD (inner) | `torch_gpu_refine.py:176-177` | 8 × 5,000 | Langevin REMD, 8 temperatures × 8 Hamiltonians (64 replicas) | 40,000 | 80 ps/replica |
+| Level 2.3 5-bead annealing | `fivebead_folding.py:304,316,323,330` | 13,000 × _s | Langevin MD; `_s = max(1, L/200) = 10.065` at L = 2,013 | 130,845 | 130.8 ps |
+| Level 2.5b post-conversion relaxation | `isrnaclong.py:1684-1689` | 3,000 | minimize 3,000 + MD 600 | 600 | 1.2 ps |
+| Level 3.5 metadynamics | `isrnaclong.py:522,1893` | 200,000 | well-tempered MetaD, 8 replicas | 200,000 | 400 ps/replica |
+| Level 4 REST2 | `isrnaclong.py:2023-2040` | `rest2_nsteps` | batched 2D-REMD, 8 temperatures × 8 Hamiltonians (64 replicas) | 20,000 / 100,000 | 40 / 200 ps/replica |
+| Level 5 AMBER RNA.OL3 | `amber_refine.py:684,765-767`; `isrnaclong.py:2117-2121` | 3,000 | L-BFGS minimization + MD 150 | 150 | 0.3 ps |
+
+Timesteps, each read from source: `torch_cgsim.py:1548,1778` = 2 fs;
+`physical_relaxation.py:95` = 2 fs; `metadynamics_gpu.py:107` = 2 fs;
+`fivebead_folding.py:272` = 1 fs; `amber_refine.py:684` = 2 fs.
+
+**Total genuine MD: ≈ 0.66 ns per replica** at the low configuration
+(`rest2_nsteps=20000`, 8 Level-2 rounds); **≈ 0.94 ns per replica** at the
+checked-in defaults (`rest2_nsteps=100000`, up to 20 Level-2 rounds — early
+stopping truncates). Two caveats for any write-up. First, replicas must not be
+summed into a "total sampling time": report per-replica physical time and the
+replica count separately. Second, both figures sit one to two orders of
+magnitude below the 10–50 ns regime in which short MD refinement has been
+reported to help a *good* starting model, and far below the >50 ns regime where
+refinement is reported to drift (CASP15 refinement benchmark, PMC12513224). So
+the physics stages here are local repair and constraint enforcement — clash
+relief, BSJ closure, pairing restraints, A-form torsions — not conformational
+search. The search is carried by the CG fold and the segmented ensemble.
+
+Level 3 (RL fine-tuning) trains a policy and runs no MD; Level 2.6 (PyRosetta)
+is conditional; Level 5.5 (PPR repair) is a geometric repair pass with no MD.
 
 ## 3. Three-level access for judges (no one needs to run the full pipeline)
 
 | Level | What you get | Effort | Where |
 |---|---|---|---|
-| L0 — View | Interactive 3D of the predicted 2,013 nt structure (42,831 atoms, Level 4.9 PPR repaired) | Open a file in a browser | `docs/circrna_3d_viewer.html` (structure embedded; needs internet for the two CDN scripts) |
+| L0 — View | Interactive 3D of the predicted 2,013 nt structure (42,831 atoms, Level 4.9 PPR repaired) | Open a file in a browser | `docs/circrna_3d_viewer.html` (fully self-contained: structure + 3Dmol.js + pako inlined; opens offline, no network needed) |
 | L1 — Download | Full-atom PDB + per-level outputs + quality JSON | 1 click | GitLab release artifact at Wiki Freeze + Zenodo (DOI at freeze) |
 | L2 — Force-field check | 2OIU (≈100 nt; only experimentally resolved circRNA): X-ray structure → Level-2 relaxation → RMSD vs crystal | **17 min (CPU), measured** — final RMSD **1.83 Å** | Evidence that the force field does not distort known structures; see wiki Validation page |
-| L3 — Full run | End-to-end 2,013 nt all-atom structure | Low config ≈ 7 h + 30–60 GB (defaults are a higher config, much longer) | `python run_2013nt.py` — set the low-config arguments first (see README) |
+| L3 — Full run | End-to-end 2,013 nt all-atom structure | Memory 30–60 GB depending on path; wall time must come from a fresh measurement (see §1 note) | `python run_2013nt.py` — adjust the call arguments for a shorter run (see README and §2.1) |
 
 ## 4. External tools (why setup is non-trivial, and what it costs)
 
