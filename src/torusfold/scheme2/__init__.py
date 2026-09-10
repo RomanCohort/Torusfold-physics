@@ -170,7 +170,18 @@ def predict_3d_allatom(
 
     if use_3bead:
         # --- 3-bead pipeline: cg_forcefield all-residue force field (verified 2.4A RMSD) ---
-        from .cg_forcefield import refine_3bead
+        # cg_forcefield is deliberately absent from this snapshot (see README "Scope note"
+        # and docs/NOTES.md "Modules referenced but not published yet"). Fail with a message
+        # that says so, instead of a bare ImportError that looks like a broken install.
+        try:
+            from .cg_forcefield import refine_3bead
+        except ImportError as exc:
+            raise ImportError(
+                "predict_3d_allatom(use_3bead=True) requires torusfold.scheme2.cg_forcefield, "
+                "which is not part of this snapshot (under development). The supported entry "
+                "point is isrnaclong_pipeline(), which does not use it; pass use_3bead=False "
+                "for the legacy 1-bead path. See README 'Scope note' and docs/NOTES.md."
+            ) from exc
         L = len(sequence)
         p_init = scheme2_initial_coords(sequence, pairs, n_samples=8)
         if p_init is None:

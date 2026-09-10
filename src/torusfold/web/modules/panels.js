@@ -21,6 +21,9 @@
     if (!result) return;
     const rn = result.rnadvisor || {};
     const items = [
+      // NOTE: the -2000 pass threshold below has no provenance (no calibration against a
+      // reference set was recorded). Do not treat a PASS/FAIL here as meaningful until it
+      // is calibrated; an absent value renders as N/A and skips the threshold entirely.
       { id: 'score-rsrnasp', valId: 'score-rsrnasp-val', key: 'rsRNASP_docker', passFn: function (v) { return v < -2000; } },
       { id: 'score-dfire', valId: 'score-dfire-val', key: 'DFIRE', passFn: function (v) { return v < 0; } },
       { id: 'score-3drnascore', valId: 'score-3drnascore-val', key: '3drnascore', passFn: function (v) { return v > 0; } },

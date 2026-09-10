@@ -668,17 +668,19 @@ def _build_result_dict(result, details, pdb_text, sequence, ss, mfe, elapsed, pd
         "mean_loop_length": details.get("mean_loop_length", 0),
     }
 
-    # rsRNASP1
+    # rsRNASP1. Nothing in this tree computes rsrasp1_energy/rsRNASP_docker yet, so these
+    # must stay None when absent: the old `.get(key, 0)` default rendered as 0.0 and, via
+    # the pass thresholds in web/modules/panels.js, as a hard FAIL on the demo page.
     rsRNASP1 = {
-        "score_all_atom": details.get("rsrasp1_energy", 0),
-        "score_per_nt": details.get("rsrasp1_energy_per_nt", 0),
+        "score_all_atom": details.get("rsrasp1_energy"),
+        "score_per_nt": details.get("rsrasp1_energy_per_nt"),
     }
 
-    # rnadvisor scores
+    # rnadvisor scores (same rule: absent means absent, not zero)
     rnadvisor = {
-        "rsRNASP_docker": details.get("rsRNASP_docker", 0),
-        "DFIRE": details.get("dfire_energy", 0),
-        "3drnascore": details.get("score_3drnascore", 0),
+        "rsRNASP_docker": details.get("rsRNASP_docker"),
+        "DFIRE": details.get("dfire_energy"),
+        "3drnascore": details.get("score_3drnascore"),
     }
 
     # Structural 3D

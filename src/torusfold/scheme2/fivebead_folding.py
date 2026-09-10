@@ -234,7 +234,6 @@ def refine_5bead(
     p_coords: np.ndarray,
     pairs: List[Tuple[int, int, float]],
     platform_name: str = "CPU",
-    n_anneal: int = 30,
     stat_pot_path: Optional[str] = None,
     sequence: Optional[str] = None,
     dl_constraints: Optional[List[Tuple[int, int, float, float]]] = None,
@@ -245,7 +244,8 @@ def refine_5bead(
         p_coords: (L, 3) initial P-only coordinates (Å)
         pairs: [(i, j, w)] ViennaRNA pairing
         platform_name: "CPU" or "CUDA"
-        n_anneal: MD steps per stage (× 1000)
+        (no step-count argument: the three MD phases are 5000*_s, 3000*_s and 5000*_s
+         steps at dt = 1 fs, with _s = max(1.0, L / 200.0); L = 2013 -> 130,845 steps total)
 
     Returns:
         (p_refined, e0, e1): refined P coordinates, initial energy, final energy

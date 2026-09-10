@@ -1404,8 +1404,11 @@ def isrnaclong_pipeline(
                     print(f"    far-pair injection: {len(far_pairs)} pairs ({_refine_name} mode)")
                 _remd_reps = (64 if L > 1000
                               else max(nrep if nrep else 6, n_rest2_replicas))
-                _remd_steps = (max(60000, n_steps // 2) if L > 1000
-                               else max(10000, n_steps // 3))
+                # The Level-2 REMD budget is fixed inside torch_gpu_refine: 8 rounds x 5000
+                # steps per replica (torch_gpu_refine.py:176-177, use_multistage_remd=True).
+                # A `_remd_steps` computed here used to be passed as remd_n_steps and was
+                # silently ignored in that mode; it is removed rather than left behind
+                # looking like a control that works.
                 if _refine_name == "Torch GPU":
                     _refine_result = _refine_fn(
                         refine_input, round_dir,
@@ -1414,7 +1417,7 @@ def isrnaclong_pipeline(
                         nstep=max(100000, n_steps),
                         use_remd=True,
                         remd_n_replicas=_remd_reps,
-                        remd_n_steps=_remd_steps,
+                        use_multistage_remd=True,  # 8 rounds x 5000 steps/replica (fixed in torch_gpu_refine)
                         verbose=verbose,
                         use_physical_relax=True,
                         skip_minimal_fold=(round_idx > 0),
@@ -1442,7 +1445,7 @@ def isrnaclong_pipeline(
                         platform_name=_remd_platform_name,
                         use_remd=True,
                         remd_n_replicas=_remd_reps,
-                        remd_n_steps=_remd_steps,
+                        use_multistage_remd=True,  # 8 rounds x 5000 steps/replica (fixed in torch_gpu_refine)
                         verbose=verbose,
                         use_physical_relax=True,
                         skip_minimal_fold=(round_idx > 0),
@@ -1632,7 +1635,6 @@ def isrnaclong_pipeline(
             p5_refined, e5_0, e5_1 = refine_5bead(
                 best_coords, pairs,
                 platform_name=_resolved_platform,
-                n_anneal=3000,
                 sequence=sequence,
                 dl_constraints=_dl_constraints if _dl_constraints else None)
             # discard when the 5-bead output contains NaN
