@@ -210,13 +210,56 @@ def _sample(q, t):
 
 
 def prepare(tables, device="cpu"):
-    """Cache torch tensors and the edge slopes of the wall."""
+    """Cache torch tensors, the edge slopes of the wall, and the harmonic target."""
     for t in tables.values():
         U = torch.tensor(t["U"], dtype=torch.float64, device=device)
         t["Ut"] = U
         t["slope_lo"] = float(max((U[1] - U[0]) / t["binw"], 0.0))
         t["slope_hi"] = float(max((U[-1] - U[-2]) / t["binw"], 0.0))
+        # the harmonic fallback needs a target; the table's own minimum is the mode, which
+        # is the same criterion used everywhere else in this file
+        t["target"] = float(t["centre"][int(np.argmin(t["U"]))])
+        if "sigma" not in t:
+            t["sigma"] = float(t["U"].size and 0.0)
     return tables
+
+
+TABLED = ("angle", "dihedral", "stack")
+HARMONIC = ("bb_bond", "intra_pc", "intra_cn")
+
+
+def mixed_energy(pos, tables, k_local=None, k_wall=200.0, which=None):
+    """Harmonic local terms plus tabulated angular ones.
+
+    The split follows the measurement in refit_tables_clean.py. The three local coordinates
+    have narrow, near-Gaussian distributions, and their shipped constants are 2 to 91 times
+    too soft, so setting k = kBT/sigma^2 reproduces the observed spread exactly and no table
+    can improve on that. The angle, dihedral and stack distributions are broad and skewed --
+    the dihedral spans most of the cosine range -- and their shipped constants are 21 and 69
+    times too stiff, so they get the tables.
+
+    k_local: {name: k}. Defaults to kBT/sigma^2 from the tables' own stored sigma.
+    which: iterable of coordinate names to include; defaults to all six.
+    """
+    if which is None:
+        which = COORDS
+    total = None
+    for name in which:
+        t = tables[name]
+        if name in HARMONIC:
+            k = (k_local or {}).get(name, KBT / t["sigma"] ** 2)
+            q = coords_of(pos, name)
+            e = (0.5 * k * (q - t["target"]) ** 2).sum()
+        else:
+            q = coords_of(pos, name)
+            e = _sample(q, t)
+            d_lo = (t["lo"] - q).clamp(min=0.0)
+            d_hi = (q - t["hi"]).clamp(min=0.0)
+            e = e + t["slope_lo"] * d_lo + 0.5 * k_wall * d_lo ** 2
+            e = e + t["slope_hi"] * d_hi + 0.5 * k_wall * d_hi ** 2
+            e = e.sum()
+        total = e if total is None else total + e
+    return total
 
 
 def energy(pos, tables, k_wall=200.0):
