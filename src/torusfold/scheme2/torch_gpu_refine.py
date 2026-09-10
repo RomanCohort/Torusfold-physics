@@ -122,17 +122,14 @@ def torch_gpu_refine(
             dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
             L = len(final_p_coords)
-            # P-only -> 3-bead (P, C4', N): C4' offset +0.34nm along the backbone, N offset -0.15nm
-            pos_p = torch.tensor(final_p_coords, dtype=torch.float64, device=dev) / 10.0
-            # backbone direction vector
-            diffs = torch.zeros_like(pos_p)
-            diffs[1:] = pos_p[1:] - pos_p[:-1]
-            diffs[0] = diffs[1] if L > 1 else torch.zeros(3, device=dev)
-            bb_dir = diffs / (diffs.norm(dim=1, keepdim=True).clamp(min=1e-6))
-            pos_c4 = pos_p + bb_dir * 0.034   # C4' +0.34nm along the backbone
-            pos_n = pos_p + bb_dir * (-0.015)  # N -0.15nm along the backbone
+            # P-only -> 3-bead (P, C4', N). The C4' and N beads come from the 1EHZ
+            # template reconstruction: the previous backbone-direction offsets put both
+            # on the backbone axis, where they carry no base information.
+            from .aform_from_template import real_cg_beads
+            _beads = real_cg_beads(np.asarray(final_p_coords, dtype=np.float64), sequence)
             # interleaved order: (P0, C4'0, N0, P1, C4'1, N1, ...)
-            pos_3bead = torch.stack([pos_p, pos_c4, pos_n], dim=1).reshape(1, 3 * L, 3)
+            pos_3bead = torch.tensor(
+                _beads.reshape(1, 3 * L, 3), dtype=torch.float64, device=dev) / 10.0
 
             pairs_t = torch.tensor([(i, j) for i, j, _ in pairs], dtype=torch.long, device=dev) if pairs else torch.zeros(0, 2, dtype=torch.long, device=dev)
             pw = torch.tensor([w for _, _, w in pairs], dtype=torch.float64, device=dev) if pairs else torch.zeros(0, dtype=torch.float64, device=dev)

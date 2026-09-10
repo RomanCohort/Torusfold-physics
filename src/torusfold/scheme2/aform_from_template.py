@@ -100,6 +100,40 @@ _FALLBACK_WINDOW = 2
 _FALLBACK_SIGN = -1.0
 
 
+def real_cg_beads(p_coords: np.ndarray, sequence: str, pairs=None) -> np.ndarray:
+    """Per-residue (P, C4', N9 or N1) beads in Angstrom, shape (L, 3, 3).
+
+    The CG force field lays its beads out as P / C4' / N per residue. Where those beads
+    are fabricated -- a backbone-direction offset, or a random perturbation of P -- they
+    sit on the backbone axis and carry no base identity, so no base-specific quantity can
+    be expressed on them and a CG-level statistical potential has nothing to attach to.
+    This returns them from the 1EHZ template reconstruction instead.
+
+    Note the force field's own intra-bead targets are already right: it restrains
+    |P-C4'| to 3.90 A and |C4'-N| to 3.35 A (torch_cgsim.py:103,124,125) against 1EHZ
+    measurements of 3.887 +/- 0.081 and 3.428 +/- 0.266 A.
+
+    Raises rather than falling back: a missing or non-ACGU sequence would silently give
+    the caller fabricated beads again.
+    """
+    if sequence is None:
+        raise ValueError("real_cg_beads needs the sequence to choose N9 (purine) or N1")
+    seq = sequence.upper().replace("T", "U")
+    bad = sorted({c for c in seq if c not in "ACGU"})
+    if bad:
+        raise ValueError(f"real_cg_beads: only ACGU is supported, got {bad}")
+
+    structure = reconstruct_all_atom(p_coords, seq, pairs=pairs)
+    L = len(seq)
+    out = np.zeros((L, 3, 3), dtype=np.float64)
+    for i in range(L):
+        idx = structure.residue_atom_index[i]
+        gly = "N9" if seq[i] in "AG" else "N1"
+        for k, nm in enumerate(("P", "C4'", gly)):
+            out[i, k] = np.asarray(structure.atoms[idx[nm]].xyz, dtype=np.float64)
+    return out
+
+
 def reconstruct_all_atom(
     p_coords: np.ndarray, sequence: str, pairs=None,
 ) -> AllAtomStructure:

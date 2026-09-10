@@ -1872,14 +1872,12 @@ class BatchedREMD2D:
                 raise ValueError(
                     f"initial_pos_3bead batch must be 1 or {n_rep}, got {pos.shape[0]}")
         else:
-            # First call: P-only → 3-bead initialization
-            rng = np.random.default_rng(42)
-            p_nm = np.asarray(coords_A, dtype=np.float64) / 10.0
-            pos0 = np.zeros((3 * L, 3))
-            for i in range(L):
-                pos0[3 * i + 0] = p_nm[i]
-                pos0[3 * i + 1] = p_nm[i] + rng.normal(0, 0.03, 3)
-                pos0[3 * i + 2] = p_nm[i] + rng.normal(0, 0.03, 3)
+            # First call: P-only -> 3-bead initialization. C4' and N come from the 1EHZ
+            # template reconstruction; a random 0.3 A perturbation of P put them in a
+            # random direction, carrying neither base identity nor real geometry.
+            from .aform_from_template import real_cg_beads
+            _beads = real_cg_beads(np.asarray(coords_A, dtype=np.float64), self.sequence)
+            pos0 = _beads.reshape(3 * L, 3) / 10.0
             pos = torch.tensor(pos0, dtype=torch.float32, device=dev)[None].repeat(
                 n_rep, 1, 1).contiguous()
 
