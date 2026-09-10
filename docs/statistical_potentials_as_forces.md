@@ -671,6 +671,70 @@ old revision, changing STACK_R0:
 - `openmm_gpu_refiner.py` 与 torch 的常数分歧（上表）。
 
 
+### 3n. 路 2 的配方（从综述抄下来的，含两个正式名字）
+
+Li & Chen 那篇综述（Biophys J 2026, PMC13110076）的 Table 1 把 CG 参数化方法列成一张表。
+和我们相关的两条，都属于 bottom-up：
+
+**DBI —— Direct Boltzmann Inversion。**
+`U(q) = -kBT ln P_ref(q)`，P_ref 是参考分布。
+优点："Straightforward in concept and implementation."
+缺点："**Does not account for correlations between different degrees of freedom.**"
+
+**IBI —— Iterative Boltzmann Inversion。**
+在 MD 与反演之间迭代，`U_{i+1}(q) = U_i(q) + kBT ln(P_i(q) / P_ref(q))`。
+优点："Can account for correlations between different degrees of freedom."
+缺点："**Convergence not always guaranteed.**"
+
+**IsRNA 用的是改良 IBI**，这一点值得抄：它不从全部参数一起优化，而是**分批加**。先只有键长和
+体积排斥（LJ），假设键长互相独立；其余参数在后续迭代里逐步加入。原文：
+
+> the individual potential terms extracted by the IsRNA procedure depend on the order they are
+> added to the training process. ... However, **the sums of the energy terms in the final force
+> fields are not sensitive to the iteration orders.**
+
+也就是说，**一项一项加是有授权的，先加键长不会把后面的搞坏。**
+
+**整条 §3 线的理论落点，综述里有原话：**
+
+> In DBI and IBI methods, it is common practice to use experimental structural distributions as
+> references. Potentials obtained in this manner are sometimes referred to as **'statistical
+> potentials'**. ... One way of thinking about the statistical potentials is to treat them as
+> scoring functions, reflecting the preferred values adopted by different degrees of freedom in
+> the native configurations of RNA molecules.
+
+拿实验天然分布建的 CG 势，本来就叫统计势。§3 起于"怎么把统计势注入力"，绕了一圈，
+**这就是标准做法本身。**
+
+**我们的检验也有名字。** Top-down 那半边有一条 **Energy Funnel Optimization**：
+"Requires energy landscape to adopt funnel shape" / "The energy landscape should guide folding
+toward native state" / "**Requires the generation of a well-designed set of decoy structures**"。
+就是 native vs 诱饵排序。而 §3i 那种松弛对应 **RMSD Minimization**，综述给的缺点原话是
+"lacks analytical gradient, and requires the use of less efficient numerical derivatives" ——
+和我们测到的 p = 0.077 是同一件事。
+
+**所以：我们的计划是标准计划，我们的检验是标准检验，而 §3k 测出的那个失败**
+（力场把天然排在 6.75/7）**正是 Energy Funnel Optimization 存在的理由。**
+
+**路 2 的具体步骤：**
+
+1. 对每个键合坐标（P-P 键、P-C4'、C4'-N、P-P-P 角、P-P-P-P 伪二面角、P(i)-P(i+2) 距离），
+   从训练集统计 `P_ref(q)`。
+2. `U(q) = -kBT ln P_ref(q)`，制表，用与 §3h 同一套 bin 网格。
+3. 用**已经验证过的**可微制表求值器算能量与力（bin 中心线性插值 + 解析梯度，
+   与中心差分吻合到 9e-10）。不需要写新代码。
+4. **尾巴要加墙。** `-ln P` 在采样范围之外没有定义，插值会把它拉平 —— 也就是"自由"，
+   坐标可以无代价地跑到分布之外。综述没谈这一条，这是我自己要处理的地方：
+   需要在 `P_ref` 的支撑边界外接一个上升的墙，否则同样的塌陷会以另一种形式回来。
+5. 重跑留出集上的 Energy Funnel 检验（`scripts/recalibrate_ff_targets.py` 的框架，
+   换成制表势）。
+6. DBI 的已知弱点是不管自由度之间的关联，而键合项确实互相关联 ——
+   **所以大概率要走 IBI**。IBI 需要 MD 在环里，是个大得多的循环。
+   综述也说了 "Convergence not always guaranteed"，所以先 DBI 看差多少，再决定。
+
+**先做 1–3，用 DBI，跑第 5 步。** 如果 DBI 的分布复现不了参考分布，再谈 IBI。
+
+
 ## 5. 下一步
 
 **已定的方向（§3l）：路 1 先做，路 2 是真正的答案。**
@@ -678,9 +742,10 @@ old revision, changing STACK_R0:
 1. ~~**路 1（最小改动）**~~ —— **已落地，见 §3m**。`STACK_R0` = 1.125 nm、
    `DIH_PPPP` = `acos(0.975)`、`_R0_STACK` 快照已删。留出集 native rank 6.75 → 1.19。
    `ANGLE_PPP` 未动。回归测试在 `tests/test_ff_bonded_targets.py`。
-2. **路 2（玻尔兹曼反演）**：把键合项换成制表的 `U(q) = -kBT ln P(q)`，再用 IBI 迭代。
-   复用 §3g/§3h 已经验证过的可微制表求值器（与中心差分吻合到 9e-10）。做之前先读
-   2026 综述的训练小节（Li & Chen, Biophys J 2026, PMC13110076）。
+2. **路 2（玻尔兹曼反演）** —— **配方见 §3n**。综述读完，确认这是标准做法（DBI/IBI），
+   且我们的检验就是标准检验（Energy Funnel Optimization）。
+   先做 DBI（`U(q) = -kBT ln P_ref(q)`，制表，复用 §3h 已验证的可微求值器），
+   **注意要在分布支撑之外加墙**（§3n 第 4 条）。跑留出集检验，再决定要不要上 IBI。
 3. **不要整体换用现成模型** —— 珠子定义不匹配（NAST 单珠在 C3'、oxRNA 刚体多作用位点、
    SimRNA/RNAJP/IsRNA2 五珠、Martini 3 4–7 珠；三珠 P/C4'/N 的只有 cgRNASP，而它是打分函数）。
    方法可以照搬，参数不能。
