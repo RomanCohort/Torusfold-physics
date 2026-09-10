@@ -237,7 +237,7 @@ def predict_3d_allatom(
 
     # --- all-atom reconstruction + Amber refinement ---
     from .aform_from_template import reconstruct_all_atom as reconstruct_from_template
-    structure = reconstruct_from_template(cg_coords, sequence)
+    structure = reconstruct_from_template(cg_coords, sequence, pairs=pairs)
 
     cg_coords_nm = None
     if use_rl and cg_coords_for_amber is not None:
