@@ -586,12 +586,23 @@ def _angle_f(pos, k, target_cos):
     cos_a = cos_a.clamp(-1+1e-6, 1-1e-6)
     e = (0.5*k*(cos_a.squeeze(-1)-target_cos)**2).sum(dim=-1)
     dE = k*(cos_a-target_cos)
-    dcos_dx0 = (-v2/(n1*n2) + cos_a*v1/(n1*n1*n2))
-    dcos_dx2 = (-v1/(n1*n2) + cos_a*v2/(n2*n2*n1))
+    # dcos/dx, derived by differentiating cos = (v1.v2)/(|v1||v2|) with v1 = p0-p1,
+    # v2 = p2-p1:
+    #     dcos/dx0 = +v2/(n1 n2) - cos * v1/n1^2
+    #     dcos/dx2 = +v1/(n1 n2) - cos * v2/n2^2
+    #     dcos/dx1 = -(dcos/dx0 + dcos/dx2)
+    # The previous form was -v2/(n1 n2) + cos*v1/(n1^2 n2): the leading term's sign was
+    # inverted and the cos term carried an extra n2. scripts/diagnose_angle_gradient.py
+    # measures the old force against central differences at 1.927 relative error and this
+    # form at 6.2e-08, with the two forces correlated -0.93 -- the term was pushing nearly
+    # opposite to its own energy gradient.
+    dcos_dx0 = (v2/(n1*n2) - cos_a*v1/(n1*n1))
+    dcos_dx2 = (v1/(n1*n2) - cos_a*v2/(n2*n2))
+    dcos_dx1 = -(dcos_dx0 + dcos_dx2)
     F = torch.zeros_like(pos)
-    F[:, P(idx)] -= (dE*dcos_dx0).squeeze(-1)   # F = -dE/dx
+    F[:, P(idx)] -= (dE*dcos_dx0).squeeze(-1)      # F = -dE/dx
     F[:, P(idx+2)] -= (dE*dcos_dx2).squeeze(-1)
-    F[:, P(idx+1)] += ((dE*dcos_dx0)+(dE*dcos_dx2)).squeeze(-1)
+    F[:, P(idx+1)] -= (dE*dcos_dx1).squeeze(-1)
     return e, F
 
 
@@ -620,35 +631,32 @@ def _dihedral_f(pos, k, target_cos):
     # Energy
     e = (0.5*k*(cos_d.squeeze(-1)-target_cos)**2).sum(dim=-1)
 
-    # Dihedral force: dE/dx = k*(cos_d - target_cos) * d(cos_d)/dx
-    # d(cos_d)/dx = (1/|n0||n1|) * gradient of n0·n1
-    # Simplify using the chain rule: dE/db0, dE/db1, dE/db2
-    dE_dcos = k * (cos_d - target_cos)  # (B, L-3, 1)
+    # Dihedral force: the exact gradient of the energy above, by autograd.
+    #
+    # This used to distribute a hand-derived "analytic approximation" with arbitrary 0.25
+    # coefficients, under a note admitting the full formula was too complex. A per-term
+    # finite-difference check (scripts/gradcheck_per_term.py) put its force 1.836 away from
+    # its own energy gradient in relative terms -- a factor, not a rounding. The energy
+    # expression is unchanged; only the force is. It is differentiated on a detached copy
+    # of the P atoms so the caller's graph is untouched, and under enable_grad so the
+    # result does not depend on the caller's grad mode.
+    with torch.enable_grad():
+        p_ref = pos[:, P(torch.arange(L, device=dev))].detach().clone().requires_grad_(True)
+        # L-3 four-atom windows, so every bond slice must drop the same two from each end
+        r0 = p_ref[:, 1:-2] - p_ref[:, :-3]
+        r1 = p_ref[:, 2:-1] - p_ref[:, 1:-2]
+        r2 = p_ref[:, 3:] - p_ref[:, 2:-1]
+        m0 = _safe_cross(r0, r1, dim=-1)
+        m1 = _safe_cross(r1, r2, dim=-1)
+        m0n = _safe_norm(m0, dim=-1, keepdim=True).clamp(min=1e-6)
+        m1n = _safe_norm(m1, dim=-1, keepdim=True).clamp(min=1e-6)
+        cos_r = ((m0*m1).sum(-1, keepdim=True) / (m0n*m1n)).clamp(-1+1e-6, 1-1e-6)
+        e_r = (0.5*k*(cos_r.squeeze(-1) - target_cos)**2).sum()
+        e_r.backward()
 
-    # d(cos_d)/db0 = (1/|n0||n1|) * (n1·db0/db0 - cos_d * n0·db0/db0 / |n0|^2)
-    # Simplified approximation: the dominant contribution comes from b1
-    # The full formula is too complex; use an analytic approximation of the numerical gradient
-    inv_n0n_n1n = 1.0 / (n0n * n1n)
-
-    # Force on b1 (the central bond, largest contribution)
-    # dE/db1 ≈ -dE_dcos * (n0 × n2) / |b1| (simplified)
-    b1n = _safe_norm(b1, dim=-1, keepdim=True).clamp(min=1e-6)
-    cross_n0_n1 = _safe_cross(u0, u1, dim=-1)
-    f_b1 = -dE_dcos * cross_n0_n1 / b1n  # (B, L-3, 3)
-
-    # Distribute forces to the four atoms
     F = torch.zeros_like(pos)
-    F[:, P(idx+1)] += f_b1.squeeze(-1)
-    F[:, P(idx+2)] -= f_b1.squeeze(-1)
-
-    # Forces on b0 and b2 (smaller; symmetric approximation)
-    f_b0 = 0.25 * dE_dcos * cross_n0_n1 / b1n
-    f_b2 = -0.25 * dE_dcos * cross_n0_n1 / b1n
-    F[:, P(idx)] += f_b0.squeeze(-1)
-    F[:, P(idx+1)] -= f_b0.squeeze(-1)
-    F[:, P(idx+2)] += f_b2.squeeze(-1)
-    F[:, P(idx+3)] -= f_b2.squeeze(-1)
-
+    if p_ref.grad is not None:
+        F[:, P(torch.arange(L, device=dev))] = -p_ref.grad
     return e, F
 
 
@@ -793,8 +801,12 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
                 rc = _safe_norm(dc, dim=-1, keepdim=True, eps=eps)
                 wc = torch.exp(-0.1*(rc/PAIR_NN))
                 total_E += K_BSJ_CONTACT*wc.sum(dim=-1)
-                # dE/dr = -K*0.1/PAIR_NN * wc * delta/r
-                fc = -K_BSJ_CONTACT*0.1/PAIR_NN*wc*dc/(rc*rc)
+                # E = K*wc with wc = exp(-0.1 r/PAIR_NN), so dE/dr = -K*0.1/PAIR_NN*wc and
+                # F = -dE/dx = +K*0.1/PAIR_NN*wc*(dc/rc). The previous form was negative and
+                # divided by an extra rc -- wrong sign and wrong magnitude. The term is tiny
+                # (about 0.3 kJ/mol/nm at native geometry) so it changed nothing in practice,
+                # but it was the third and last force that disagreed with its own energy.
+                fc = K_BSJ_CONTACT*0.1/PAIR_NN*wc*dc/rc
                 total_F[:,P(i1)] += fc.squeeze(-1); total_F[:,P(i2)] -= fc.squeeze(-1)
 
     # ── 12. BPP: O(P) analytic ──

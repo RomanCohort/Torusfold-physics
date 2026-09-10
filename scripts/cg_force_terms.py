@@ -6,6 +6,14 @@ there should be exactly one copy of the wiring.
 
 The library's constants are read at call time from torusfold.scheme2.torch_cgsim, so a
 caller that rebinds them sees the change here too.
+
+WEAKNESS: terms that have a helper in the library (_bond_f, _angle_f, _dihedral_f,
+_clash_f, _sigmoid_f) are called, but the ones that do not -- the BSJ closure bond, the
+stacking distance, the WC pair, the pair guide, the bpp term and the BSJ contact -- are
+duplicated here from the library's inline code. Those copies can drift, and they did: the
+BSJ contact force stayed wrong here after it was fixed in the library, so gradcheck_per_term
+was measuring this copy rather than the library. Callers that need authority should read
+torch_cgsim directly.
 """
 import math
 
@@ -121,16 +129,23 @@ def term_energies_forces(pos_nm, pairs_ij, pair_w=None, cell_list=None):
     # 12. BSJ contact
     if L > 16:
         Fc = torch.zeros_like(pos_nm)
+        # the energy was hardcoded to zero here, so the finite-difference check compared a
+        # real force against a flat energy and reported a 100 percent error that belonged to
+        # this module rather than to the library
+        ec_acc = torch.zeros(1, dtype=pos_nm.dtype)
         for off in range(min(8, L // 2)):
             i1, i2 = off, L - 1 - off
             if i1 < i2:
                 dc = pos_nm[:, P(i1)] - pos_nm[:, P(i2)]
                 rc = C._safe_norm(dc, dim=-1, keepdim=True, eps=eps)
                 wc = torch.exp(-0.1 * (rc / C.PAIR_NN))
-                fc = -C.K_BSJ_CONTACT * 0.1 / C.PAIR_NN * wc * dc / (rc * rc)
+                # kept in step with torch_cgsim's own bsj-contact force; this module
+                # duplicates the terms that have no library helper, so it can drift
+                fc = C.K_BSJ_CONTACT * 0.1 / C.PAIR_NN * wc * dc / rc
                 Fc[:, P(i1)] += fc.squeeze(-1)
                 Fc[:, P(i2)] -= fc.squeeze(-1)
-        add("bsj contact", Fc, torch.zeros(1, dtype=pos_nm.dtype))
+                ec_acc = ec_acc + C.K_BSJ_CONTACT * wc.sum(dim=-1)
+        add("bsj contact", Fc, ec_acc)
 
     return terms, energies
 
