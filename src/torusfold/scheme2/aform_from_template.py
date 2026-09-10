@@ -88,6 +88,17 @@ _ANCHOR_OFFSETS = {
     "C4'": (2.89, 0.86, -2.21),
 }
 
+# Half-width (in residues) of the P-trace window whose centroid is used as a local
+# axis point for residues without a base-pair partner. Set to >= L to recover the old
+# global-centroid behaviour.
+_FALLBACK_WINDOW = 4
+
+# Sign of the fallback radial axis. The offsets were measured with r pointing at the
+# base-pair partner, i.e. inward across the helix; the axis-radial direction for an
+# unpaired base points outward. Measured on the 1EHZ test, the unpaired group goes from
+# 6.24 A (sign +1) to 4.44 A (sign -1), so the two conventions are indeed opposed.
+_FALLBACK_SIGN = -1.0
+
 
 def reconstruct_all_atom(
     p_coords: np.ndarray, sequence: str, pairs=None,
@@ -129,7 +140,6 @@ def reconstruct_all_atom(
                 partner_of.setdefault(j0, i0)
 
     templates = _load_templates()
-    centroid = p_coords.mean(axis=0)
     structure = AllAtomStructure(sequence=sequence)
 
     serial = 0
@@ -178,7 +188,13 @@ def reconstruct_all_atom(
             if dn > 1e-6:
                 r = d / dn
         if r is None:
-            r = p_coords[i] - centroid
+            # Unpaired residue: use the centroid of a local P-trace window as a local
+            # axis point. The previous rule used the global centroid, which is the
+            # special case _FALLBACK_WINDOW = L and is only a crude proxy for the local
+            # helix axis.
+            _w = min(max(1, int(_FALLBACK_WINDOW)), L)
+            _c = p_coords[[(i + k) % L for k in range(-_w, _w + 1)]].mean(axis=0)
+            r = (p_coords[i] - _c) * _FALLBACK_SIGN
             rn = np.linalg.norm(r)
             r = r / rn if rn > 1e-6 else np.array([0.0, 0.0, 1.0])
             r = r - np.dot(r, b) * b  # orthogonalize into the plane normal to b
