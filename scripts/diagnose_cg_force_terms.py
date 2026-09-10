@@ -45,10 +45,9 @@ cl = C.GPUCellList(cell_size=1.5)
 cl.build(pos)
 
 if "--recalibrated" in sys.argv:
-    C.STACK_R0 = 1.152
-    C._R0_STACK = 1.152
-    C.DIH_PPPP = math.acos(0.577)
-    print("recalibrated: STACK_R0 1.152 nm, DIH cos +0.577 (from recalibrate_ff_targets.py)")
+    C.STACK_R0 = 1.125
+    C.DIH_PPPP = math.acos(0.975)
+    print("recalibrated: STACK_R0 1.125 nm, DIH cos +0.975")
 else:
     print("as shipped")
 

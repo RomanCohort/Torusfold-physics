@@ -123,11 +123,28 @@ C_NA_DEFAULT = 0.15  # default Na+ concentration (M, ionic strength)
 BOND_P_NEXT = 0.590   # nm
 BOND_P_C4 = 0.390
 BOND_C4_N = 0.335
-PAIR_NN = 1.00        # pairing target (N-N approximated at P-P resolution)
-STACK_R0 = 0.505      # stacking target P_i~P_{i+2}
-ANGLE_PPP = math.pi * 150.0 / 180.0   # 150° A-form
+PAIR_NN = 1.00        # pairing target on N beads; native 0.954 +/- 0.115 nm, unchanged
+
+# Stacking target for P(i)-P(i+2). Native RNA holds this pair 1.12 nm apart, not 0.505:
+# over 10874 observations from 191 deposited structures the distribution is unimodal with
+# its mode at 1.125 nm, and only 1.1 percent of observations are within 0.1 nm of 0.505.
+# The old value looks like it was copied from openmm_gpu_refiner.py's STACK_R0 = 5.05 A,
+# which restrains a DIFFERENT pair -- N(i)-N(i+1), whose native distance is 0.566 +/- 0.201
+# nm. Same digits, different atoms.
+# Measured by scripts/recalibrate_ff_targets.py; see docs/statistical_potentials_as_forces.md 3j-3l.
+STACK_R0 = 1.125
+
+ANGLE_PPP = math.pi * 150.0 / 180.0   # 150 deg; cos -0.866 sits on the native mode -0.875
 ANGLE_K = K_ANGLE
-DIH_PPPP = math.pi * 180.0 / 180.0   # 180° A-form dihedral
+
+# Pseudo-torsion P(i)-P(i+1)-P(i+2)-P(i+3). The old target was 180 deg (trans), which
+# describes an extended chain; native RNA sits near 0. Over 10631 observations the signed
+# pseudo-torsion has its mode at -22.5 deg and only 5.1 percent lies within 30 deg of 180.
+# cos(-22.5) = 0.924 and the mode in cos itself is +0.975. The restraint acts on cos, so
+# +0.975 is the target that the most native configurations satisfy, and it also scores
+# better on held-out structures (native rank 1.12 vs 1.25). It is the value used here.
+# Note openmm_gpu_refiner.py restrains the SAME atom quad with a different target (33 deg).
+DIH_PPPP = math.acos(0.975)
 DIH_K = K_DIH
 CLASH_DIST = 0.30     # nm
 CLASH_CUTOFF = 1.20   # nm
@@ -1001,7 +1018,7 @@ def cg_forces_explicit_batched(
     # ── 7. Stacking: O(N) ──
     if L > 2:
         st = torch.arange(L-2, device=dev)
-        e_s, f_s = _bond(pos_nm, P(st), P(st+2), _K_STACK*lam, _R0_STACK)
+        e_s, f_s = _bond(pos_nm, P(st), P(st+2), _K_STACK*lam, STACK_R0)
         total_E += e_s; total_F += f_s
 
     # ── 8. Clash (cell-list): O(K) ──
@@ -1178,7 +1195,10 @@ _R0_BB = BOND_P_NEXT
 _R0_INTRA_PC = BOND_P_C4
 _R0_INTRA_CN = BOND_C4_N
 _R0_PAIR = PAIR_NN
-_R0_STACK = STACK_R0
+# There is deliberately no _R0_STACK snapshot here. Freezing STACK_R0 into a module constant
+# made cg_energy_forces and cg_forces_explicit_batched use different stacking targets as soon
+# as the live global changed -- one path read the frozen copy, the other the global. Both now
+# read STACK_R0 directly.
 _R0_CLASH = CLASH_DIST
 
 
@@ -1387,7 +1407,7 @@ def cg_forces_explicit(
     if L > 2:
         st = torch.arange(L - 2, device=dev)
         e_st, f_st = _explicit_forces_bonds(
-            pos_nm, torch.stack([P(st), P(st + 2)], dim=1), _K_STACK * lam, _R0_STACK)
+            pos_nm, torch.stack([P(st), P(st + 2)], dim=1), _K_STACK * lam, STACK_R0)
         total_E += e_st; total_F += f_st
 
     # ── Clash (cell-list): O(K) ──

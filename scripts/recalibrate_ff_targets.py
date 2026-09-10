@@ -157,6 +157,34 @@ def mode_of(x, lo, hi, n=40):
     return 0.5 * (e[i] + e[i + 1])
 
 
+def signed_dihedral(p0, p1, p2, p3):
+    """atan2 form, so the sign survives; the normal-angle form gives |phi| only."""
+    b0, b1, b2 = p1 - p0, p2 - p1, p3 - p2
+    n0, n1 = np.cross(b0, b1), np.cross(b1, b2)
+    b1u = b1 / np.clip(np.linalg.norm(b1, axis=-1, keepdims=True), 1e-12, None)
+    m = np.cross(n0, b1u)
+    return np.arctan2((m * n1).sum(-1), (n0 * n1).sum(-1))
+
+
+signed_all = []
+adj_nn = []
+for _s in FIT:
+    _P = _s["beads"][:, 0, :]
+    if len(_P) > 5:
+        signed_all.append(signed_dihedral(_P[:-3], _P[1:-2], _P[2:-1], _P[3:]))
+    _N = _s["beads"][:, 2, :]
+    if len(_N) > 1:
+        adj_nn.append(np.linalg.norm(_N[1:] - _N[:-1], axis=-1))
+signed_all = np.concatenate(signed_all)
+adj_nn = np.concatenate(adj_nn)
+
+# The mode in the ANGLE variable, not in the cosine variable. Density in cos is
+# p(phi)/|sin phi|, so the cosine histogram is biased toward cos = 1 by the Jacobian and
+# its peak is not the backbone's actual resting geometry.
+SIGNED_MODE_DEG = math.degrees(mode_of(signed_all, -math.pi, math.pi, 24))
+DIH_COS_SIGNED = math.cos(math.radians(SIGNED_MODE_DEG))
+ADJ_NN_MEAN = float(adj_nn.mean())
+
 STACK_MEAN = float(st_all.mean())
 STACK_NEW = mode_of(st_all, 0.4, 2.0, 32)
 DIH_MEAN = float(dih_all.mean())
@@ -175,16 +203,24 @@ print("restraint energy but for a skewed distribution it falls between states, s
 print("restraint to it pins the structure somewhere it never visits. Both are shown below.")
 print()
 
+print(f"  signed pseudo-torsion mode      {SIGNED_MODE_DEG:+.1f} deg  "
+      f"-> cos {DIH_COS_SIGNED:+.3f}")
+print()
+print("the cosine-space mode overstates the target: the density in cos is p(phi)/|sin phi|,")
+print("so it is biased toward cos = 1 by the Jacobian. The angle-space mode is the")
+print("backbone's resting geometry; that is the value proposed for the dihedral.")
+print()
+
 ORIG = (C.STACK_R0, math.cos(C.DIH_PPPP), math.cos(C.ANGLE_PPP))
 VARIANTS = [("A as shipped", ORIG),
             ("B mode", (STACK_NEW, DIH_COS_NEW, ORIG[2])),
+            ("B2 signed", (STACK_NEW, DIH_COS_SIGNED, ORIG[2])),
             ("B' mean", (STACK_MEAN, DIH_MEAN, ORIG[2])),
             ("C mode+ang", (STACK_NEW, DIH_COS_NEW, ANG_COS_NEW))]
 
 
 def apply(cfg):
-    C.STACK_R0 = cfg[0]
-    C._R0_STACK = cfg[0]
+    C.STACK_R0 = cfg[0]      # no _R0_STACK snapshot any more; see torch_cgsim.py:1181
     C.DIH_PPPP = math.acos(max(min(cfg[1], 1.0), -1.0))
     C.ANGLE_PPP = math.acos(max(min(cfg[2], 1.0), -1.0))
 
@@ -233,6 +269,11 @@ for label, _ in VARIANTS:
     r = results[label]
     print(f"{label:14s} {r['fmed']:12.1f} {r['fsat']:5d}/{r['ntot']:<4d} "
           f"{r['ranks'].mean():12.2f} {r['margin']:19.1f}")
+print(f"  N(i)-N(i+1) adjacent base beads  {ADJ_NN_MEAN:.3f} nm "
+      f"(n={len(adj_nn)}, sd {adj_nn.std():.3f})")
+print("    <- this is the pair openmm_gpu_refiner.py:418 restrains, with its own")
+print("       STACK_R0 = 5.05 A = 0.505 nm. Same digits as the torch constant, but a")
+print("       different atom pair and a different sequence separation.")
 print()
 print("every number below is on the HELD-OUT structures, not the ones the constants were")
 print("fitted to.")
