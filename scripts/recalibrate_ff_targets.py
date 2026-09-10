@@ -143,26 +143,43 @@ st_all = np.concatenate(st_all)
 dih_all = np.concatenate(dih_all)
 ang_all = np.concatenate(ang_all)
 
-STACK_NEW = float(st_all.mean())
-DIH_COS_NEW = float(dih_all.mean())
-ANG_COS_NEW = float(ang_all.mean())
+def mode_of(x, lo, hi, n=40):
+    """The peak of the histogram, which is where the observable actually sits.
+
+    The MEAN minimises the mean squared restraint energy, which is the right target only
+    if the distribution is symmetric. check_bonded_distributions.py showed it is not: the
+    pseudo-torsion is strongly skewed, so its mean falls between states rather than on
+    one, and a restraint to the mean pins the structure somewhere it never visits. Both
+    are reported so the difference is visible.
+    """
+    h, e = np.histogram(x, bins=np.linspace(lo, hi, n + 1))
+    i = h.argmax()
+    return 0.5 * (e[i] + e[i + 1])
+
+
+STACK_MEAN = float(st_all.mean())
+STACK_NEW = mode_of(st_all, 0.4, 2.0, 32)
+DIH_MEAN = float(dih_all.mean())
+DIH_COS_NEW = mode_of(dih_all, -1.0, 1.0)
+ANG_MEAN = float(ang_all.mean())
+ANG_COS_NEW = mode_of(ang_all, -1.0, 1.0)
 print(f"re-derived from the {len(FIT)} fit structures")
-print(f"  STACK_R0   {C.STACK_R0:.3f} -> {STACK_NEW:.3f} nm       "
-      f"(n={len(st_all)}, sd {st_all.std():.3f})")
-print(f"  DIH cos    {math.cos(C.DIH_PPPP):+.3f} -> {DIH_COS_NEW:+.3f}          "
-      f"(n={len(dih_all)}, sd {dih_all.std():.3f})")
-print(f"  ANGLE cos  {math.cos(C.ANGLE_PPP):+.3f} -> {ANG_COS_NEW:+.3f}          "
-      f"(n={len(ang_all)}, sd {ang_all.std():.3f})")
+print(f"  STACK_R0   {C.STACK_R0:.3f} -> mode {STACK_NEW:.3f} (mean {STACK_MEAN:.3f}) nm")
+print(f"  DIH cos    {math.cos(C.DIH_PPPP):+.3f} -> mode {DIH_COS_NEW:+.3f} "
+      f"(mean {DIH_MEAN:+.3f})")
+print(f"  ANGLE cos  {math.cos(C.ANGLE_PPP):+.3f} -> mode {ANG_COS_NEW:+.3f} "
+      f"(mean {ANG_MEAN:+.3f})")
 print()
-print("the new value is the mean of the observable, which is what minimises the mean")
-print("squared restraint energy -- for the cosine forms that is the mean cosine, not the")
-print("cosine of the mean angle.")
+print("the mode is where the observable actually sits. The mean minimises the mean squared")
+print("restraint energy but for a skewed distribution it falls between states, so a")
+print("restraint to it pins the structure somewhere it never visits. Both are shown below.")
 print()
 
 ORIG = (C.STACK_R0, math.cos(C.DIH_PPPP), math.cos(C.ANGLE_PPP))
 VARIANTS = [("A as shipped", ORIG),
-            ("B stack+dih", (STACK_NEW, DIH_COS_NEW, ORIG[2])),
-            ("C +angle", (STACK_NEW, DIH_COS_NEW, ANG_COS_NEW))]
+            ("B mode", (STACK_NEW, DIH_COS_NEW, ORIG[2])),
+            ("B' mean", (STACK_MEAN, DIH_MEAN, ORIG[2])),
+            ("C mode+ang", (STACK_NEW, DIH_COS_NEW, ANG_COS_NEW))]
 
 
 def apply(cfg):
