@@ -18,11 +18,14 @@ What was measured, one line per constant:
                measured: the pair term's own force at native geometry (mean |d - 1.0 nm| =
                0.1063) must stay under the 200 kJ/mol/nm cap that cg_energy_forces applies,
                which gives k <= 1881 kJ/mol/nm^2.
-  K_CLASH      no criterion.  Over 2022024 bead pairs with |bead index gap| >= 3 -- the
-               field's own clash set, verified pair-for-pair against its neighbor list --
-               the closest approach is 0.3092 nm and nothing lies inside the 0.30 nm
-               cutoff.  P(data | K_CLASH) is therefore constant for every K_CLASH >= 0.
-               The database bounds the cutoff, not the stiffness.
+  K_CLASH      no criterion for the stiffness.  Over 2022024 bead pairs with |bead index
+               gap| >= 3 -- the field's own clash set, verified pair-for-pair against its
+               neighbor list -- the closest approach is 0.3092 nm.  The 0.30 nm linear
+               spring that used to be here sat below it and was identically zero over the
+               whole database, so P(data | K_CLASH) was constant; the range is now 0.3975,
+               which is above that closest approach, so 167 of the 2022024 pairs do sit
+               inside it.  The database still bounds the range and not the stiffness
+               (scripts/measure_type_pair_excluded_volume.py).
   K_BSJ        no independent criterion.  No deposited chain is covalently closed (1 of
                126 has ends within 0.7 nm), so the coordinate the term restrains is a free
                end-to-end distance (sd 2.467 nm) whose kBT/sd^2 = 0.41 means nothing.  The
@@ -51,52 +54,90 @@ FORCE_CAP = inspect.signature(
 SIGMA_NN = 0.1103          # nm, 3059 accepted WC pairs over 99 chains
 MEAN_ABS_OFFSET = 0.1063   # nm, mean |d - PAIR_NN| over the same 3059 pairs
 CLASH_CLOSEST = 0.3092     # nm, closest of 2022024 bead pairs with |i-j| >= 3, 126 chains
+CLASH_SET_B_N = 2022024    # pairs in that set
+CLASH_INSIDE = 167         # of them, how many are inside the shipped CLASH_SIGMA = 0.3975 (0.00826%)
+RANK_UPPER = 2173.9        # kJ/mol/nm^2, tightest K* over 35 structures on the register-shift-by-1
+                           # decoy; above it the decoy starts preferring the wrong register
+                           # (scripts/select_k_pair_by_ranking.py)
 PP_MEAN = 0.5923           # nm, 6638 P(i)-P(i+1) bonds
 PP_SIGMA = 0.0471          # nm, same 6638 bonds
 E2E_SD = 2.467             # nm, |P(0)-P(L-1)| over 126 free-ended chains
 
 
-def test_pair_spring_lies_between_the_spread_bound_and_the_cap_bound():
-    """K_PAIR has a measured LOWER bound and no measured value.
+def test_pair_spring_lies_between_the_spread_bound_and_the_ranking_bound():
+    """K_PAIR has a measured LOWER bound, a measured UPPER bound, and still no measured value.
 
     The upper bound used to come from the force cap: at 200 kJ/mol/nm with a mean |d - 1.0| of
-    0.1063 nm, the pair term alone could not exceed k = 1881 without saturating the cap. The cap
-    has since been raised to the value the field's own undamaged forces require, and that makes
-    the upper bound vacuous -- 5000/0.1063 is 47035, forty-seven times the criterion value.
+    0.1063 nm the pair term alone could not exceed 1881 without saturating it. Raising the cap to
+    the value the field's own undamaged forces require made that bound vacuous -- 5000/0.1063 is
+    47035, forty-seven times the criterion value -- and this test used to assert the vacuity.
 
-    So the honest statement is this: nothing measured selects 600 over 1500. The lower bound is
-    the only measurement, and choosing inside the bracket needs a fold or ranking run. The
-    vacuity is asserted rather than left implicit, so that lowering the cap again is visible
-    here instead of silently restoring a constraint.
+    scripts/select_k_pair_by_ranking.py replaces it with a ranking measurement. On a register-shift
+    decoy -- the same residues paired to members of the same helix, slid one position, so every
+    distance stays plausible and only the chemistry changes -- the correct register wins for all 35
+    usable structures while K_PAIR is below 2173.9, and structures start to drop above it: 32/35 at
+    2500, 21/35 at 4000, 10/35 at 8000. The decoy's own N-N mean is 1.1426 nm, closer to PAIR_NN
+    than the native's 0.9402 nm, which is exactly why it turns over instead of being monotone.
+
+    What the decoy does NOT do, and this is the honest part: it separates neither shipped candidate
+    from the other. 600 and 1500 both win 35/35. The random re-pairing decoy bounds nothing from
+    above at all -- its coefficient A is positive for all 40 structures, so its win count rises with
+    K_PAIR without limit. The bracket is therefore [204.8, 2173.9] and choosing inside it still
+    needs a measurement this suite does not have.
     """
     k_lower = KBT / SIGMA_NN ** 2
     k_cap = FORCE_CAP / MEAN_ABS_OFFSET
     assert k_lower == pytest.approx(205.0, rel=5e-3), (
         f"sigma_NN = {SIGMA_NN} nm should imply kBT/sigma^2 = 204.8; got {k_lower:.1f}")
-    assert k_cap > 10 * k_lower, (
-        f"the cap bound is {k_cap:.0f} against a lower bound of {k_lower:.0f}, so it is binding "
-        f"again -- the cap was lowered, and K_PAIR now has a real upper constraint to satisfy")
-    assert k_lower <= C.K_PAIR <= k_cap, (
-        f"K_PAIR = {C.K_PAIR} is outside [{k_lower:.1f}, {k_cap:.1f}].  It is not what the "
-        f"criterion gives (that is {k_lower:.1f}, a bound); it is only allowed inside the "
-        f"bracket.  Moving it out needs a fold/ranking measurement, not a new prefactor.")
+    assert k_cap > RANK_UPPER, (
+        f"the cap bound ({k_cap:.0f}) is no longer looser than the ranking bound "
+        f"({RANK_UPPER:.1f}), so the cap has become the operative constraint again. That is not "
+        f"wrong, but it means the vacuity this test used to record is back in the other "
+        f"direction and the ranking measurement has stopped being the thing that bounds K_PAIR")
+    assert k_lower <= C.K_PAIR <= RANK_UPPER, (
+        f"K_PAIR = {C.K_PAIR} is outside [{k_lower:.1f}, {RANK_UPPER:.1f}]. The lower end is the "
+        f"spread criterion (kBT/sigma_NN^2, a bound and not a value); the upper end is where the "
+        f"register-shift decoy starts losing structures. Moving it out needs a new measurement.")
     # and it is not the criterion value itself: 600 = 2.9x the bound
     assert C.K_PAIR != pytest.approx(k_lower, rel=0.10)
+    # the decoy rules out NEITHER shipped candidate, which is the claim that matters: both 600 and
+    # 1500 sit under 2173.9. The margin for 1500 is only 1.45x, so it is pinned both ways.
+    assert 1500.0 < RANK_UPPER, (
+        f"the ranking bound {RANK_UPPER:.1f} is at or below the predecessor value 1500, so this "
+        f"decoy DOES separate 600 from 1500 and the bracket above is narrower than claimed")
+    assert RANK_UPPER / 1500.0 == pytest.approx(1.45, abs=0.05), (
+        f"the bound is {RANK_UPPER / 1500.0:.2f} times the predecessor value; the margin for 1500 "
+        f"has moved and the prose about it needs re-reading")
 
 
-def test_clash_cutoff_sits_below_the_closest_native_contact():
-    """CLASH_DIST is bounded above by the closest native approach; K_CLASH is not bounded
-    at all, because the term is identically zero over the whole database."""
-    margin = CLASH_CLOSEST - C.CLASH_DIST
-    assert margin > 0.0, (
-        f"the measured closest bead approach is {CLASH_CLOSEST} nm against a "
-        f"{C.CLASH_DIST} nm cutoff: native geometry now sits on the clash wall, and "
-        f"K_CLASH would have to be re-derived from a distribution it does not have")
-    assert margin < 0.02, (
-        f"margin is {margin:.4f} nm -- larger than the measured 0.0092 nm, which means "
-        f"either the database or the cutoff changed and the earlier statement that the "
-        f"term never fires needs re-measuring")
-    # 0.30 < 0.3092 < 0.310: exactly one pair in the database is within 0.01 nm of the wall
+def test_the_excluded_volume_range_and_what_it_costs_on_native_geometry():
+    """The range is set by the P-P minimum, and the set it acts on reaches below that.
+
+    This replaces an assertion that the clash term was identically zero over the whole database.
+    That was true of the retired 0.30 nm linear spring -- set B's closest approach is 0.3092 nm --
+    and it stopped being true when the range became 0.3975. The cost is real and is pinned here so
+    it cannot grow unnoticed: 167 of the 2022024 pairs in set B sit inside the range, all of them
+    C4'-C4' (own minimum 0.3092), C4'-N9/N1 (0.3673) or N9/N1-N9/N1 (0.3411).
+
+    A per-type range was considered against this number and rejected. It would remove 0.008
+    percent of contacts, and the Boltzmann criterion that set K_CLASH cannot supply a per-type
+    stiffness at all, because sigma is defined as the type's minimum and the bin below it is
+    therefore empty for every one of the six type pairs
+    (scripts/measure_type_pair_excluded_volume.py prints that result per type).
+    """
+    assert C.CLASH_SIGMA == pytest.approx(0.3975), (
+        "the range moved; the cost below is measured against 0.3975")
+    assert CLASH_CLOSEST == 0.3092, "set B's closest approach moved; re-measure the cost"
+    assert CLASH_CLOSEST < C.CLASH_SIGMA, (
+        f"set B's closest ({CLASH_CLOSEST}) is no longer inside the range "
+        f"({C.CLASH_SIGMA}), so the cost this test pins does not exist")
+    assert CLASH_INSIDE == 167, (
+        f"{CLASH_INSIDE} pairs of set B are inside {C.CLASH_SIGMA} nm; the measurement said 167")
+    assert CLASH_INSIDE / CLASH_SET_B_N < 1e-4, (
+        f"the share inside the range is {CLASH_INSIDE / CLASH_SET_B_N:.6f}, above the 1e-4 the "
+        f"single-range decision was taken on; a per-type range may now be worth its cost")
+    # CLASH_DIST is retired and nothing reads it. tests/test_clash_single_potential.py owns the
+    # check that no code outside the four call sites names it, so this only pins the value.
     assert C.CLASH_DIST == pytest.approx(0.30)
 
 
