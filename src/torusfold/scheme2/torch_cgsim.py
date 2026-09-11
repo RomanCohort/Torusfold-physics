@@ -207,9 +207,55 @@ K_DIH = 7.2         # P-P-P-P dihedral (kBT/sigma^2; was 500.0)
 GB_FORCE_CAP = 50.0
 
 K_CLASH = 20000.0   # E = 0.5*k*(sigma-d)^2*(sigma/d)^2, sigma = CLASH_SIGMA
+# ── The three closure terms, and what they do to a chain that is not closed ──
+# K_BSJ, K_BSJ_GUIDE and K_BSJ_CONTACT all act on P(0)-P(L-1), which is the backbone join and
+# exists only in a circular RNA. Every chain in the deposited-structure database is linear, and the
+# loader's own chains have that distance at mean 2.691 nm and max 4.295 nm against a BOND_P_NEXT
+# target of 0.590.
+#
+# Measured on 7 such chains (scripts/measure_bsj_on_linear_references.py):
+#
+#     closure energy                      mean 1913.48 kJ/mol, max 4392.52
+#     as a share of |total energy|        mean   91.55 %,      max   98.37 %
+#     as a share of the summed |F|        mean    8.16 %,      max   15.10 %
+#     per term, share of |E|              bsj closure 68.17 %  bsj contact 23.46 %  guide 0.08 %
+#
+# So on a linear reference the field's energy is almost entirely the join's strain, and any energy
+# or dynamics decision made there is dominated by an artefact.
+#
+# Every fold and ranking test in this repo is blind to it by construction: they compare two PAIRINGS
+# of the same chain, and these three terms depend only on P(0) and P(L-1), so the difference is
+# exactly zero. That is why nothing here caught it.
+#
+# A run that is not on a covalently closed chain should set all three to zero and SAY SO in its
+# provenance line -- scripts/ibi_round0.py prints a fingerprint for exactly that reason.
 K_BSJ = 600.0       # BSJ closure ← lowered from 800 to 600
-K_BSJ_GUIDE = 100.0 # BSJ closure guiding force (logistic sigmoid)
-K_PAIR_GUIDE = 100.0 # far/long-range pair guiding force (logistic sigmoid)
+# The two sigmoid guides. Their functional form is E = -K * softplus((r0 - r)/w), so their
+# gradient is +K*sigmoid((r0-r)/w)/w, which is INWARD at every separation: they pull harder the
+# closer the pair already is, and they do not vanish anywhere. On a coordinate that also carries a
+# harmonic restraint, that moves the restraint's minimum.
+#
+# scripts/measure_pair_equilibrium.py solves for where. For the base pair, K_PAIR = 600 at
+# PAIR_NN = 1.0 nm, the energy minimum sits at
+#
+#     K_PAIR_GUIDE     100 (shipped)   50        25        13.4      5        1
+#     minimum (nm)     0.1805          0.6435    0.8610    0.9351    0.9779   0.9957
+#
+# i.e. 7.43 measured database spreads from the target the field itself declares. With K = 0 the
+# minimum is exactly PAIR_NN, which is the scan's own control.
+#
+# K_PAIR_GUIDE is therefore set by a criterion derived from a shipped target rather than chosen:
+# the pair minimum must stay within ONE measured spread of PAIR_NN. The spread is 0.1103 nm
+# (scripts/decompose_pair_spread.py: 3059 WC pairs over 99 chains, 98.6 percent of it within-chain),
+# and the criterion solves to K_PAIR_GUIDE <= 20.865 (scripts/solve_pair_guide_scale.py).
+#
+# What this does NOT fix, stated because it is the larger question: the term is named and
+# commented "far/long-range pair guiding force", but its shape is a SHORT-range reward -- the
+# docstring at _sigmoid_f describes exactly that, so the shape matches the docstring and not the
+# name. A term that acts only at long range would be E = +K*softplus((r - r0)/w), whose force is
+# inward and which is zero for r < r0. Changing it would move both guides, and is not done here.
+K_BSJ_GUIDE = 100.0 # BSJ closure guiding force (logistic sigmoid); see the note above and below
+K_PAIR_GUIDE = 20.8 # base-pair guide; <= 20.865 by the one-spread criterion above (was 100.0)
 K_BSJ_CONTACT = 50.0 # contacts near the BSJ (distance-decaying)
 # BPP soft constraint. E = -K_BPP * w * softplus((1.0 - r)/0.3), so its force is
 # K_BPP / 0.3 * w * sigmoid(x), and at the target distance r = 1.0 nm the sigmoid reads 0.5
@@ -695,7 +741,7 @@ def cg_energy_3bead(
       dihedral P-P-P-P        K_DIH (A-form 180°)
       excluded volume         K_CLASH, CLASH_SIGMA
       BSJ P_0-P_{L-1}         K_BSJ
-      far-pair guide          K_PAIR_GUIDE
+      near-contact guide      K_PAIR_GUIDE  (named "far-pair" but acts at short range)
       BSJ guide               K_BSJ_GUIDE
       BSJ contact             K_BSJ_CONTACT
       BPP restraint           K_BPP

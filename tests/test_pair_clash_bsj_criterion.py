@@ -110,6 +110,34 @@ def test_pair_spring_lies_between_the_spread_bound_and_the_ranking_bound():
         f"has moved and the prose about it needs re-reading")
 
 
+def test_the_pair_guide_cannot_move_the_base_pair_minimum_by_more_than_one_spread():
+    """K_PAIR_GUIDE is set by this criterion, not chosen.
+
+    _sigmoid_f's gradient is +K*sigmoid((r0-r)/w)/w, which is inward at EVERY separation, so on
+    top of the K_PAIR harmonic it moves the restraint's minimum. Measured: K_PAIR_GUIDE = 100 put
+    the minimum at 0.1805 nm, 7.43 measured spreads from PAIR_NN; K = 0 recovers PAIR_NN exactly.
+    The criterion is that the minimum stays within one spread (0.1103 nm), which solves to 20.865.
+    """
+    rr = torch.linspace(0.05, 2.5, 20001, dtype=torch.float64)
+    r = rr.reshape(1, -1, 1)
+
+    def r_min(k_guide):
+        e = (0.5 * C.K_PAIR * (rr - C.PAIR_NN) ** 2
+             + C._sigmoid_f(r, C.PAIR_NN, k_guide, 0.2)[0].reshape(-1))
+        return float(rr[int(torch.argmin(e))])
+
+    # the control: without the guide the minimum IS the target, so the scan measures the pair
+    # coordinate and nothing else
+    assert r_min(0.0) == pytest.approx(C.PAIR_NN, abs=2e-4)
+    assert C.K_PAIR_GUIDE <= 20.865, (
+        f"K_PAIR_GUIDE = {C.K_PAIR_GUIDE} is above the value the one-spread criterion solves to; "
+        f"the field's own PAIR_NN target is what it moves away from")
+    shift = C.PAIR_NN - r_min(C.K_PAIR_GUIDE)
+    assert 0.0 < shift <= SIGMA_NN, (
+        f"the base-pair minimum sits at {C.PAIR_NN - shift:.4f} nm, {shift / SIGMA_NN:.2f} spreads "
+        f"from PAIR_NN; the criterion allows at most 1.00")
+
+
 def test_the_excluded_volume_range_and_what_it_costs_on_native_geometry():
     """The range is set by the P-P minimum, and the set it acts on reaches below that.
 

@@ -400,7 +400,31 @@ def fit_stratified(structs, nbins=120, pseudo=0.5, min_obs=MIN_OBS, coords=None)
 
 
 def _sample(q, t):
-    """Linear interpolation between bin centres, clamped to the table."""
+    """Linear interpolation between bin centres, clamped to the table.
+
+    READ THIS BEFORE CHANGING THE INTERPOLATION. t["U"] holds U_i = -kBT ln p_i where p_i is the
+    probability MASS of bin i, so the stored numbers are bin AVERAGES. This function reads them as
+    point values at the bin centres. Those are different quantities, and the difference is
+    measurable: with this interpolant the bin masses it produces are off by up to
+
+        angle     0.3624 kBT at the core       mass-weighted rms 0.034 kBT
+        dihedral  0.4925 kBT                   mass-weighted rms 0.147 kBT
+        stack     0.2848 kBT                   mass-weighted rms 0.027 kBT
+
+    over 126 chains, 120 bins each, core = bins whose target mass is at least 1e-4
+    (scripts/fix_table_interpolation_convention.py prints the table). The all-bin maximum is owned
+    by the pseudo-count and is not the number to quote.
+
+    The gap is NOT closed. Inverting "node values -> bin masses" is ill-posed here: restricted to
+    the populated bins the Jacobian has condition number ~4e7, the Newton step it implies is 1e4 to
+    1e5 kJ/mol, and a 0.02x damped step along that direction does not reduce the residual. The
+    whole attempt is in that script.
+
+    It does not need closing. IBI is self-correcting for any convention, because its fixed point --
+    the SIMULATED bin masses equal the target -- is stated in terms of the simulation and not of
+    the interpolant; and the shipped constants come from the spread (k = kBT/sigma^2), not from the
+    table shape. DBI's literal output is the one place the gap survives, and it is recorded there.
+    """
     u = (q - t["lo"]) / t["binw"] - 0.5
     i0 = torch.floor(u).long().clamp(0, len(t["U"]) - 2)
     f = (u - i0).clamp(0.0, 1.0)
