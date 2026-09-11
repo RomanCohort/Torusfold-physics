@@ -1630,7 +1630,15 @@ def batch_langevin_step(
     half_dt = dt_ps * 0.5
     # Unit conversion: kJ/mol/nm = amu·nm/ps² × 100
     unit_conv = 100.0
-    sigma_base = math.sqrt(2.0 * friction * KB_KJ / mass_amu)
+    # O-step noise. For v <- c1*v + A*xi the stationary variance is A^2/(1-c1^2), and this
+    # integrator works in nm/ps, so the target is kB*T/(mass*unit_conv). The previous form
+    # sqrt(2*gamma*kB/m) * sqrt(T*dt) * c2 was off by sqrt(2*gamma*dt*unit_conv): it lacked the
+    # unit_conv conversion that the force kick below has, and carried a spurious sqrt(dt).
+    # Measured on a free particle, whose stationary <v^2> must be kB*T/m whatever the potential
+    # does: the old form gave 0.038 / 0.399 / 0.390 / 1.994 times that at (gamma, dt) =
+    # (0.1, 0.002) / (1.0, 0.002) / (0.1, 0.02) / (5.0, 0.002), each matching 100*2*gamma*dt.
+    # The shipped parameters are gamma = 1.0 and dt = 0.002, so the GPU path ran at 0.4*T.
+    sigma_base = math.sqrt(KB_KJ / (unit_conv * mass_amu))
     noise_scale = sigma_base * torch.sqrt(
         temperatures.view(-1, 1, 1))
 
@@ -1640,8 +1648,7 @@ def batch_langevin_step(
     pos.add_(vel * half_dt)
     # O step: Langevin drag + noise
     vel.mul_(c1)
-    vel.add_(_safe_randn(vel.shape, vel.device) * noise_scale
-            * math.sqrt(dt_ps) * c2)
+    vel.add_(_safe_randn(vel.shape, vel.device) * noise_scale * c2)
     # A step: half-step position update
     pos.add_(vel * half_dt)
     # B step: half-step velocity update (using the same forces; a simplified
