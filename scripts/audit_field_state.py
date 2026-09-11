@@ -13,6 +13,12 @@ import boltzmann_bonded as B          # noqa: E402
 import torusfold.scheme2.torch_cgsim as C   # noqa: E402
 import cg_force_terms as FT           # noqa: E402
 
+# Comparing the five entry points IS this script's job, so it opts into the guard that
+# _alternate_field puts on the four non-production ones. Until this line existed the script died
+# at the comparison -- the guard is not a bug to work around, but a script whose whole purpose is
+# the comparison has to say out loud that it is crossing it. The ratio it reports is the finding.
+C.ALLOW_ALTERNATE_FIELDS = True
+
 GROUP = {
     "bonded": ("K_BB", "BOND_P_NEXT", "K_INTRA_PC", "K_INTRA_CN", "K_INTRA_PN",
                "K_LINK_CP", "K_LINK_NP", "K_LINK_NC",
@@ -45,7 +51,9 @@ def cl():
     return c
 
 
-print(f"four paths on {s0['name']} (L={L}, {len(ij)} WC pairs), same geometry, force_cap=None:")
+print(f"five paths on {s0['name']} (L={L}, {len(ij)} WC pairs), same geometry, force_cap=None:")
+print("  cg_energy_forces is the production field; the other four are different potentials under")
+print("  the same constant names, and this script forces ALLOW_ALTERNATE_FIELDS to reach them.")
 vals = {
     "cg_energy_forces": float(C.cg_energy_forces(pos, ij, pw, cell_list=cl(), force_cap=None)[0]),
     "cg_forces_explicit_batched": float(C.cg_forces_explicit_batched(pos, ij, pw, cell_list=cl())[0]),

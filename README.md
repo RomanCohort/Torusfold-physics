@@ -388,11 +388,16 @@ coordinate by chemical identity. **No measurement** means exactly that.
 - **Three terms are 91.55 percent of the energy on a linear reference** (`bsj closure` 68.17,
   `bsj contact` 23.46). They act on `P(0)-P(L-1)`, which only exists in a circular molecule. A run
   on a linear chain should set all three to zero and say so in its provenance line.
-- **The field is too soft in the coupled chain.** IBI round 0 measures the simulated spread at
-  1.15 to 1.70 times the single-coordinate prediction for every bonded coordinate but the
-  dihedral (which sits at 0.97). That residual is coupling and belongs to IBI, not to another k.
-  It was 1.09 to 1.36 before `_sigmoid_f` was put into its correct long-range shape; the
-  eleven percent it cost, and the curvature arithmetic behind it, are in section 3ay.
+- **Every IBI round-0 residual in this file is a transient, not an equilibrium number.**
+  `ibi_round0.py` throws away only the first 3.2 ps of a 16 ps run (`burn = NSTEPS // 5`).
+  On the same field and the same seed, sampling 16-80 ps instead gives a joint residual of
+  0.1330 against the 0.2937 the default window reports, and it is still moving at 80 ps. So
+  0.2937, and the 0.3263 that `_sigmoid_f`'s correction moved it to, are two transients on the
+  same window: comparable to each other, not readable as this field's fit quality. Section 3az.
+- **The coupled chain is softer than the single-coordinate prediction, and how much is open.**
+  The transient window puts sim/1D at 1.15 to 1.70 for every bonded coordinate but the dihedral
+  (0.97). The 16-80 ps window puts the same range at 1.06 to 1.18. That residual is coupling and
+  belongs to IBI, not to another k.
 - **The minimiser in `check_field_after_fix.py` currently stalls.** Six restarts, max abs F
   690.19 kJ/mol/nm against a 236.3 force floor, so that script's starting point is not a true
   minimum. This is the one open item in the acceptance table below.
@@ -446,7 +451,7 @@ python scripts/check_field_after_fix.py 40.0 2 6000  # 40 ps of dynamics, then m
 | potential-energy drift | -171.2 kJ/mol over 40 ps | measured from an unconverged start; see below |
 | minimiser | 4427 iterations, 6 restarts, max abs F 690.19 | **this row currently fails** |
 | frames below 0.30 nm | 0 / 3000 | this is the collapse check |
-| joint mean abs ln(sim/ref) | 0.3263 | see the paragraph below |
+| joint mean abs ln(sim/ref) | 0.3263 (a transient; see below) | see the paragraph below |
 
 **The minimiser row is the one open item, and it is why the drift row is not yet meaningful.**
 `check_field_after_fix.py` descends with a halving step (accept `x + s*f` and grow it by 1.2, else
@@ -465,7 +470,8 @@ Rebalancing that means touching `K_PAIR`, whose criterion only bounds it to
 coordinate and sells another: raising `K_BB` sharpened bb_bond to exactly the reference
 sigma (1.588 down from 1.945) and pushed intra_pc, intra_cn and angle from 1.36 / 1.36 / 1.09 to
 1.50 / 1.49 / 1.19, leaving the joint residual at 0.2937 against 0.2895. The `_sigmoid_f` correction
-then moved it to 0.3263, eleven percent the other way. Both are measurements, not tolerances. A
+then moved it to 0.3263, eleven percent the other way. Both are measurements, not tolerances, and
+both are transients on this window, so neither is this field's fit quality. A
 change that improves the joint number by less than about 10 percent has not been shown to do
 anything, and matching the joint distribution needs IBI iterating on the potential rather than
 another constant.
@@ -473,6 +479,41 @@ another constant.
 ## Update log
 
 Newest first. Every entry is a measurement from a script in `scripts/`, not a plan.
+
+### Dev-machine round (findings reported back, not run here)
+
+`ibi_round0.py`'s default window is `burn = NSTEPS // 5`, which throws away only the first
+3.2 ps of a 16 ps run. On the same field, the same seed, changing only the window:
+
+| window | bb_bond | intra_pc | intra_cn | angle | dihedral | stack | joint |
+| :-- | --: | --: | --: | --: | --: | --: | --: |
+| 3.2-16 ps (the default) | 1.588 | 1.499 | 1.494 | 1.191 | 0.983 | 1.352 | **0.2937** |
+| 16-80 ps | 1.185 | 1.067 | 1.062 | 1.134 | 0.829 | 1.209 | **0.1330** |
+
+**So every IBI round-0 residual in this file, in section 3ax and in section 3ay is a transient.**
+0.2937 is not this field's equilibrium residual, and the 0.2937 against 0.3263 comparison in 3ay
+compares two transients on the same window. The 11 percent is real for that window and is not a
+statement about the field. Section 3az carries it, and section 3ay now says so on the table.
+
+**The `K_PAIR` sweep tested a different question than intended.** Lowering it from 600 to 470 moved the
+joint residual the wrong way (-2.51 percent); the best point of the four was 340 at +3.31 percent,
+under the 10 percent bar, so `K_PAIR` stays 600. But that sweep ran on the pre-fix field, where the
+guide's curvature at the well is `-k/(4w^2)`, so lowering `K_PAIR` pushes the effective spring further
+down rather than back. The 3ay reading is still untested.
+
+**`audit_field_state.py` crashed at its five-path comparison and now does not.** It called the four
+entry points that `_alternate_field` guards; comparing them is the script's whole purpose, so it now
+forces `ALLOW_ALTERNATE_FIELDS` and says in its output that it is crossing that line. It also shows
+that section 3at's five-path table predates the four-constant change: the same 1L2X now gives
+3669.9917 for `cg_energy_forces`, -0.0280x for the two explicit paths and 0.3271x for `cg_energy_3bead`.
+
+**Rate: 60.2-62.1 steps/s there against 22.3-23.1 here, so 16 ps is 130 s and not 5.8 min.**
+Everything scheduled off the local rate is 2.7 times more expensive than it needs to be.
+
+**Also: a folder copy is not a revision.** The report came from a tree with no `.git` whose contents
+equal `424e1d7` -- 131 tests in the README, the analysis document ending at 3ax, the old guide shape
+still in the source. Check which revision a tree is before believing a baseline against it; the
+one-line check is in `docs/dev_machine_handoff.md`.
 
 ### Force-field audit round (`441cdd8`, `6e7a44b`)
 
@@ -492,7 +533,7 @@ pair minimum, is `scripts/measure_guide_shape_fix.py`. The same two commands as 
 | potential-energy drift | -3.2 | -171.2 kJ/mol over 40 ps |
 | minimiser | 6000 iters, 0 restarts, max abs F 69.80 | 4427 iters, 6 restarts, max abs F 690.19 |
 | frames below 0.30 nm | 12 / 3000 | **0 / 3000** |
-| joint mean abs ln(sim/ref) | 0.2937 | 0.3263 |
+| joint mean abs ln(sim/ref) | 0.2937 | 0.3263 (both transients) |
 
 The minimiser row is the open item, and it is why the drift row is not yet meaningful: the script
 descends with a halving step, so six restarts say the method stalls on this landscape, not that a
