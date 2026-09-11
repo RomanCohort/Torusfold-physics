@@ -87,8 +87,12 @@ def coords_of(pos, name):
 WCP = {("A", "U"), ("U", "A"), ("G", "C"), ("C", "G"), ("G", "U"), ("U", "G")}
 
 
-def _chain_residues(pdb):
-    """(beads, wc_pairs) per chain. C1' is kept because the pair criterion needs it."""
+def _chain_residues(pdb, with_names=False):
+    """(beads, wc_pairs) per chain. C1' is kept because the pair criterion needs it.
+
+    with_names=True appends the per-residue base letter, so a caller can ask whether a
+    fitted coordinate depends on base identity. The tables themselves never see it.
+    """
     ch = collections.OrderedDict()
     for line in open(pdb):
         if not (line.startswith("ATOM") or line.startswith("HETATM")):
@@ -158,7 +162,8 @@ def _chain_residues(pdb):
                 d = np.linalg.norm(np.array(lst[a][1]["C1'"]) - np.array(lst[b][1]["C1'"]))
                 if 9.0 <= d <= 11.5:
                     pairs.append((a, b))
-        out.append((beads, pairs))
+        out.append((beads, pairs, [r for r, _ in lst]) if with_names
+                   else (beads, pairs))
     return out
 
 
