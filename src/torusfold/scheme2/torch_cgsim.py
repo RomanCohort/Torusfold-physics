@@ -103,8 +103,25 @@ K_BB = 500.0        # P-P backbone bond (baseline)
 K_INTRA = 400.0     # P-C4', C4'-N
 K_PAIR = 600.0      # WC base-pair N-N (λ-scalable) ← lowered from 1500 to 600
 K_STACK = 500.0     # base stacking P_i-P_{i+2} (λ-scalable)
-K_ANGLE = 600.0     # P-P-P backbone angle
-K_DIH = 500.0       # P-P-P-P dihedral (A-form) ← raised from 300 to 500
+# The angle and dihedral are set from k = kBT/sigma^2, where sigma is the observed spread of
+# the coordinate (refit_tables_clean.py, 96 gap-free chains): sigma = 0.2978 for the angle
+# cosine and 0.5880 for the dihedral cosine, giving 28.1 and 7.2 at 300 K.
+#
+# Why they came down. ablate_backbone_terms.py removes them one at a time and together:
+# removing either alone barely moves the funnel over held-out structures, while removing BOTH
+# takes it from rank 1.156 to a perfect 1.000 and takes the beads over the 200 kJ/mol/nm cap
+# from 27.1 percent to 1.9. They only help together, so the pair is redundant and their
+# conflict is what costs. sweep_angle_dihedral_scale.py then fills the two-dimensional cell
+# the one-at-a-time sweep missed, and the safe zone there is exactly where kBT/sigma^2 lands:
+# angle 28.1/600 = 0.047 and dihedral 7.2/500 = 0.014 give 2.1 to 2.7 percent over cap and a
+# p95 of 143 to 149, against 25.3 percent and 3675 as shipped. test_nonbonded_fold_signal.py
+# adds the third line: the dihedral is the single largest energy term in the field at a mean
+# magnitude of 6946 kJ/mol, and it does no fold work.
+#
+# What this costs, stated: the well is only a few kBT deep at this stiffness, so the chain is
+# floppy and folding now rests on the pairing terms, which 3u shows do carry the signal.
+K_ANGLE = 28.1      # P-P-P backbone angle (kBT/sigma^2; was 600.0)
+K_DIH = 7.2         # P-P-P-P dihedral (kBT/sigma^2; was 500.0)
 K_CLASH = 500.0     # soft-sphere repulsion (not scaled) ← raised from 300 to 500
 K_BSJ = 600.0       # BSJ closure ← lowered from 800 to 600
 K_BSJ_GUIDE = 100.0 # BSJ closure guiding force (logistic sigmoid)
@@ -1191,8 +1208,8 @@ _K_BOND_BB = 500.0
 _K_BOND_INTRA = 400.0
 _K_PAIR = 600.0       # lowered from 1500 to 600
 _K_STACK = 500.0
-_K_ANGLE = 600.0
-_K_DIH = 500.0        # raised from 300 to 500
+_K_ANGLE = 28.1       # kept in step with K_ANGLE
+_K_DIH = 7.2          # kept in step with K_DIH
 _K_CLASH = 500.0      # raised from 300 to 500
 _K_BSJ = 600.0        # lowered from 800 to 600
 _K_BSJ_GUIDE = 100.0

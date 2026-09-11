@@ -68,6 +68,24 @@ def test_stacking_target_survives_the_pp_scale_check():
         f"is about 1.12 nm")
 
 
+def test_backbone_stiffness_matches_the_observed_spread():
+    # k = kBT/(sigma^2) with sigma from 96 gap-free chains: 0.2978 for the angle cosine and
+    # 0.5880 for the dihedral cosine. These were 600.0 and 500.0, which by the ablation in
+    # ablate_backbone_terms.py did no fold work while putting 27 percent of beads over the
+    # force cap.
+    assert abs(C.K_ANGLE - 28.1) < 1e-9, (
+        f"K_ANGLE is {C.K_ANGLE}, expected kBT/sigma^2 = 28.1 kJ/mol/nm")
+    assert abs(C.K_DIH - 7.2) < 1e-9, (
+        f"K_DIH is {C.K_DIH}, expected kBT/sigma^2 = 7.2 kJ/mol/nm")
+
+
+def test_maxwell_boltzmann_check_is_not_thirty_times_off():
+    # A guard against a silent return to the tuned values. The exact numbers matter less
+    # than the order of magnitude, which is what the cap saturation depended on.
+    assert C.K_ANGLE < 100.0, f"K_ANGLE {C.K_ANGLE} is back in the tuned range"
+    assert C.K_DIH < 100.0, f"K_DIH {C.K_DIH} is back in the tuned range"
+
+
 def test_no_frozen_snapshot_of_the_stacking_target():
     assert not hasattr(C, "_R0_STACK"), (
         "torch_cgsim exports _R0_STACK again; a frozen copy of a live constant is how the "
