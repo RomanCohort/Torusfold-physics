@@ -777,11 +777,38 @@ def isrnaclong_pipeline(
         # about 89 percent of the pairs it was handed. The one-bit base complementarity the
         # pipeline already has in hand scores 0.8197 on the same rows.
         #
-        # Left in place rather than deleted so earlier runs stay reproducible. NOTE: the weights
-        # this replaces -- 1.0 hard, 1.0/0.8/0.6/bpp_mid soft -- have NOT themselves been
-        # measured as discriminative; that needs MFE/PF/DivideFold, which was not run. Turning
-        # this off is a measured improvement over turning it on. It is not a claim that what
-        # remains is good.
+        # Left in place rather than deleted so earlier runs stay reproducible.
+        #
+        # The weights this replaces -- 1.0 hard, 1.0/0.8/0.6/bpp_mid soft -- were unmeasured when
+        # that note was written. They have since been measured, on the same rows and through the
+        # same harness, which now scores them as "method_agree" (scripts/
+        # measure_pair_weight_quality.py):
+        #
+        #   N1, band-matched non-WC: geometry held fixed, chemistry removed
+        #       method_agree     AUC 0.7080 [0.6653, 0.7401]  shuffled 0.4986  component +0.2094
+        #       rcm_confidence   AUC 0.5044 [0.4801, 0.5269]  shuffled 0.5029  component +0.0015
+        #       method_agree - rcm_confidence = +0.2036 [+0.1583, +0.2425]  p = 0.000
+        #   N2, separation-matched, any identity, any distance
+        #       method_agree     AUC 0.7075 [0.6717, 0.7455]  shuffled 0.5005  component +0.2070
+        #       rcm_confidence   AUC 0.5519 [0.5276, 0.5859]  shuffled 0.5006  component +0.0513
+        #       method_agree - rcm_confidence = +0.1556 [+0.1129, +0.1973]  p = 0.000
+        #
+        # So the channel does carry sequence information, far more than the reweight that would
+        # replace it, and turning this off is a measured improvement. Three things it does NOT
+        # establish, each measured so that nobody re-proposes them:
+        #
+        #   * Multiplying these weights by the one-bit base complementarity the pipeline already
+        #     holds changes NOTHING: ma_x_wc is identical to method_agree on both sets, because
+        #     every pair that receives a weight is already Watson-Crick compatible. There is no
+        #     chemistry left for a lookup to add.
+        #   * Whether the channel adds anything BEYOND chemistry and geometry cannot be measured
+        #     on this database. The third negative set that would test it -- separation-matched,
+        #     in-band AND base-complementary, so both are held fixed -- is empty BY CONSTRUCTION,
+        #     because _chain_residues accepts a pair exactly when it is WC compatible, at least
+        #     3 residues apart, and inside the 9.0-11.5 A band. The label IS that conjunction.
+        #   * N2 is geometry-dominated: geom_in_band alone scores 0.9833 there with a shuffled
+        #     control of 0.9833, i.e. zero sequence content. The one set on which these weights
+        #     lose to a rival is therefore not a fair ground for that comparison.
         if use_rcm_reweight:
             try:
                 from torusfold.scheme2.rcm import compute_rcm_score

@@ -48,6 +48,14 @@ Scores compared (all oriented so larger = more pair-like):
   rcm_density        crossing matches per crossing comparison (rcm_density_score)
   rcm_confidence_T   the same confidence after rewriting U as T, which is the alphabet
                      rcm.py's _COMPLEMENT table (A->T) is consistent with; see score_pair()
+  method_agree       the weights the pipeline actually installs when the RCM reweight is off:
+                     isrnaclong.py:641-763's tiers, rebuilt on this chain's own letters with the
+                     pipeline's own ViennaRNA settings. Hard (>=2 of {PF high, MFE}) is 1.0, MFE
+                     soft is 0.8, PF medium is its own probability p, and anything not predicted
+                     is 0.0. DivideFold is unavailable here, so the 0.6 tier has no members --
+                     which is the state the pipeline itself is in when that subprocess fails.
+                     This is the score the comment at isrnaclong.py:780 says had NOT been
+                     measured as discriminative.
   wc_identity        base complementarity alone, 1 if (base_i, base_j) in B.WCP
   wc_x_geom          complementarity plus geometry: wc_identity x gaussian in C1'-C1'
                      with centre 10.25 A and sigma = band width / 4
@@ -91,7 +99,63 @@ MIN_SEP = 3
 FLANK_CAP = 200          # isrnaclong.py:765
 FLANK_MIN = 5            # isrnaclong.py:771
 SCORES = ("rcm_confidence", "rcm_crossing", "rcm_density", "rcm_confidence_T",
-          "rcm_crossing_T", "wc_identity", "wc_x_geom", "geom_in_band", "flank_up")
+          "rcm_crossing_T", "method_agree", "ma_x_wc", "wc_identity", "wc_x_geom",
+          "geom_in_band", "flank_up")
+
+# ------------------------------------------------- method-agreement (isrnaclong.py:641-763)
+_MA_CACHE = {}
+
+
+def method_agreement_map(seq):
+    """{(i, j): weight} for one sequence, by the pipeline's own tier rules.
+
+    Built from ViennaRNA with md.circ = 1, which is the setting isrnaclong.py:643-645 uses, and
+    with its tier boundaries (P > 0.9 high; 0.5 < P <= 0.9 medium; the MFE dot-bracket for the
+    rest). The order matters and is the pipeline's: hard first, then MFE softs at 0.8, then PF
+    mediums only for pairs neither of those already claimed -- isrnaclong.py:750-757 mutates
+    hard_set as it appends, so a pair in both MFE and the PF medium tier keeps 0.8, not p.
+    """
+    cached = _MA_CACHE.get(seq)
+    if cached is not None:
+        return cached
+    import RNA
+    md = RNA.md()
+    md.circ = 1
+    fc = RNA.fold_compound(seq, md)
+    _ss, _e = fc.pf()
+    plist = fc.plist_from_probs(0.01)
+    pf_high = {(ep.i - 1, ep.j - 1) for ep in plist if ep.p > 0.9}
+    pf_mid = {(ep.i - 1, ep.j - 1): float(ep.p) for ep in plist if 0.5 < ep.p <= 0.9}
+    try:
+        ss_mfe, _me = fc.mfe()
+        stack, mfe_pairs = [], set()
+        for k, c in enumerate(ss_mfe):
+            if c == "(":
+                stack.append(k)
+            elif c == ")" and stack:
+                mfe_pairs.add((stack.pop(), k))
+    except Exception:
+        mfe_pairs = set(pf_high) | set(pf_mid)
+
+    votes = collections.Counter()
+    for src in (pf_high, mfe_pairs):
+        for p in src:
+            votes[p] += 1
+    hard = {p for p, v in votes.items() if v >= 2} | set(pf_high)
+
+    w = {}
+    for p in hard:
+        w[p] = 1.0
+    seen = set(hard)
+    for p in mfe_pairs:
+        if p not in seen:
+            w[p] = 0.8
+            seen.add(p)
+    for p, prob in pf_mid.items():
+        if p not in seen:
+            w[p] = prob
+    _MA_CACHE[seq] = w
+    return w
 
 
 # --------------------------------------------------------------- chain loading
@@ -289,15 +353,25 @@ def build_rows(chains, per_pos, tol, rng):
             n1 = [c for c in cands if abs(c[2] - s) <= tol and not c[4]
                   and BAND[0] <= c[3] <= BAND[1]]
             n2 = [c for c in cands if abs(c[2] - s) <= tol]
+            # N3: the only set that can test whether the folding-derived channel adds anything
+            # beyond chemistry AND geometry. Both are held fixed here -- base-complementary like a
+            # positive, inside the same C1'-C1' band like a positive -- so wc_identity reads 1.0
+            # for every row and geom_in_band reads 1.0 for every row, and each is therefore an
+            # uninformative 0.5. Whatever separates positives from N3 is sequence content in the
+            # prediction itself, which is the thing isrnaclong.py:780 says was never measured.
+            n3 = [c for c in cands if abs(c[2] - s) <= tol and c[4]
+                  and BAND[0] <= c[3] <= BAND[1]]
             if not n1 or not n2:
                 drop_nomatch += 1
                 continue
-            kept.append((a, b, s, float(np.linalg.norm(c1[a] - c1[b])), n1, n2))
+            kept.append((a, b, s, float(np.linalg.norm(c1[a] - c1[b])), n1, n2, n3))
 
-        for a, b, s, d, n1, n2 in kept:
+        for a, b, s, d, n1, n2, n3 in kept:
             rows.append({"chain": ci, "label": 1, "set": "pos", "i": a, "j": b,
                          "sep": s, "d": d})
-            for sname, pool in (("N1", n1), ("N2", n2)):
+            for sname, pool in (("N1", n1), ("N2", n2), ("N3", n3)):
+                if not pool:
+                    continue
                 take = rng.choice(len(pool), size=min(per_pos, len(pool)), replace=False)
                 for t in take:
                     i, j, sep, dd, is_wc = pool[int(t)]
@@ -325,13 +399,18 @@ def score_pair(seq, names, i, j, d):
     # consistent; nothing inside rcm.py is changed.
     rt = compute_rcm_score(up.replace("U", "T"), dn.replace("U", "T"))
     wc = 1.0 if (names[i], names[j]) in WCP else 0.0
+    ma = method_agreement_map(seq).get((min(i, j), max(i, j)), 0.0)
     return {
+        "method_agree": ma,
         "rcm_confidence": r["confidence"],
         "rcm_crossing": float(r["crossing_total"]),
         "rcm_density": dd["crossing_density"],
         "rcm_confidence_T": rt["confidence"],
         "rcm_crossing_T": float(rt["crossing_total"]),
         "wc_identity": wc,
+        # the two channels multiplied: does the folding prediction still separate anything once
+        # the base-chemistry lookup is applied on top of it
+        "ma_x_wc": ma * wc,
         "wc_x_geom": wc * float(np.exp(-0.5 * ((d - BAND_CENTRE) / BAND_SIGMA) ** 2)),
         "geom_in_band": 1.0 if BAND[0] <= d <= BAND[1] else 0.0,
         "flank_up": float(len(up)),
@@ -395,16 +474,34 @@ def main():
           f"({args.shuffles} shuffles) in {time.time() - t0:.1f}s")
     print()
 
-    for sname in ("N1", "N2"):
+    for sname in ("N1", "N2", "N3"):
         m = (sets == sname) | (labels == 1)
         lab = labels[m]
-        print(f"=== negative set {sname} ({'band-matched, non-WC' if sname == 'N1' else 'separation-matched, any identity, any distance'}) ===")
+        desc = {"N1": "band-matched, non-WC -- geometry held fixed, chemistry removed",
+                "N2": "separation-matched, any identity, any distance -- geometry dominates",
+                "N3": "band-matched AND base-complementary -- chemistry and geometry BOTH held "
+                      "fixed, so only the prediction can separate"}[sname]
+        print(f"=== negative set {sname} ({desc}) ===")
         print(f"  n_pos={int(lab.sum())}  n_neg={int((~lab.astype(bool)).sum())}")
         sub = [r for r, k in zip(rows, m) if k]
+        if not sub:
+            print(f"=== negative set {sname}: no rows ===")
+            print()
+            continue
         ps = [r["sep"] for r in sub if r["label"] == 1]
         ns = [r["sep"] for r in sub if r["label"] == 0]
         pd = [r["d"] for r in sub if r["label"] == 1]
         nd = [r["d"] for r in sub if r["label"] == 0]
+        if not ns or not nd:
+            print(f"  n_neg=0. The pool is empty, and empty BY CONSTRUCTION rather than by a thin")
+            print(f"  database: boltzmann_bonded._chain_residues accepts a pair exactly when it is")
+            print(f"  Watson-Crick compatible, at least {MIN_SEP} residues apart, and inside the")
+            print(f"  C1'-C1' band {BAND}. N3 asks for the same three conditions and NOT accepted,")
+            print(f"  so it has no members anywhere, on any number of chains.")
+            print(f"  Consequence: no score can be tested for information BEYOND chemistry and")
+            print(f"  geometry on this database, because the label is that conjunction.")
+            print()
+            continue
         print(f"  separation  pos [5/25/50/75/95]: {pct(ps)}")
         print(f"  separation  neg [5/25/50/75/95]: {pct(ns)}")
         print(f"  C1'-C1' A   pos [5/25/50/75/95]: {pct(pd)}")
@@ -430,16 +527,25 @@ def main():
                   f"{sh:9.4f} {p - sh:10.4f}")
         print()
         print(f"  paired cluster bootstrap (AUC difference, 95% CI, p = share <= 0):")
-        for a, b in (("rcm_confidence", "wc_identity"), ("rcm_confidence", "wc_x_geom"),
-                     ("rcm_confidence", "rcm_density"),
-                     ("rcm_confidence_T", "rcm_confidence"),
-                     ("rcm_confidence_T", "wc_identity"), ("rcm_density", "wc_identity")):
+        comps = [("rcm_confidence", "wc_identity"), ("rcm_confidence", "wc_x_geom"),
+                 ("rcm_confidence", "rcm_density"),
+                 ("rcm_confidence_T", "rcm_confidence"),
+                 ("rcm_confidence_T", "wc_identity"), ("rcm_density", "wc_identity"),
+                 ("method_agree", "wc_identity"), ("method_agree", "rcm_confidence"),
+                 ("method_agree", "wc_x_geom"),
+                 ("ma_x_wc", "wc_identity"), ("ma_x_wc", "method_agree")]
+        # on N3 both reference scores are 1.0 for every row, so those three comparisons are
+        # degenerate there and only the rcm one is shown
+        if sname == "N3":
+            comps = [("method_agree", "rcm_confidence")]
+        for a, b in comps:
             p, lo, hi, pv = paired_boot(labels[m], vals["real"][a][m], vals["real"][b][m],
                                         cid[m], args.boot, rng)
             print(f"    {a} - {b}: {p:+.4f} [{lo:+.4f}, {hi:+.4f}]  p={pv:.3f}")
         if args.shuffles >= 1:
             print("  real vs shuffled, same rows (the sequence-specific component):")
-            for s in ("rcm_confidence", "rcm_confidence_T", "wc_identity"):
+            for s in ("rcm_confidence", "rcm_confidence_T", "method_agree", "ma_x_wc",
+                      "wc_identity"):
                 p, lo, hi, pv = paired_boot(labels[m], vals["real"][s][m],
                                             vals["shuf0"][s][m], cid[m], args.boot, rng)
                 print(f"    {s}: {p:+.4f} [{lo:+.4f}, {hi:+.4f}]  p={pv:.3f}")
