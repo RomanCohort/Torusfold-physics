@@ -76,10 +76,11 @@ sample_bonded_chain.py 不能直接改成那个：它刻意只跑 P 原子的四
 
 ## 六、到那台机器上的顺序
 
-**先把 commit 钉住。** 下面每个数字都是 `b2d0641` 上的：
+**先把 commit 钉住。** 下面每个数字都是 `6e7a44b` 上的——那是最后一次改动代码的提交，
+之后的提交只动文档，不动任何数字：
 
 ```bash
-git checkout b2d0641                 # 或者 clone 之后 git pull
+git checkout 6e7a44b                 # clone 之后用这个哈希，别用分支尖
 python -m pytest tests/ -q           # 135 个测试，确认环境对
 python scripts/audit_field_state.py  # 全部在场常数 + 哪条路径是活的
 ```
@@ -96,7 +97,7 @@ python scripts/audit_field_state.py  # 全部在场常数 + 哪条路径是活�
 
 有 GPU 就先重量一次，别拿这个数排计划。
 
-**第 1 步：把基线复现出来，对不上就别往下走。** `ibi_round0.py 8 8000` 在 `b2d0641` 上应给出：
+**第 1 步：把基线复现出来，对不上就别往下走。** `ibi_round0.py 8 8000` 在 `6e7a44b` 上应给出：
 
 | 坐标 | sim/ref |  | 坐标 | sim/ref |
 | :-- | --: | :-- | :-- | --: |
