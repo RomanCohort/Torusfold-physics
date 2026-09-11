@@ -31,6 +31,11 @@ the window fixed while the run grows. 0 or omitted means NSTEPS // 5, the old be
 The progress line reports each coordinate's sim/ref and the joint mean |ln(sim/ref)| over the
 window SO FAR, so one long run shows whether the estimate has stopped moving. Before this it
 printed sim/1D, which is the coupling correction and not the acceptance number.
+
+BUT a cumulative number cannot establish stationarity on its own: it is one average over
+everything seen so far, so a good early stretch hides a bad later one. The final report splits
+the sampling window into --blocks=N disjoint equal-TIME blocks and gives each its own J. Read
+the spread of those, not the movement of the cumulative line.
 """
 import sys
 from pathlib import Path
@@ -49,6 +54,15 @@ NSTEPS = int(sys.argv[2]) if len(sys.argv) > 2 else 20000
 IDX = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 FRICTION = float(sys.argv[4]) if len(sys.argv) > 4 else 0.1
 STRIDE = int(sys.argv[5]) if len(sys.argv) > 5 else 25
+
+
+def _opt_int(name, default):
+    """--name=N out of argv, leaving the positional arguments untouched."""
+    pre = f"--{name}="
+    for a in sys.argv[1:]:
+        if a.startswith(pre):
+            return int(a[len(pre):])
+    return default
 NPZ = REPO / "results" / "boltzmann_tables_clean.npz"
 SEED = 20260218
 
@@ -86,6 +100,17 @@ print("field: " + "  ".join(f"{n}={getattr(C, n)}" for n in _FINGERPRINT))
 import inspect as _inspect
 _cap = _inspect.signature(C.cg_energy_forces).parameters["force_cap"].default
 print(f"force_cap={_cap}  mass=110.0 Da  dt=0.002 ps  friction={FRICTION}/ps")
+# The SHAPE of the guide is not a constant, so the fingerprint above cannot see it: a run under
+# the short-range-reward form and a run under the long-range form print the SAME fingerprint.
+# That is the same provenance hole this script's own paragraph says invalidated three earlier
+# runs, so probe the shape directly instead of trusting a list of numbers. With r0 = 1.0,
+# w = 0.2, k = 1: the long-range form gives ~0 at 0.5 nm and ~10 at 3.0 nm, the short-range
+# reward gives ~10 then ~0.
+_gs = C._sigmoid_f(torch.tensor([0.5, 3.0]), 1.0, 1.0, 0.2)[0]
+_gnear, _gfar = float(_gs[0]), float(_gs[1])
+print(f"guide shape: E(0.5 nm)={_gnear:.3f}  E(3.0 nm)={_gfar:.3f}  ("
+      + ("long-range: zero below r0, bounded pull above" if _gnear < _gfar
+         else "SHORT-RANGE REWARD -- the pre-6e7a44b form") + ")")
 # The second B half-kick takes force_fn, so this run is symplectic. It has to be: the
 # non-symplectic fallback pumps energy at dt*omega^2/(4*gamma) of the drag per step, and after
 # K_INTRA was split into its two measured values the stiffest coordinate is C4'-N at
@@ -114,8 +139,31 @@ print("  progress: each column is sim/ref; J is the joint mean |ln(sim/ref)| ove
 # hoisted so the progress line can print the coupling ratio while the run is going
 K_SHIPPED = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_CN,
              "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
-counts = {c: np.zeros(len(TAB[c]["U"]), dtype=np.int64) for c in B.COORDS}
-acc = {c: [0.0, 0.0, 0] for c in B.COORDS}     # sum, sumsq, n
+# Stationarity needs DISJOINT blocks, not a cumulative average. A cumulative J over [burn, t]
+# cannot separate "the window is settling" from "the early part of the window happened to look
+# good": it is one number computed over everything seen so far. That is exactly how the
+# 40-200 ps run read 0.0911 and then climbed to 0.0968 -- the second half was worse and the
+# cumulative average hid it behind the first. So the accumulators are per block and every
+# whole-window number below is the sum over blocks.
+NB = max(_opt_int("blocks", 4), 1)
+b_counts = {b: {c: np.zeros(len(TAB[c]["U"]), dtype=np.int64) for c in B.COORDS}
+            for b in range(NB)}
+b_acc = {b: {c: [0.0, 0.0, 0] for c in B.COORDS} for b in range(NB)}
+b_frames = [0] * NB
+
+
+def _summed():
+    """Whole-window counts and moments, as the sum over the blocks."""
+    ct = {c: np.zeros(len(TAB[c]["U"]), dtype=np.int64) for c in B.COORDS}
+    ac = {c: [0.0, 0.0, 0] for c in B.COORDS}
+    for b in range(NB):
+        for c in B.COORDS:
+            ct[c] += b_counts[b][c]
+            a = b_acc[b][c]
+            ac[c][0] += a[0]
+            ac[c][1] += a[1]
+            ac[c][2] += a[2]
+    return ct, ac
 # Clash watch. The analytical claim about the intra-bead bonds assumes the repulsion never
 # fires, and C4'-N sits at 0.335 nm against a 0.300 nm cutoff, so that is not free.
 clash_min = []
@@ -148,16 +196,20 @@ for step in range(NSTEPS):
     if step == 0:
         print(f"first step {time.time() - t0:.3f} s")
     if step >= burn and step % STRIDE == 0:
+        # which disjoint block this sample falls in; blocks are equal in TIME, not in count
+        blk = min(((step - burn) * NB) // max(NSTEPS - burn, 1), NB - 1)
+        b_frames[blk] += 1
         with torch.no_grad():
             for c in B.COORDS:
                 q = B.coords_of(pos, c).reshape(-1).numpy().astype(np.float64)
-                acc[c][0] += q.sum()
-                acc[c][1] += (q ** 2).sum()
-                acc[c][2] += q.size
+                a = b_acc[blk][c]
+                a[0] += q.sum()
+                a[1] += (q ** 2).sum()
+                a[2] += q.size
                 t = TAB[c]
                 k = np.round((q - t["centre"][0]) / t["binw"]).astype(np.int64)
                 ok = (k >= 0) & (k < len(t["U"]))
-                counts[c] += np.bincount(k[ok], minlength=len(t["U"]))
+                b_counts[blk][c] += np.bincount(k[ok], minlength=len(t["U"]))
             beads = pos.reshape(NREP, -1, 3)
             dd = torch.cdist(beads, beads)
             dd = dd + torch.eye(dd.shape[-1], device=dd.device) * 10.0
@@ -167,8 +219,9 @@ for step in range(NSTEPS):
     if (step + 1) % max(NSTEPS // 10, 1) == 0:
         el = time.time() - t0
         parts, _joint = [], []
+        _ct, _ac = _summed()
         for c in B.COORDS:
-            s1, s2, n = acc[c]
+            s1, s2, n = _ac[c]
             if n:
                 mm = s1 / n
                 ss = float(np.sqrt(max(s2 / n - mm * mm, 0.0)))
@@ -206,6 +259,7 @@ print(f"{'coordinate':10s} {'ref sig':>8s} {'1-D sig':>8s} {'sim sig':>8s} "
       f"{'sim/ref':>8s} {'sim/1D':>7s} {'dU min':>8s} {'dU max':>8s} {'|dU|>1kBT':>10s}")
 print("-" * 86)
 rows = {}
+counts, acc = _summed()
 for c in B.COORDS:
     t = TAB[c]
     s1, s2, n = acc[c]
@@ -223,6 +277,45 @@ for c in B.COORDS:
           f"{sig / t['sigma']:8.3f} {sig / s1d:7.3f} {dU.min():8.2f} {dU.max():8.2f} "
           f"{frac:10.3f}")
 print()
+# ── stationarity: disjoint blocks of the same sampling window, each with its own J ──
+# This is the instrument the cumulative line cannot replace. If the blocks agree, the window is
+# a sample of one distribution and a cumulative J over it means something. If they do not, the
+# run has not reached the stationary distribution and no residual taken over it is an
+# equilibrium number -- which is what the 40-200 ps run showed when its cumulative J dipped to
+# 0.0911 and then climbed back to 0.0968.
+if NB > 1:
+    print(f"=== stationarity: {NB} disjoint blocks of the sampling window ===")
+    print(f"{'block':>5s} {'window (ps)':>15s} {'frames':>7s} {'J':>7s}  "
+          + "  ".join(f"{c[:5]:>5s}" for c in B.COORDS))
+    print("-" * (37 + 7 * len(B.COORDS)))
+    _Jb = []
+    for b in range(NB):
+        lo = burn + (NSTEPS - burn) * b // NB
+        hi = burn + (NSTEPS - burn) * (b + 1) // NB
+        parts, js = [], []
+        for c in B.COORDS:
+            s1, s2, n = b_acc[b][c]
+            if n:
+                mm = s1 / n
+                ss = float(np.sqrt(max(s2 / n - mm * mm, 0.0)))
+                r = ss / TAB[c]["sigma"] if TAB[c]["sigma"] > 0 else float("nan")
+                parts.append(f"{r:5.3f}")
+                if r == r and r > 0:
+                    js.append(abs(float(np.log(r))))
+            else:
+                parts.append("   --")
+        j = float(np.mean(js)) if js else float("nan")
+        _Jb.append(j)
+        print(f"{b + 1:5d} {lo * 0.002:6.1f}-{hi * 0.002:6.1f} {b_frames[b]:7d} {j:7.4f}  "
+              + "  ".join(parts))
+    _lo, _hi = min(_Jb), max(_Jb)
+    _rel = (_hi - _lo) / _lo if _lo > 0 else float("nan")
+    print(f"  block J spread: {_lo:.4f} to {_hi:.4f}  ({_rel * 100:.1f} percent of the lowest)")
+    print("  Rule of thumb: within a few percent the blocks are consistent and the window is a"
+          " sample of one distribution. Tens of percent means the run is still drifting and any"
+          " residual over it is a mixture, not an equilibrium value. The per-coordinate columns"
+          " say WHICH coordinate is moving.")
+    print()
 print("sim/1D is the coupling correction, and it is the whole content of the IBI step:")
 print("where it is 1.0 the coupled chain already reproduces the single-coordinate result.")
 print("sim/ref mixes that with the choice of k itself, which is a separate question.")

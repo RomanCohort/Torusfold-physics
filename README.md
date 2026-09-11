@@ -388,16 +388,22 @@ coordinate by chemical identity. **No measurement** means exactly that.
 - **Three terms are 91.55 percent of the energy on a linear reference** (`bsj closure` 68.17,
   `bsj contact` 23.46). They act on `P(0)-P(L-1)`, which only exists in a circular molecule. A run
   on a linear chain should set all three to zero and say so in its provenance line.
-- **Every IBI round-0 residual in this file is a transient, not an equilibrium number.**
-  `ibi_round0.py` throws away only the first 3.2 ps of a 16 ps run (`burn = NSTEPS // 5`).
-  On the same field and the same seed, sampling 16-80 ps instead gives a joint residual of
-  0.1330 against the 0.2937 the default window reports, and it is still moving at 80 ps. So
-  0.2937, and the 0.3263 that `_sigmoid_f`'s correction moved it to, are two transients on the
-  same window: comparable to each other, not readable as this field's fit quality. Section 3az.
-- **The coupled chain is softer than the single-coordinate prediction, and how much is open.**
-  The transient window puts sim/1D at 1.15 to 1.70 for every bonded coordinate but the dihedral
-  (0.97). The 16-80 ps window puts the same range at 1.06 to 1.18. That residual is coupling and
-  belongs to IBI, not to another k.
+- **The residual depends on the sampling window, and the converged window is much better.**
+  `ibi_round0.py` used to throw away only the first 3.2 ps of a 16 ps run (`burn = NSTEPS // 5`),
+  which reports a transient: joint 0.3263 on the corrected field, 0.2937 before it. With the burn
+  set separately and a 40-200 ps window, the same field gives **0.0968**, and three of the six
+  coordinates land on the reference almost exactly (intra_cn **1.000**, stack 0.992, intra_pc
+  1.010). Read `--blocks=N` and judge by the block spread: a cumulative number cannot tell
+  a settled window from a lucky early one, which is how the 40-200 ps run read 0.0911 before
+  climbing to 0.0968. Section 3ba.
+- **The coupling does not push every coordinate the same way.** On the converged window bb_bond
+  is 12 percent wide, while angle and dihedral are 10 and 29 percent NARROW. The field is not
+  simply too soft. The dihedral is over-constrained and owns 59 percent of the joint residual,
+  and that is the thing IBI iterates on -- its one-dimensional prediction is correct by
+  construction, so no other k will fix it.
+- **200 ps is not yet a stationary distribution.** The block spread and a dihedral that is still
+  narrowing between 40 and 200 ps both say so. Until the blocks agree, any residual is a mixture
+  and is not a valid input to an IBI update.
 - **The minimiser in `check_field_after_fix.py` currently stalls.** Six restarts, max abs F
   690.19 kJ/mol/nm against a 236.3 force floor, so that script's starting point is not a true
   minimum. This is the one open item in the acceptance table below.
