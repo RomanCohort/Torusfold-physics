@@ -65,10 +65,16 @@ print("field: " + "  ".join(
     f"{n}={getattr(C, n)}" for n in
     ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_PAIR", "K_ANGLE", "K_DIH", "K_BPP",
      "K_STACK", "K_CLASH", "K_BSJ", "K_BSJ_GUIDE")))
-print("second B half-kick: non-symplectic fallback (no force_fn passed). At gamma "
-      f"{FRICTION} and dt 0.002 the pump is dt*omega^2/(4*gamma) = "
-      f"{0.002 * 3.015 ** 2 / (4 * FRICTION):.4f} of the drag per step, so the stationary "
-      "state is perturbed at that level and this is not the source of any large effect.")
+# The second B half-kick takes force_fn, so this run is symplectic. It has to be: the
+# non-symplectic fallback pumps energy at dt*omega^2/(4*gamma) of the drag per step, and after
+# K_INTRA was split into its two measured values the stiffest coordinate is C4'-N at
+# 36399.2 kJ/mol/nm^2 over a 55 amu reduced mass, omega = sqrt(36399.2/55) = 25.73 /ps. At
+# gamma = 0.1 and dt = 0.002 that ratio is dt*omega^2/(4*gamma) = 3.31 -- the pump is more than
+# three times the drag, so the fallback would heat the intra-bead bonds rather than merely
+# perturb them. The extra force evaluation doubles the cost and is worth it here.
+print(f"second B half-kick: symplectic (force_fn recomputes at the post-update coordinates). "
+      f"Without it the stiffest coordinate would pump at "
+      f"{0.002 * (36399.2 / 55.0) / (4 * FRICTION):.2f}x the drag per step.")
 print()
 
 pos = torch.tensor(s0["pos"].reshape(1, 3 * L, 3), dtype=torch.float64).repeat(NREP, 1, 1)
@@ -80,7 +86,7 @@ temps = torch.full((NREP,), 300.0, dtype=torch.float64)
 torch.manual_seed(SEED)
 burn = NSTEPS // 5
 # hoisted so the progress line can print the coupling ratio while the run is going
-K_SHIPPED = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA, "intra_cn": C.K_INTRA,
+K_SHIPPED = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_CN,
              "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
 counts = {c: np.zeros(len(TAB[c]["U"]), dtype=np.int64) for c in B.COORDS}
 acc = {c: [0.0, 0.0, 0] for c in B.COORDS}     # sum, sumsq, n
@@ -90,6 +96,16 @@ clash_min = []
 clash_below = 0
 import time
 t0 = time.time()
+def _forces_at(p):
+    """Fresh forces at the post-update coordinates, for the symplectic tail kick.
+
+    The cell list has to be rebuilt here rather than reused: it is built from positions.
+    """
+    cl2 = C.GPUCellList(cell_size=1.5)
+    cl2.build(p)
+    return C.cg_energy_forces(p, ij, pw, cell_list=cl2)[1]
+
+
 for step in range(NSTEPS):
     with torch.no_grad():
         cl = C.GPUCellList(cell_size=1.5)
@@ -97,7 +113,7 @@ for step in range(NSTEPS):
         e, f = C.cg_energy_forces(pos, ij, pw, cell_list=cl)
         pos, vel = C.batch_langevin_step(pos, vel, f, temps,
                                          dt_ps=0.002, mass_amu=110.0,
-                                         friction=FRICTION)
+                                         friction=FRICTION, force_fn=_forces_at)
     if step == 0:
         print(f"first step {time.time() - t0:.3f} s")
     if step >= burn and step % STRIDE == 0:
