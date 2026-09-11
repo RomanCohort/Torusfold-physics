@@ -18,8 +18,8 @@ If the shipped field already matches the reference, dU is flat and IBI has nothi
 is not flat, this is the correction IBI would apply on its first round, and its size says
 whether the rest of the loop is worth running.
 
-The field is used exactly as shipped, including the 200 kJ/mol/nm force cap, because that is
-what the pipeline runs.
+The field is used exactly as shipped, including its force cap (force_cap's default, read from the
+signature below rather than written here), because that is what the pipeline runs.
 
 Run: python scripts/ibi_round0.py [n_rep] [n_steps] [struct_idx]
 """
@@ -61,10 +61,22 @@ print(f"full field as shipped, 300 K, mass 110 Da, friction {FRICTION}/ps, "
 # found after they started -- a thermostat at 0.4 T, an effective mass 100x too large, and a
 # K_INTRA 52x too soft -- and none of them recorded which field they had actually run against,
 # so each result had to be judged by its numbers alone. Print the field's fingerprint instead.
-print("field: " + "  ".join(
-    f"{n}={getattr(C, n)}" for n in
-    ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_PAIR", "K_ANGLE", "K_DIH", "K_BPP",
-     "K_STACK", "K_CLASH", "K_BSJ", "K_BSJ_GUIDE")))
+# The list has to name EVERY constant whose value changes the sampled distribution. The four
+# backbone terms were added after this script was written, and without them here a run under the
+# old field and a run under the new one print the same fingerprint -- which is the provenance hole
+# the paragraph above says invalidated three earlier runs.
+_FINGERPRINT = ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_INTRA_PN",
+                "K_LINK_CP", "K_LINK_NP", "K_LINK_NC",
+                "K_PAIR", "K_ANGLE", "K_DIH", "K_BPP", "K_STACK",
+                "K_CLASH", "CLASH_SIGMA", "K_BSJ", "K_BSJ_GUIDE")
+_missing = [n for n in _FINGERPRINT if not hasattr(C, n)]
+if _missing:
+    raise RuntimeError(f"the fingerprint names {_missing}, which this module does not define; a "
+                       f"renamed constant would silently drop out of the provenance record")
+print("field: " + "  ".join(f"{n}={getattr(C, n)}" for n in _FINGERPRINT))
+import inspect as _inspect
+_cap = _inspect.signature(C.cg_energy_forces).parameters["force_cap"].default
+print(f"force_cap={_cap}  mass=110.0 Da  dt=0.002 ps  friction={FRICTION}/ps")
 # The second B half-kick takes force_fn, so this run is symplectic. It has to be: the
 # non-symplectic fallback pumps energy at dt*omega^2/(4*gamma) of the drag per step, and after
 # K_INTRA was split into its two measured values the stiffest coordinate is C4'-N at
@@ -93,7 +105,12 @@ acc = {c: [0.0, 0.0, 0] for c in B.COORDS}     # sum, sumsq, n
 # Clash watch. The analytical claim about the intra-bead bonds assumes the repulsion never
 # fires, and C4'-N sits at 0.335 nm against a 0.300 nm cutoff, so that is not free.
 clash_min = []
+# The live range is CLASH_SIGMA. This used to count against CLASH_DIST, which is retired: it is
+# 0.30 and nothing reads it, so the watch was blind to every pair between 0.30 and 0.3975 that the
+# shipped wall does act on. Both are counted now, so a comparison against the old number stays
+# possible without mistaking it for the live one.
 clash_below = 0
+clash_below_live = 0
 import time
 t0 = time.time()
 def _forces_at(p):
@@ -132,6 +149,7 @@ for step in range(NSTEPS):
             dd = dd + torch.eye(dd.shape[-1], device=dd.device) * 10.0
             clash_min.append(float(dd.min()))
             clash_below += int((dd < C.CLASH_DIST).sum())
+            clash_below_live += int((dd < C.CLASH_SIGMA).sum())
     if (step + 1) % max(NSTEPS // 10, 1) == 0:
         el = time.time() - t0
         parts = []
@@ -151,8 +169,11 @@ for step in range(NSTEPS):
 el = time.time() - t0
 print(f"done in {el:.0f} s, {NSTEPS / el:.1f} steps/s")
 print()
-print(f"clash watch: cutoff {C.CLASH_DIST:.3f} nm, closest bead pair ever {min(clash_min):.4f} nm, "
-      f"pairs below the cutoff over the run {clash_below}")
+print(f"clash watch: live range {C.CLASH_SIGMA:.4f} nm, retired cutoff {C.CLASH_DIST:.3f} nm; "
+      f"closest bead pair ever {min(clash_min):.4f} nm")
+print(f"  pair instances below the live range : {clash_below_live}")
+print(f"  pair instances below the old 0.300 : {clash_below}  "
+      f"(the number an earlier version of this script reported as if it were the live one)")
 print()
 
 # reference density from the stored table, on the same bins
