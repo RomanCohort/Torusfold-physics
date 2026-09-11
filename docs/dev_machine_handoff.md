@@ -43,15 +43,27 @@ git clone https://gitlab.igem.org/2026/software/jlu-fbh/torusfold-hybrid.git
 
 ```
 Resolve-DnsName github.com          # 127.0.0.1 -> hosts 拦的
-curl.exe -sS -m 15 --resolve github.com:443:140.82.112.4 -o NUL -w '%{http_code}' https://github.com   # 200 -> 真站可达
+curl.exe -sS -m 15 --resolve github.com:443:20.205.243.166 -o NUL -w '%{http_code}' https://github.com  # 200 -> 真站可达
 ```
 
 不碰 hosts 的一次性绕法（**必须带 `http.sslBackend=schannel`**：这个 Windows 构建只编了 schannel，
 单用 `http.curloptResolve` 会走 libcurl 后端并报 `fatal: Unsupported SSL backend 'openssl'`）：
 
 ```
-git -c http.sslBackend=schannel -c http.curloptResolve=github.com:443:140.82.112.4 push github main:master
+git -c http.sslBackend=schannel -c http.curloptResolve=github.com:443:20.205.243.166 push github main:master
 ```
+
+**IP 要挑，不能抄。** GitHub 的接入点从这台机器看着很不稳——`140.82.112.4` 有时 200 有时超时，
+抄一个写死的进去就会白撞几次。先探一遍再推：
+
+```
+foreach ($ip in '20.205.243.166','140.82.116.3','140.82.113.4','140.82.112.3') {
+  $c = curl.exe -sS -m 8 --resolve github.com:443:$ip -o NUL -w '%{http_code} %{time_total}' https://github.com 2>&1
+  "$ip -> " + ($c -join ' ')
+}
+```
+
+实测最快的是 **20.205.243.166**（亚洲接入点，0.88 s），`140.82.112.4` 在探针里已经超时。
 
 GitLab（origin）不走那张表，正常推送。
 
