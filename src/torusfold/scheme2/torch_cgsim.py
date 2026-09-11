@@ -127,7 +127,24 @@ K_BSJ = 600.0       # BSJ closure ← lowered from 800 to 600
 K_BSJ_GUIDE = 100.0 # BSJ closure guiding force (logistic sigmoid)
 K_PAIR_GUIDE = 100.0 # far/long-range pair guiding force (logistic sigmoid)
 K_BSJ_CONTACT = 50.0 # contacts near the BSJ (distance-decaying)
-K_BPP = 600.0       # BPP soft constraint ← lowered from 1000 to 600
+# BPP soft constraint. E = -K_BPP * w * softplus((1.0 - r)/0.3), so its force is
+# K_BPP / 0.3 * w * sigmoid(x), and at the target distance r = 1.0 nm the sigmoid reads 0.5
+# and every pair feels K_BPP / 0.6 whatever the geometry. At the shipped 600 that is 1000
+# kJ/mol/nm, five times the 200 cap, which is why 3x attributes 22.31 of the field's 28.44
+# percent cap saturation to this one term.
+#
+# kBT/sigma^2 does not transfer here: softplus is one-sided and has no equilibrium point, so
+# there is no curvature to match. The criterion used instead is that two terms restraining
+# the same quantity should not differ in force scale by a factor of fifty. The harmonic WC
+# pair term's scale is kBT/sigma_NN, so K_BPP / 0.6 = kBT / sigma_NN, and with the observed
+# sigma_NN = 0.112 nm over 561 pairs that gives 13.4.
+#
+# calibrate_bpp.py sweeps it: the fold signal under register-shift decoys holds 16/16 from
+# 10 up to 600 and collapses to 8/16 at 3, while cap saturation jumps from about 6.5 percent
+# below 100 to 29 percent at 300. The criterion value 13.4 sits in the safe region on both.
+# The margin is thin, though -- the signal cliff is between 3 and 10 -- and about 6.5 percent
+# of beads remain on the cap even at K_BPP = 3, so other terms contribute that floor.
+K_BPP = 13.4        # BPP soft constraint (0.6 * kBT / sigma_NN; was 600.0)
 
 # ── Ion-model constants (Plan A) ──
 # Mg2+ concentration-dependent screening: λ_D = 0.304 / sqrt(c_Mg + c_Na) (nm, Debye screening)
@@ -1215,7 +1232,7 @@ _K_BSJ = 600.0        # lowered from 800 to 600
 _K_BSJ_GUIDE = 100.0
 _K_PAIR_GUIDE = 100.0
 _K_BSJ_CONTACT = 50.0
-_K_BPP = 600.0        # lowered from 1000 to 600
+_K_BPP = 13.4         # kept in step with K_BPP
 _K_MG = 200.0
 _K_GB = 0.73
 _K_SASA = 0.072

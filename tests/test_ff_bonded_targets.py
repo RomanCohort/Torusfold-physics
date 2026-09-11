@@ -86,6 +86,19 @@ def test_maxwell_boltzmann_check_is_not_thirty_times_off():
     assert C.K_DIH < 100.0, f"K_DIH {C.K_DIH} is back in the tuned range"
 
 
+def test_bpp_stiffness_is_not_five_times_the_force_cap():
+    # At the target distance the softplus derivative is sigmoid(0) = 0.5, so this term
+    # applies K_BPP / 0.6 to every pair regardless of geometry. The cap in cg_energy_forces
+    # is 200, and 600/0.6 = 1000, which is why bpp alone saturated 22.31 percent of beads.
+    force_at_target = C.K_BPP / 0.6
+    assert force_at_target < 200.0, (
+        f"bpp applies {force_at_target:.0f} kJ/mol/nm at its own target distance, above the "
+        f"200 cap")
+    # 0.6 * kBT / sigma_NN with sigma_NN = 0.112 nm over 561 observed pairs
+    assert abs(C.K_BPP - 13.4) < 1e-9, (
+        f"K_BPP is {C.K_BPP}, expected 0.6 * kBT / sigma_NN = 13.4")
+
+
 def test_no_frozen_snapshot_of_the_stacking_target():
     assert not hasattr(C, "_R0_STACK"), (
         "torch_cgsim exports _R0_STACK again; a frozen copy of a live constant is how the "
