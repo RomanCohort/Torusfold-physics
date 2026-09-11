@@ -195,7 +195,40 @@ python scripts/ibi_round0.py 8 100000 0 0.1 25 20000 --blocks=8
 - `K_BSJ` / `K_BSJ_GUIDE` / `K_BSJ_CONTACT`——这份数据库里没有一条共价闭合的链。
   在那台机器上也定不了标。
 
-## 七、GPU
+## 七、还要做的实验（按顺序）
+
+**E1 不平，后面全是白跑。** 顺序不是偏好，是依赖：E2/E3/E4 全都要跟 E1 给的窗口比。
+
+| | 实验 | 命令 | 成本 | 判据 |
+| :-- | :-- | :-- | --: | :-- |
+| **E1** | 平稳性 | `ibi_round0.py 8 100000 0 0.1 25 20000 --blocks=8` | 28 min | 块间散布几个 percent |
+| E1b | 不平就加长 | `8 200000 0 0.1 25 40000 --blocks=8` | 56 min | 同上；burn 翻倍用来分辨「还没够」和「窗口滑走」 |
+| **E2** | 多结构 | `8 100000 <IDX> 0.1 25 20000 --blocks=8`，IDX = 1..4 | 4 x 28 min | 把 0.0968 变成分布 |
+| **E3** | 结清 §3ay | 见下 | 28 min | 旧场收敛 J 更大 → 符号改对了 |
+| **E4** | K_PAIR 正经版 | 2 档 x 3 种子，同一收敛窗口 | 6 x 28 min | 差值 > 块间散布才算差 |
+| **E5** | 采样环 | 见第六节第 6 步 | 一天 | **E1 通过才开工** |
+
+**E2 是现在最缺的一条。** 整条 §3ax / §3ay / §3ba 的线只用了一条链（1L2X），而参考是 126 条
+池化的。第三个参数就是结构序号（池子是 `len(pairs) >= 8 and 24 <= L <= 34` 筛出来的）。
+**「一条链的残差」不叫残差，叫轶事。**
+
+**E3 是唯一能翻掉一条已写下结论的实验**，而且它现在才做得起——§3ay 那个「代价 11%」是在瞬态
+窗口上量的。旧现场的 `_sigmoid_f` 会让 `guide shape:` 那行印出 `SHORT-RANGE REWARD`，
+所以顺带把那个探针也验了：
+
+```bash
+git checkout 424e1d7 -- src/torusfold/scheme2/torch_cgsim.py
+python scripts/ibi_round0.py 8 100000 0 0.1 25 20000 --blocks=8    # 先看 guide shape 那行
+git checkout HEAD -- src/torusfold/scheme2/torch_cgsim.py          # 用完立刻还原
+```
+
+**别再做的两件：**
+
+- **不要用「单种子两档」比 K_PAIR。** 漂移的尺子已经有了：累计 J 在 100 ps 后升了 6%。
+  效应若比它小，那是噪声。差值必须大于块间散布。
+- **不要在 E1 之前碰采样环。** 残差还在漂的时候，更新式更新的是漂移。
+
+## 八、GPU
 
 torch_cgsim 自己挑设备（torch.device("cuda" if torch.cuda.is_available() else "cpu")），
 determine_k_bb.py、check_field_after_fix.py 等照此。ROCm 机器上 torch 的 cuda 命名空间同样可用。

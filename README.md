@@ -396,11 +396,14 @@ coordinate by chemical identity. **No measurement** means exactly that.
   1.010). Read `--blocks=N` and judge by the block spread: a cumulative number cannot tell
   a settled window from a lucky early one, which is how the 40-200 ps run read 0.0911 before
   climbing to 0.0968. Section 3ba.
-- **The coupling does not push every coordinate the same way.** On the converged window bb_bond
-  is 12 percent wide, while angle and dihedral are 10 and 29 percent NARROW. The field is not
-  simply too soft. The dihedral is over-constrained and owns 59 percent of the joint residual,
-  and that is the thing IBI iterates on -- its one-dimensional prediction is correct by
-  construction, so no other k will fix it.
+- **The coupling does not push every coordinate the same way, and the deficits are real.** On the
+  converged window bb_bond is 12 percent wide, while angle and dihedral are 10 and 29 percent
+  NARROW. The obvious excuse -- that the reference is pooled over 126 chains while a run is
+  one chain -- is measured and rejected: `scripts/decompose_bonded_spread.py` puts the largest
+  sim/ref a single chain can reach at **0.961 to 0.998** for every bonded coordinate. So the
+  dihedral's 28 percent deficit is headroom, not a pooling artefact, and it owns 59 percent of
+  the joint residual. No other `k` can fix it: its one-dimensional prediction is exact by
+  construction, so it needs a potential whose shape is not `kBT/sigma^2` -- which is what IBI is.
 - **200 ps is not yet a stationary distribution.** The block spread and a dihedral that is still
   narrowing between 40 and 200 ps both say so. Until the blocks agree, any residual is a mixture
   and is not a valid input to an IBI update.
