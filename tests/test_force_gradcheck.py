@@ -15,12 +15,19 @@ GB/SA pair list from a hard 1.0 nm cell filter on every call, so a pair crossing
 the energy by 2.0 * exp(-1.0/0.304)/1.0 = 0.074 kJ/mol with no corresponding term in the
 gradient. Finite differences of a step function return the step size divided by 2h.
 
-So the full path cannot be checked this way at any h, and asserting on it was asserting
-something impossible. What the suite checks now:
+That was half the story, and the other half was a wrong force. The pair-summed terms -- WC
+pairing, the pair guide and BPP -- accumulated their forces with an indexed in-place add
+(total_F[:, NN(pi)] += f_p). That keeps one write per duplicate index and silently drops the
+rest, and a residue can appear in several pairs, so the force was up to 27 percent short of
+its own energy gradient. Measured on 1ET4, the pair term's force at one residue was 27.09
+against the true 94.88 kJ/mol/nm. Both causes are fixed (a C2 switching function on the GB/SA
+pair energy, index_add_ for the pair-summed forces) and the full path is gradchecked below.
+
+What the suite checks now:
 
   * the thirteen analytic terms, through cg_force_terms, which do have continuous gradients
   * the force cap, which is a constraint on the output and gets its own test
-  * the GB discontinuity itself, as a measured fact, so that fixing it is a visible event
+  * the full path itself, whose analytic force now matches a finite difference of its energy
 
 Skipped automatically when torch / torch_cgsim is unavailable.
 """
@@ -105,15 +112,23 @@ def test_the_force_cap_actually_caps():
         assert torch.allclose(F_cap[under], F_raw[under], atol=1e-9)
 
 
-def test_gb_energy_is_discontinuous_which_is_why_it_cannot_be_gradchecked():
-    """A measured defect, not an aspiration.
+def test_the_full_path_energy_gradient_matches_the_analytic_force():
+    """The full path, gradchecked for real. This replaces the discontinuity record.
 
-    cg_energy_forces rebuilds the GB/SA pair list from a hard 1.0 nm cell filter each call, so
-    a pair entering or leaving changes the energy by a finite amount with no term in the
-    gradient. Moving one bead by 1e-4 nm should make the forward and backward differences
-    ASYMMETRIC; the asymmetry is the jump. If a switching function is ever added the
-    asymmetry should collapse and this test should be replaced by a real gradcheck of the
-    full path.
+    What this test used to be: test_gb_energy_is_discontinuous_which_is_why_it_cannot_be_
+    gradchecked, which moved one bead 1e-4 nm at a time and asserted the forward/backward
+    asymmetry was above 1e-6. It measured 3.735352e-02 kJ/mol, the GB/SA cell filter dropping
+    pairs out of the list, and its docstring said that if a switching function was ever added
+    the asymmetry should collapse and this test should be replaced by a real gradcheck. That
+    switching function is in cg_energy_forces now (GB_SWITCH_ON = 0.8 nm, GB_SWITCH_OFF =
+    1.0 nm), and the pair-summed forces accumulate duplicates with index_add_. The same
+    asymmetry statistic now reads 4.883e-04 kJ/mol, which is the float32 resolution of an
+    energy of ~7000 kJ/mol, not a step in the potential.
+
+    So both halves are checked here: the asymmetry is recorded as a much smaller number, and
+    the finite difference of the energy is compared with the analytic force over all 27 beads
+    x 3 coordinates. Measured rel L2 at h = 1e-4: 0.003365 (0.001242 at h = 1e-3; 0.026841 at
+    h = 1e-5, where the float32 energy quantisation dominates).
     """
     pos, pairs, pair_w = _make_system()
     h = 1e-4
@@ -128,7 +143,18 @@ def test_gb_energy_is_discontinuous_which_is_why_it_cannot_be_gradchecked():
         lo = pos.clone(); lo[:, i, 0] -= h
         ep, e0, em = E(hi), E(pos), E(lo)
         worst = max(worst, abs((ep - e0) - (e0 - em)) / 2.0)
-    assert worst > 1e-6, (
-        "the GB energy is now smooth under a 1e-4 nm displacement; if a switching function "
-        "was added, replace this test with a real finite-difference gradcheck of the full "
-        "path")
+    assert worst < 1e-3, (
+        f"the GB energy asymmetry is {worst:.3e} kJ/mol, above the 1e-3 the switching "
+        f"function was verified at (it was 3.735352e-02 before the switch)")
+
+    fd = torch.zeros_like(pos)
+    for i in range(pos.shape[1]):
+        for d in range(3):
+            hi = pos.clone(); hi[:, i, d] += h
+            lo = pos.clone(); lo[:, i, d] -= h
+            fd[:, i, d] = -(E(hi) - E(lo)) / (2.0 * h)
+    _e, F = tc.cg_energy_forces(pos, pairs, pair_w, force_cap=None, cell_list=None)
+    rel = _rel_l2(F, fd)
+    assert rel < 0.02, (
+        f"the full cg_energy_forces force deviates from a finite difference of its own energy "
+        f"(relative L2 {rel:.4f})")

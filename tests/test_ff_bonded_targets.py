@@ -12,8 +12,18 @@ cg_energy_forces read the live global -- so changing the constant would have fix
 and silently left the other. That freeze is gone and these tests keep it gone, because the
 failure mode is invisible: nothing raises, the two paths just disagree.
 
+It was not one constant. Twenty frozen copies lived in a block of their own -- _K_BOND_BB,
+_K_PAIR, _R0_BB and seventeen more, each carrying a comment saying it was "kept in step" with
+a live global that nothing kept it in step with. Removing _R0_STACK left the rest of that
+apparatus in place. It is all gone now: every term in cg_energy_forces,
+cg_forces_explicit_batched, cg_forces_explicit and cg_energy_3bead reads the live global.
+The tests below reject any module-level alias reappearing (a bare "X = Y" evaluates once at
+import, which IS the freeze) and perturb every constant in the block to check that each path
+that implements the term moves with it.
+
 Run: python tests/test_ff_bonded_targets.py
 """
+import ast
 import math
 import sys
 from pathlib import Path
@@ -25,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import torusfold.scheme2.torch_cgsim as C
 
 
-def _chain(L=8):
+def _chain(L=8, pair_ij=()):
     """A straight, evenly spaced backbone in nm, enough to exercise every bonded term."""
     pos = np.zeros((L, 3, 3))
     for i in range(L):
@@ -34,8 +44,36 @@ def _chain(L=8):
         pos[i, 1] = base + np.array([0.39 * 0.3, 0.39 * 0.95, 0.0])
         pos[i, 2] = pos[i, 1] + np.array([0.335 * 0.2, 0.335 * 0.9, 0.335 * 0.4])
     tensor = torch.tensor(pos.reshape(1, 3 * L, 3), dtype=torch.float64)
-    pairs = torch.zeros((0, 2), dtype=torch.long)
+    if len(pair_ij):
+        pairs = torch.tensor(list(pair_ij), dtype=torch.long).reshape(-1, 2)
+    else:
+        pairs = torch.zeros((0, 2), dtype=torch.long)
     return tensor, pairs
+
+
+def _folded_chain(L=8):
+    """A compact, slightly non-planar chain.
+
+    Two terms need geometry rather than a generic chain to be non-negligible: the BSJ guide
+    acts on P(0)-P(L-1), which is 4.13 nm in _chain() and makes it exp(-21) small, and the
+    dihedral term needs the P-P-P-P windows off 0 and 180 degrees or it sits on its own
+    target by accident. Compressing x puts the ends 0.9 nm apart; the z zigzag breaks the
+    planar symmetry.
+    """
+    pos, pairs = _chain(L)
+    pos[0, :, 0] *= 0.9 / (0.59 * (L - 1))
+    for i in range(1, L - 1):
+        pos[0, 3 * i, 2] += 0.06 * (i % 2)
+    return pos, pairs
+
+
+def _clash_chain(L=8):
+    """_folded_chain with one N bead inside CLASH_DIST of a C4' more than two residues away
+    (the neighbour list excludes |i - j| <= 2, so a nearer residue would not see it)."""
+    pos, pairs = _folded_chain(L)
+    near = pos[0, 3 * 0 + 1] + torch.tensor([0.0, 0.0, 0.25], dtype=torch.float64)
+    pos[0, 3 * (L - 2) + 2] = near
+    return pos, pairs
 
 
 def _energies(pos, pairs):
@@ -135,14 +173,12 @@ def test_both_paths_read_the_live_stacking_target():
     pos, pairs = _chain()
     try:
         C.K_STACK = 500.0
-        C._K_STACK = 500.0
         base_unified, base_batched = _energies(pos, pairs)
         C.STACK_R0 = 1.0
         alt_unified, alt_batched = _energies(pos, pairs)
     finally:
         C.STACK_R0 = 1.125
         C.K_STACK = 0.0
-        C._K_STACK = 0.0
     assert base_unified != alt_unified, "cg_energy_forces ignored a change to STACK_R0"
     assert base_batched != alt_batched, (
         "cg_forces_explicit_batched ignored a change to STACK_R0 -- it is reading a frozen "
@@ -197,6 +233,167 @@ def test_both_paths_read_the_live_intra_constants():
         assert base_batched != alt_batched, (
             f"cg_forces_explicit_batched ignored a change to {name} -- it is reading a frozen "
             f"copy, so the two paths would use different intra-residue bonds")
+
+
+# ── every frozen copy in the block, not just _R0_STACK ─────────────────────────────────────
+# The names the explicit-force snapshot block defined (torch_cgsim.py, just above
+# _explicit_forces_bonds). _K_GB and _K_SASA are on the list even though there was never a live
+# K_GB or K_SASA: their numbers were written inline in the GB/SA term, so those two copies were
+# dead code waiting for a reader.
+SNAPSHOT_NAMES = (
+    "_K_BOND_BB", "_K_BOND_INTRA", "_K_PAIR", "_K_STACK", "_K_ANGLE", "_K_DIH",
+    "_K_CLASH", "_K_BSJ", "_K_BSJ_GUIDE", "_K_PAIR_GUIDE", "_K_BSJ_CONTACT",
+    "_K_BPP", "_K_MG", "_K_GB", "_K_SASA",
+    "_R0_BB", "_R0_INTRA_PC", "_R0_INTRA_CN", "_R0_PAIR", "_R0_CLASH",
+)
+
+
+def _three_paths(pos, pairs, weights):
+    """Energy from all three implementations on the same geometry."""
+    cl = C.GPUCellList(cell_size=1.5)
+    cl.build(pos)
+    return (
+        float(C.cg_energy_forces(pos, pairs, weights, cell_list=cl)[0]),
+        float(C.cg_forces_explicit_batched(pos, pairs, weights, cell_list=cl)[0]),
+        float(C.cg_forces_explicit(pos, pairs, weights, cell_list=cl)[0]),
+    )
+
+
+def test_no_frozen_snapshot_of_any_live_constant():
+    present = [name for name in SNAPSHOT_NAMES if hasattr(C, name)]
+    assert not present, (
+        f"torch_cgsim exports {present} again; a module-level copy of a live constant is how "
+        f"one force path came to read a stale value while another read the global")
+
+
+def test_no_module_level_alias_in_the_force_field_source():
+    """A bare "X = Y" at module level is a freeze, whatever the two names are.
+
+    It is evaluated once, at import, so a later retune of Y is invisible to every use of X and
+    nothing raises. ANGLE_K and DIH_K were exactly that. The AST check below cannot be fooled
+    by a name this test file does not know about.
+    """
+    tree = ast.parse(Path(C.__file__).read_text(encoding="utf-8"))
+    aliases = [f"line {node.lineno}: {target.id} = {node.value.id}"
+               for node in tree.body if isinstance(node, ast.Assign)
+               for target in node.targets
+               if isinstance(target, ast.Name) and isinstance(node.value, ast.Name)]
+    assert not aliases, (
+        f"module-level aliases in {Path(C.__file__).name}: {aliases}. Each one binds at import "
+        f"and silently stops tracking the constant it copies")
+
+
+def test_every_live_constant_reaches_all_three_force_paths():
+    """Perturb a live constant; every implementation that has the term must move with it.
+
+    cg_energy_forces, cg_forces_explicit_batched and cg_forces_explicit are three separate
+    implementations of the same field. The snapshot block existed only for the two explicit
+    paths, which is precisely how a retune could move one and not the others.
+
+    The geometries are picked so each term is actually firing -- see _folded_chain for the BSJ
+    guide and the dihedral, _clash_chain for K_CLASH and CLASH_DIST, and the pair list for
+    K_PAIR and PAIR_NN. K_STACK ships at zero, so it is switched on for its case and off
+    again, the same way test_both_paths_read_the_live_stacking_target does it.
+    """
+    folded, _ = _folded_chain()
+    paired_pairs = torch.tensor([[0, 2]], dtype=torch.long)
+    weight = torch.ones(1, dtype=torch.float64)
+    clash, _ = _clash_chain()
+    no_pairs = torch.zeros((0, 2), dtype=torch.long)
+    cases = (
+        ("K_BB", folded, paired_pairs, weight, {}),
+        ("K_INTRA_PC", folded, paired_pairs, weight, {}),
+        ("K_INTRA_CN", folded, paired_pairs, weight, {}),
+        ("K_BSJ", folded, paired_pairs, weight, {}),
+        ("K_ANGLE", folded, paired_pairs, weight, {}),
+        ("K_DIH", folded, paired_pairs, weight, {}),
+        ("K_BSJ_GUIDE", folded, paired_pairs, weight, {}),
+        ("K_PAIR", folded, paired_pairs, weight, {}),
+        ("PAIR_NN", folded, paired_pairs, weight, {}),
+        ("BOND_P_NEXT", folded, paired_pairs, weight, {}),
+        ("BOND_P_C4", folded, paired_pairs, weight, {}),
+        ("BOND_C4_N", folded, paired_pairs, weight, {}),
+        ("K_STACK", folded, paired_pairs, weight, {"K_STACK": 500.0}),
+        ("K_CLASH", clash, no_pairs, None, {}),
+        ("CLASH_DIST", clash, no_pairs, None, {}),
+    )
+    paths = ("cg_energy_forces", "cg_forces_explicit_batched", "cg_forces_explicit")
+    failures = []
+    for name, pos, pair_ij, weights, enable in cases:
+        saved = {key: getattr(C, key) for key in enable}
+        try:
+            for key, value in enable.items():
+                setattr(C, key, value)
+            before = _three_paths(pos, pair_ij, weights)
+            setattr(C, name, getattr(C, name) * 1.5)
+            after = _three_paths(pos, pair_ij, weights)
+        finally:
+            setattr(C, name, getattr(C, name) / 1.5)
+            for key, value in saved.items():
+                setattr(C, key, value)
+        for path, was, now in zip(paths, before, after):
+            if was == now:
+                failures.append(f"{path} ignored a change to {name}")
+    assert not failures, (
+        "a frozen copy is back: " + "; ".join(failures) +
+        ". A term's constant has to reach every implementation that has the term")
+
+
+def test_the_terms_only_cg_energy_forces_has_read_live_constants():
+    """K_PAIR_GUIDE, K_BPP and K_BSJ_CONTACT have no term in either explicit path.
+
+    cg_forces_explicit_batched and cg_forces_explicit implement bonds, BSJ, angle, dihedral,
+    WC pairing, stacking, clash, BSJ guide and GB/SA/Mg -- there is no pair-guide, BPP or
+    BSJ-contact term in them at all, so they cannot respond to these three however the
+    constants are read. The path that does implement them is what has to read the live global:
+    _K_PAIR_GUIDE, _K_BPP and _K_BSJ_CONTACT were harmless only as long as nothing read them.
+    """
+    folded, _ = _folded_chain()
+    paired_pairs = torch.tensor([[0, 2]], dtype=torch.long)
+    weight = torch.ones(1, dtype=torch.float64)
+    long_chain, _ = _chain(20)
+    no_pairs = torch.zeros((0, 2), dtype=torch.long)
+    for name, pos, pair_ij, weights in (
+            ("K_PAIR_GUIDE", folded, paired_pairs, weight),
+            ("K_BPP", folded, paired_pairs, weight),
+            ("K_BSJ_CONTACT", long_chain, no_pairs, None)):
+        cl = C.GPUCellList(cell_size=1.5)
+        cl.build(pos)
+        before = float(C.cg_energy_forces(pos, pair_ij, weights, cell_list=cl)[0])
+        try:
+            setattr(C, name, getattr(C, name) * 1.5)
+            after = float(C.cg_energy_forces(pos, pair_ij, weights, cell_list=cl)[0])
+        finally:
+            setattr(C, name, getattr(C, name) / 1.5)
+        assert after != before, f"cg_energy_forces ignored a change to {name}"
+
+
+def test_kmg_reaches_the_explicit_paths_that_use_it():
+    """K_MG has no term in cg_energy_forces, so "both paths respond" is impossible for it.
+
+    The unified path's Mg pair energy is -c_mg * exp(-r/0.3), written with the concentration
+    argument rather than K_MG; the two explicit paths use -K_MG * exp(-softmin/0.3). That
+    asymmetry predates the snapshot block, but _K_MG was a copy of K_MG, so what can break here
+    is "the paths that have the term read the live one".
+    """
+    folded, _ = _folded_chain()
+    no_pairs = torch.zeros((0, 2), dtype=torch.long)
+    cl = C.GPUCellList(cell_size=1.5)
+    cl.build(folded)
+    before = (
+        float(C.cg_forces_explicit_batched(folded, no_pairs, None, cell_list=cl)[0]),
+        float(C.cg_forces_explicit(folded, no_pairs, None, cell_list=cl)[0]),
+    )
+    try:
+        C.K_MG = C.K_MG * 1.5
+        after = (
+            float(C.cg_forces_explicit_batched(folded, no_pairs, None, cell_list=cl)[0]),
+            float(C.cg_forces_explicit(folded, no_pairs, None, cell_list=cl)[0]),
+        )
+    finally:
+        C.K_MG = C.K_MG / 1.5
+    assert after[0] != before[0], "cg_forces_explicit_batched ignored a change to K_MG"
+    assert after[1] != before[1], "cg_forces_explicit ignored a change to K_MG"
 
 
 if __name__ == "__main__":

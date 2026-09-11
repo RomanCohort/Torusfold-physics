@@ -201,7 +201,10 @@ PAIR_NN = 1.00        # pairing target on N beads; native 0.954 +/- 0.115 nm, un
 STACK_R0 = 1.125
 
 ANGLE_PPP = math.pi * 150.0 / 180.0   # 150 deg; cos -0.866 sits on the native mode -0.875
-ANGLE_K = K_ANGLE
+# There is deliberately no ANGLE_K / DIH_K alias here. A module-level "X = Y" binds once, at
+# import, so it is a frozen copy of Y by construction: retuning the live constant would leave
+# the aliased use site reading the stale value and nothing would raise. Every use below reads
+# K_ANGLE / K_DIH directly, and tests/test_ff_bonded_targets.py fails if an alias reappears.
 
 # Pseudo-torsion P(i)-P(i+1)-P(i+2)-P(i+3). The old target was 180 deg (trans), which
 # describes an extended chain; native RNA sits near 0. Over 10631 observations the signed
@@ -211,7 +214,6 @@ ANGLE_K = K_ANGLE
 # better on held-out structures (native rank 1.12 vs 1.25). It is the value used here.
 # Note openmm_gpu_refiner.py restrains the SAME atom quad with a different target (33 deg).
 DIH_PPPP = math.acos(0.975)
-DIH_K = K_DIH
 CLASH_DIST = 0.30     # nm
 CLASH_CUTOFF = 1.20   # nm
 
@@ -500,7 +502,7 @@ def cg_energy_3bead(
         cosang = (v1 * v2).sum(-1) / (
             _safe_norm(v1, dim=-1, eps=eps) * _safe_norm(v2, dim=-1, eps=eps))
         target_cos = math.cos(ANGLE_PPP)
-        e_angle = (0.5 * ANGLE_K * (cosang - target_cos) ** 2).sum(dim=-1)
+        e_angle = (0.5 * K_ANGLE * (cosang - target_cos) ** 2).sum(dim=-1)
     else:
         e_angle = _safe_zeros((B,), dev)
 
@@ -520,7 +522,7 @@ def cg_energy_3bead(
         cos_dih = (n0 * n1).sum(-1) / (n0_norm * n1_norm)
         cos_dih = cos_dih.clamp(-1.0 + eps, 1.0 - eps)
         target_cos_dih = math.cos(DIH_PPPP)
-        e_dih = (0.5 * DIH_K * (cos_dih - target_cos_dih) ** 2).sum(dim=-1)
+        e_dih = (0.5 * K_DIH * (cos_dih - target_cos_dih) ** 2).sum(dim=-1)
     else:
         e_dih = _safe_zeros((B,), dev)
 
@@ -741,8 +743,13 @@ def _clash_f(pos, cell_list, k, r_cut):
     over = (r_cut - r).clamp(min=0.0)
     f = (k * over / r).unsqueeze(-1) * delta           # F = k(rc-r)*delta/r
     F = torch.zeros_like(pos)
-    F[:, pi] += f
-    F[:, pj] -= f
+# index_add_, not F[:, pi] += f: a bead sits in many neighbour pairs, and an indexed in-place
+# add keeps only one write per duplicate index, dropping the rest of the sum. Every
+# pair-summed force in this file had the same defect (the WC pairing, pair guide and BPP
+# accumulations in cg_energy_forces and both explicit paths). Measured on 1ET4, the pair
+# term's force at a residue in four pairs was 27.09 against the true 94.88 kJ/mol/nm.
+    F.index_add_(1, pi, f)
+    F.index_add_(1, pj, -f)
     e = (0.5 * k * over ** 2).sum(dim=-1)
     return e, F
 
@@ -759,6 +766,43 @@ def _sigmoid_f(dist, r0, k, width):
     sig = torch.sigmoid(x)
     e = -k * _stable_softplus(x)
     return e, sig
+
+
+# ── GB/SA/Mg pair-list cutoff and its switching function ──
+# cg_energy_forces rebuilds its GB/SA/Mg pair list from a cell filter of size GB_CUTOFF on every
+# call. That filter is not a distance: a pair is listed when its cell indices differ by at most
+# one in every axis, and it drops out as soon as its separation along ONE axis passes GB_CUTOFF.
+# The pair energy used to be evaluated for every listed pair with no distance cutoff, so losing
+# a pair changed the energy by 2*exp(-1.0/0.304)/1.0 = 0.074 kJ/mol with no corresponding term
+# in the gradient -- a step function in the potential, not a force law. Over a whole step
+# scripts/measure_gb_jump_per_step.py measured 0.008 to 0.31 kBT of it (0.0207 to 0.78 kJ/mol
+# across the 1e-4 and 1e-3 nm rows); one bead moved 1e-4 nm, scripts/
+# measure_gb_discontinuity.py, up to 0.00098 kJ/mol.
+#
+# _gb_switch removes it. The switch is 1 below GB_SWITCH_ON and exactly 0 at and beyond
+# GB_SWITCH_OFF, C2 in between, and it multiplies the pair energy. A listed pair can only leave
+# the list at r > GB_CUTOFF <= GB_SWITCH_OFF, i.e. where the switch is already zero, so no
+# discontinuous piece is lost. The force is autograd of the same switched expression
+# (gb_total.backward() below), so energy and force agree by construction.
+GB_CUTOFF = 1.0       # nm, GB/SA pair-list cell size
+GB_SWITCH_ON = 0.8    # nm, the pair energy is untouched below this separation
+GB_SWITCH_OFF = 1.0   # nm, the pair energy is exactly zero at and beyond this
+assert GB_SWITCH_OFF >= GB_CUTOFF, (
+    "GB_SWITCH_OFF must be >= GB_CUTOFF: the pair list drops a pair once its separation along "
+    "one axis passes GB_CUTOFF, so a switch that is still nonzero there would put the energy "
+    "jump back")
+
+
+def _gb_switch(r: "torch.Tensor") -> "torch.Tensor":
+    """C2 switching function: 1 for r <= GB_SWITCH_ON, exactly 0 for r >= GB_SWITCH_OFF.
+
+    The usual smoothstep 6x^5 - 15x^4 + 10x^3, written in factored form:
+    S = (1-x)^3 (1 + 3x + 6x^2). Algebraically identical, but it does not cancel 1 against
+    terms of size 10 near x = 1, so a float32 caller still gets an accurate zero instead of
+    ~1e-6 of rounding noise.
+    """
+    x = ((r - GB_SWITCH_ON) / (GB_SWITCH_OFF - GB_SWITCH_ON)).clamp(0.0, 1.0)
+    return (1.0 - x) ** 3 * (1.0 + 3.0 * x + 6.0 * x * x)
 
 
 def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
@@ -826,7 +870,8 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         k_e = _pair_k * lam_p * w[None,:,None]  # (B, P, 1)
         total_E += (0.5*k_e*(dist-PAIR_NN)**2).sum(dim=-1).sum(dim=-1)
         f_p = -k_e*(dist-PAIR_NN)*delta/dist  # F = -dE/dx
-        total_F[:,NN(pi)] += f_p; total_F[:,NN(pj)] -= f_p
+        total_F.index_add_(1, NN(pi), f_p)
+        total_F.index_add_(1, NN(pj), -f_p)
 
     # ── 7. Stacking: O(N) analytic ──
     if L > 2:
@@ -854,7 +899,8 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         total_E += e_g.squeeze(-1).sum(dim=-1)
         # E = -K*softplus((r0-r)/w), dE/dr = +K*sig/w, F = -dE/dx = -K*sig/w * delta/r
         f_g = -K_PAIR_GUIDE/0.2*sig_g*delta_g/dist_g
-        total_F[:,P(pi)] += f_g.squeeze(-1); total_F[:,P(pj)] -= f_g.squeeze(-1)
+        total_F.index_add_(1, P(pi), f_g.squeeze(-1))
+        total_F.index_add_(1, P(pj), -f_g.squeeze(-1))
 
     # ── 10. BSJ guide: O(1) analytic ──
     d_bg = pos_nm[:,P(0)]-pos_nm[:,P(L-1)]
@@ -892,13 +938,14 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         total_E += (-K_BPP*bpp_w[None,:,None]*_stable_softplus(x_bpp)).sum(dim=1).squeeze(-1)
         # x = (r0-r)/0.3, dE/dr = +K*bpp*sig/0.3, F = -dE/dx = -K*bpp*sig/0.3 * delta/r
         f_bpp = -K_BPP/0.3*bpp_w[None,:,None]*sig_bpp*d_bpp/r_bpp
-        total_F[:,NN(pi)] += f_bpp.squeeze(-1); total_F[:,NN(pj)] -= f_bpp.squeeze(-1)
+        total_F.index_add_(1, NN(pi), f_bpp.squeeze(-1))
+        total_F.index_add_(1, NN(pj), -f_bpp.squeeze(-1))
 
     # ── 13-17. GB/SA/Mg2+: O(L·K) cell-list optimized ──
     gb_pos = pos_nm[:,P(torch.arange(L,device=dev)),:].detach().clone().requires_grad_(True)
     ion_s = c_mg*2.0+c_na
     ld = 0.304/math.sqrt(max(ion_s,1e-6))
-    GB_CUTOFF = 1.0; SA_CUTOFF = 0.58; MG_CUTOFF = 1.0
+    SA_CUTOFF = 0.58; MG_CUTOFF = 1.0   # GB_CUTOFF is the module constant above
 
     # P-particle cell-list
     p_coords = gb_pos[0]
@@ -925,7 +972,8 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         sa_overlap = torch.clamp(1.0 - r_ij / SA_CUTOFF, min=0.0)
         exp_mg = torch.exp(neg_r / 0.3)
 
-        e_pair = 0.73*exp_gb + 2.12e-2*4*math.pi*0.0225*sa_overlap - c_mg*exp_mg
+        e_pair = (0.73*exp_gb + 2.12e-2*4*math.pi*0.0225*sa_overlap - c_mg*exp_mg) \
+            * _gb_switch(r_ij)
         _gb_e_tot = 2.0 * e_pair.sum(dim=-1)
         total_E += _gb_e_tot.detach()
 
@@ -1055,25 +1103,25 @@ def cg_forces_explicit_batched(
 
     # ── 1. BB bonds: O(N) ──
     idx_a = torch.arange(L - 1, device=dev)
-    e, f = _bond(pos_nm, P(idx_a), P(idx_a+1), _K_BOND_BB, _R0_BB)
+    e, f = _bond(pos_nm, P(idx_a), P(idx_a+1), K_BB, BOND_P_NEXT)
     total_E += e; total_F += f
 
     # ── 2. Intra-bead: O(N) ──
     all_r = torch.arange(L, device=dev)
-    e1, f1 = _bond(pos_nm, P(all_r), C4(all_r), K_INTRA_PC, _R0_INTRA_PC)
-    e2, f2 = _bond(pos_nm, C4(all_r), NN(all_r), K_INTRA_CN, _R0_INTRA_CN)
+    e1, f1 = _bond(pos_nm, P(all_r), C4(all_r), K_INTRA_PC, BOND_P_C4)
+    e2, f2 = _bond(pos_nm, C4(all_r), NN(all_r), K_INTRA_CN, BOND_C4_N)
     total_E += e1+e2; total_F += f1+f2
 
     # ── 3. BSJ: O(1) ──
     delta_b = pos_nm[:, P(0)] - pos_nm[:, P(L-1)]
     d_b = _safe_norm(delta_b, dim=-1, keepdim=True, eps=eps)
-    e_bsj = (0.5*_K_BSJ*(d_b.squeeze(-1)-_R0_BB)**2).sum(dim=-1)
-    f_bsj = (_K_BSJ*(d_b-_R0_BB)*delta_b/d_b).squeeze(-1)
+    e_bsj = (0.5*K_BSJ*(d_b.squeeze(-1)-BOND_P_NEXT)**2).sum(dim=-1)
+    f_bsj = (K_BSJ*(d_b-BOND_P_NEXT)*delta_b/d_b).squeeze(-1)
     total_E += e_bsj
     total_F[:, P(0)] += f_bsj; total_F[:, P(L-1)] -= f_bsj
 
     # ── 4. Angles: O(N) ──
-    e_a, f_a = _angle(pos_nm, _K_ANGLE, math.cos(ANGLE_PPP))
+    e_a, f_a = _angle(pos_nm, K_ANGLE, math.cos(ANGLE_PPP))
     total_E += e_a; total_F += f_a
 
     # ── 5. Dihedrals: O(N) — local autograd block for the 4-atom windows ──
@@ -1090,7 +1138,7 @@ def cg_forces_explicit_batched(
         n0n = _safe_norm(n0, dim=-1, keepdim=True, eps=eps)
         n1n = _safe_norm(n1, dim=-1, keepdim=True, eps=eps)
         cos_d = ((n0 * n1).sum(-1, keepdim=True) / (n0n * n1n)).clamp(-1 + eps, 1 - eps)
-        e_dih = (0.5 * _K_DIH * (cos_d.squeeze(-1) - math.cos(DIH_PPPP)) ** 2)
+        e_dih = (0.5 * K_DIH * (cos_d.squeeze(-1) - math.cos(DIH_PPPP)) ** 2)
         e_dih.sum().backward()
         total_E += e_dih.sum(dim=-1).detach()
         if p_ref.grad is not None:
@@ -1102,21 +1150,22 @@ def cg_forces_explicit_batched(
         delta_p = pos_nm[:, NN(pi)] - pos_nm[:, NN(pj)]
         dist_p = _safe_norm(delta_p, dim=-1, keepdim=True, eps=eps)
         w = pair_w[:len(pi)].to(dev).float() if pair_w is not None else torch.ones(len(pi), device=dev)
-        k_p = _K_PAIR * lam * w
-        e_p = (0.5*k_p*(dist_p.squeeze(-1)-_R0_PAIR)**2).sum(dim=-1)
-        f_p = (k_p.unsqueeze(1)*(dist_p-_R0_PAIR)*delta_p/dist_p).squeeze(-1)
+        k_p = K_PAIR * lam * w
+        e_p = (0.5*k_p*(dist_p.squeeze(-1)-PAIR_NN)**2).sum(dim=-1)
+        f_p = (k_p.unsqueeze(1)*(dist_p-PAIR_NN)*delta_p/dist_p).squeeze(-1)
         total_E += e_p
-        total_F[:, NN(pi)] += f_p; total_F[:, NN(pj)] -= f_p
+        total_F.index_add_(1, NN(pi), f_p)
+        total_F.index_add_(1, NN(pj), -f_p)
 
     # ── 7. Stacking: O(N) ──
     if L > 2:
         st = torch.arange(L-2, device=dev)
-        e_s, f_s = _bond(pos_nm, P(st), P(st+2), _K_STACK*lam, STACK_R0)
+        e_s, f_s = _bond(pos_nm, P(st), P(st+2), K_STACK*lam, STACK_R0)
         total_E += e_s; total_F += f_s
 
     # ── 8. Clash (cell-list): O(K) ──
     if cell_list is not None:
-        e_cl, f_cl = _explicit_forces_clash(pos_nm, cell_list, _K_CLASH, _R0_CLASH)
+        e_cl, f_cl = _explicit_forces_clash(pos_nm, cell_list, K_CLASH, CLASH_DIST)
         total_E += e_cl; total_F += f_cl
 
     # ── 9. BSJ guide: O(1) ──
@@ -1125,10 +1174,10 @@ def cg_forces_explicit_batched(
     # Bounded near-attraction guide: E = -K*softplus(x), x = (R0-dist)/0.2.
     # dE/dr = +K*sig/0.2, so F = -dE/dr * delta/r = -K*sig/0.2 * delta/r
     # (pulls the BSJ ends together; far away the force vanishes).
-    sig = torch.sigmoid((_R0_PAIR-dist_bg)/0.2)
-    e_bg = (-_K_BSJ_GUIDE*_stable_softplus(
-        (_R0_PAIR-dist_bg)/0.2)).sum(dim=-1)
-    f_bg = (-_K_BSJ_GUIDE/0.2*sig/dist_bg*d_bsj_g).squeeze(-1)
+    sig = torch.sigmoid((PAIR_NN-dist_bg)/0.2)
+    e_bg = (-K_BSJ_GUIDE*_stable_softplus(
+        (PAIR_NN-dist_bg)/0.2)).sum(dim=-1)
+    f_bg = (-K_BSJ_GUIDE/0.2*sig/dist_bg*d_bsj_g).squeeze(-1)
     total_E += e_bg
     total_F[:,P(0)] += f_bg; total_F[:,P(L-1)] -= f_bg
 
@@ -1150,7 +1199,7 @@ def cg_forces_explicit_batched(
         gb_sa_e = 0.072*gb_si.sum(-1)
         gb_se = torch.exp(-gb_dd/0.3)*ml
         gb_sd = -0.3*torch.log(gb_se.sum(-1).clamp(min=1e-12))
-        gb_mg_e = -_K_MG*torch.exp(-gb_sd/LAMBDA_MG).sum(-1)
+        gb_mg_e = -K_MG*torch.exp(-gb_sd/LAMBDA_MG).sum(-1)
         gb_rl = gb_dd.min(-1).values
         gb_xi = 0.714/(2*gb_rl.clamp(min=0.1))
         gb_mi_e = -2.494*torch.log(1+c_mg*gb_xi**2/(1+gb_xi**2)/max(c_mg,1e-6)).sum(-1)
@@ -1169,7 +1218,7 @@ def cg_forces_explicit_batched(
     gb_sa_e2 = 0.072*gb_si2.sum(-1)
     gb_se2 = torch.exp(-gb_dd2/0.3)*ml
     gb_sd2 = -0.3*torch.log(gb_se2.sum(-1).clamp(min=1e-12))
-    gb_mg_e2 = -_K_MG*torch.exp(-gb_sd2/LAMBDA_MG).sum(-1)
+    gb_mg_e2 = -K_MG*torch.exp(-gb_sd2/LAMBDA_MG).sum(-1)
     gb_rl2 = gb_dd2.min(-1).values
     gb_xi2 = 0.714/(2*gb_rl2.clamp(min=0.1))
     gb_mi_e2 = -2.494*torch.log(1+c_mg*gb_xi2**2/(1+gb_xi2**2)/max(c_mg,1e-6)).sum(-1)
@@ -1283,32 +1332,16 @@ class GPUCellList:
         return pi, pj, delta, dist
 
 
-# Explicit-force constants (consistent with cg_energy_forces, balanced version)
-_K_BOND_BB = 500.0
-_K_BOND_INTRA = 400.0
-_K_PAIR = 600.0       # lowered from 1500 to 600
-_K_STACK = 0.0        # kept in step with K_STACK
-_K_ANGLE = 28.1       # kept in step with K_ANGLE
-_K_DIH = 7.2          # kept in step with K_DIH
-_K_CLASH = 500.0      # raised from 300 to 500
-_K_BSJ = 600.0        # lowered from 800 to 600
-_K_BSJ_GUIDE = 100.0
-_K_PAIR_GUIDE = 100.0
-_K_BSJ_CONTACT = 50.0
-_K_BPP = 13.4         # kept in step with K_BPP
-_K_MG = 200.0
-_K_GB = 0.73
-_K_SASA = 0.072
-
-_R0_BB = BOND_P_NEXT
-_R0_INTRA_PC = BOND_P_C4
-_R0_INTRA_CN = BOND_C4_N
-_R0_PAIR = PAIR_NN
-# There is deliberately no _R0_STACK snapshot here. Freezing STACK_R0 into a module constant
-# made cg_energy_forces and cg_forces_explicit_batched use different stacking targets as soon
-# as the live global changed -- one path read the frozen copy, the other the global. Both now
-# read STACK_R0 directly.
-_R0_CLASH = CLASH_DIST
+# There is deliberately no explicit-force snapshot block here -- no "_K_BOND_BB = 500.0",
+# no "_R0_BB = BOND_P_NEXT".
+# Those twenty module constants were copies of the live globals above; each carried a comment
+# like "kept in step with K_STACK" and nothing kept them in step. Freezing STACK_R0 into
+# _R0_STACK is how cg_energy_forces and cg_forces_explicit_batched came to use different
+# stacking targets, and the same failure was waiting in every other pair: retuning a live
+# constant would have moved whichever path read it and silently left the rest on the stale
+# value. Every term in cg_energy_forces, cg_forces_explicit_batched, cg_forces_explicit and
+# cg_energy_3bead now reads the live global. tests/test_ff_bonded_targets.py enforces it: it
+# rejects a module-level alias and perturbs each constant to check the paths respond.
 
 
 def _explicit_forces_bonds(
@@ -1429,8 +1462,8 @@ def _explicit_forces_clash(
     f_vec = f_mag * delta_m / dist_m
 
     forces = torch.zeros_like(pos)
-    forces[:, pi_m] += f_vec.squeeze(-1)
-    forces[:, pj_m] -= f_vec.squeeze(-1)
+    forces.index_add_(1, pi_m, f_vec.squeeze(-1))
+    forces.index_add_(1, pj_m, -f_vec.squeeze(-1))
 
     energy = (0.5 * k * (r_cut - dist_m.squeeze(-1)).clamp(min=0) ** 2).sum(dim=-1)
     return energy, forces
@@ -1469,33 +1502,33 @@ def cg_forces_explicit(
     # ── Bonds: O(N) direct indexing ──
     idx_a = torch.arange(L - 1, device=dev)
     e_bb, f_bb = _explicit_forces_bonds(
-        pos_nm, torch.stack([P(idx_a), P(idx_a + 1)], dim=1), _K_BOND_BB, _R0_BB)
+        pos_nm, torch.stack([P(idx_a), P(idx_a + 1)], dim=1), K_BB, BOND_P_NEXT)
     total_E += e_bb; total_F += f_bb
 
     # Intra-bead bonds
     all_res = torch.arange(L, device=dev)
     e_pc, f_pc = _explicit_forces_bonds(
-        pos_nm, torch.stack([P(all_res), C4(all_res)], dim=1), K_INTRA_PC, _R0_INTRA_PC)
+        pos_nm, torch.stack([P(all_res), C4(all_res)], dim=1), K_INTRA_PC, BOND_P_C4)
     e_cn, f_cn = _explicit_forces_bonds(
-        pos_nm, torch.stack([C4(all_res), NN(all_res)], dim=1), K_INTRA_CN, _R0_INTRA_CN)
+        pos_nm, torch.stack([C4(all_res), NN(all_res)], dim=1), K_INTRA_CN, BOND_C4_N)
     total_E += e_pc + e_cn; total_F += f_pc + f_cn
 
     # ── BSJ: O(1) ──
     delta_bsj = pos_nm[:, P(0)] - pos_nm[:, P(L - 1)]
     dist_bsj = delta_bsj.norm(dim=-1, keepdim=True).clamp(min=eps)
-    e_bsj = (0.5 * _K_BSJ * (dist_bsj.squeeze(-1) - _R0_BB) ** 2).sum(dim=-1)
-    f_bsj_mag = _K_BSJ * (dist_bsj - _R0_BB)
+    e_bsj = (0.5 * K_BSJ * (dist_bsj.squeeze(-1) - BOND_P_NEXT) ** 2).sum(dim=-1)
+    f_bsj_mag = K_BSJ * (dist_bsj - BOND_P_NEXT)
     f_bsj_vec = (f_bsj_mag * delta_bsj / dist_bsj).squeeze(-1)
     total_E += e_bsj
     total_F[:, P(0)] += f_bsj_vec
     total_F[:, P(L - 1)] -= f_bsj_vec
 
     # ── Angles: O(N) ──
-    e_angle, f_angle = _explicit_forces_angles(pos_nm, _K_ANGLE, math.cos(ANGLE_PPP))
+    e_angle, f_angle = _explicit_forces_angles(pos_nm, K_ANGLE, math.cos(ANGLE_PPP))
     total_E += e_angle; total_F += f_angle
 
     # ── Dihedrals: O(N) ──
-    e_dih, f_dih = _explicit_forces_dihedrals(pos_nm, _K_DIH, math.cos(DIH_PPPP))
+    e_dih, f_dih = _explicit_forces_dihedrals(pos_nm, K_DIH, math.cos(DIH_PPPP))
     total_E += e_dih; total_F += f_dih
 
     # ── Pairing (sparse indexing): O(P) ──
@@ -1504,23 +1537,23 @@ def cg_forces_explicit(
         delta_pair = pos_nm[:, NN(pi)] - pos_nm[:, NN(pj)]
         dist_pair = delta_pair.norm(dim=-1, keepdim=True).clamp(min=eps)
         w_p = pair_w[:len(pi)].to(dev).float() if pair_w is not None else torch.ones(len(pi), device=dev)
-        k_eff = _K_PAIR * lam * w_p
-        e_pair = (0.5 * k_eff * (dist_pair.squeeze(-1) - _R0_PAIR) ** 2).sum(dim=-1)
-        f_pair_mag = k_eff.unsqueeze(1) * (dist_pair - _R0_PAIR)
+        k_eff = K_PAIR * lam * w_p
+        e_pair = (0.5 * k_eff * (dist_pair.squeeze(-1) - PAIR_NN) ** 2).sum(dim=-1)
+        f_pair_mag = k_eff.unsqueeze(1) * (dist_pair - PAIR_NN)
         f_pair_vec = (f_pair_mag * delta_pair / dist_pair).squeeze(-1)
         total_E += e_pair
-        total_F[:, NN(pi)] += f_pair_vec
-        total_F[:, NN(pj)] -= f_pair_vec
+        total_F.index_add_(1, NN(pi), f_pair_vec)
+        total_F.index_add_(1, NN(pj), -f_pair_vec)
 
     # ── Stacking (sparse indexing): O(N) ──
     if L > 2:
         st = torch.arange(L - 2, device=dev)
         e_st, f_st = _explicit_forces_bonds(
-            pos_nm, torch.stack([P(st), P(st + 2)], dim=1), _K_STACK * lam, STACK_R0)
+            pos_nm, torch.stack([P(st), P(st + 2)], dim=1), K_STACK * lam, STACK_R0)
         total_E += e_st; total_F += f_st
 
     # ── Clash (cell-list): O(K) ──
-    e_clash, f_clash = _explicit_forces_clash(pos_nm, cell_list, _K_CLASH, _R0_CLASH)
+    e_clash, f_clash = _explicit_forces_clash(pos_nm, cell_list, K_CLASH, CLASH_DIST)
     total_E += e_clash; total_F += f_clash
 
     # ── BSJ guide (single pair) ──
@@ -1528,10 +1561,10 @@ def cg_forces_explicit(
     # dE/dr = +K*sig/0.2 -> F = -K*sig/0.2 * delta/r (pulls together)
     delta_bsj_g = pos_nm[:, P(0)] - pos_nm[:, P(L - 1)]
     dist_bsj_g = delta_bsj_g.norm(dim=-1, keepdim=True).clamp(min=eps)
-    sig = torch.sigmoid((_R0_PAIR - dist_bsj_g) / 0.2)
-    e_bsj_guide = -_K_BSJ_GUIDE * _stable_softplus(
-        (_R0_PAIR - dist_bsj_g) / 0.2).sum(dim=-1)
-    f_bsj_guide_mag = -_K_BSJ_GUIDE / 0.2 * sig / (dist_bsj_g + eps)
+    sig = torch.sigmoid((PAIR_NN - dist_bsj_g) / 0.2)
+    e_bsj_guide = -K_BSJ_GUIDE * _stable_softplus(
+        (PAIR_NN - dist_bsj_g) / 0.2).sum(dim=-1)
+    f_bsj_guide_mag = -K_BSJ_GUIDE / 0.2 * sig / (dist_bsj_g + eps)
     f_bsj_guide_vec = (f_bsj_guide_mag * delta_bsj_g / dist_bsj_g).squeeze(-1)
     total_E += e_bsj_guide
     total_F[:, P(0)] += f_bsj_guide_vec
@@ -1561,7 +1594,7 @@ def cg_forces_explicit(
     # Mg2+ softmin (using the p_dist nearest neighbor)
     exp_softmin = torch.exp(-p_dist / 0.3) * mask_L
     softmin_dist = -0.3 * torch.log(exp_softmin.sum(dim=-1).clamp(min=1e-12))
-    e_mg = -_K_MG * torch.exp(-softmin_dist / LAMBDA_MG).sum(dim=-1)
+    e_mg = -K_MG * torch.exp(-softmin_dist / LAMBDA_MG).sum(dim=-1)
 
     # Manning condensation
     r_local = p_dist.min(dim=-1).values
@@ -1589,7 +1622,7 @@ def cg_forces_explicit(
 
     mg_softmin_exp = torch.exp(-gb_dist / 0.3) * gb_mask
     mg_softmin_dist = -0.3 * torch.log(mg_softmin_exp.sum(dim=-1).clamp(min=1e-12))
-    mg_e = -_K_MG * torch.exp(-mg_softmin_dist / LAMBDA_MG).sum(dim=-1)
+    mg_e = -K_MG * torch.exp(-mg_softmin_dist / LAMBDA_MG).sum(dim=-1)
 
     mg_r_local = gb_dist.min(dim=-1).values
     mg_xi = 0.714 / (2.0 * mg_r_local.clamp(min=0.1))
