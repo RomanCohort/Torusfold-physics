@@ -98,9 +98,16 @@ def term_energies_forces(pos_nm, pairs_ij, pair_w=None, cell_list=None):
         rbp = C._safe_norm(db, dim=-1, keepdim=True, eps=eps)
         xb = (C.PAIR_NN - rbp) / 0.3
         sb = torch.sigmoid(xb)
+        # The library scales bpp by the pair weight -- torch_cgsim does
+        # -K_BPP * bpp_w * softplus(...) -- and this copy did not, so every magnitude it
+        # reported was wrong whenever pair_w was not all ones. That is the third time a
+        # term duplicated here has drifted from the library; the constants, the BSJ contact
+        # force and the BSJ contact energy each did the same. Anything read off this module
+        # with non-unit weights should be checked against torch_cgsim first.
+        wb = w[None, :, None]
         add("bpp",
-            _scatter(pos_nm, NN(pi), NN(pj), -C.K_BPP / 0.3 * sb * db / rbp),
-            (-C.K_BPP * C._stable_softplus(xb)).sum(dim=-1).sum(dim=-1))
+            _scatter(pos_nm, NN(pi), NN(pj), -C.K_BPP / 0.3 * wb * sb * db / rbp),
+            (-C.K_BPP * wb * C._stable_softplus(xb)).sum(dim=-1).sum(dim=-1))
 
     # 8. stacking
     if L > 2:
