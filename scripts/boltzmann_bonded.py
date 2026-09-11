@@ -33,6 +33,7 @@ Module only; fitting and checking live in test_boltzmann_bonded.py.
 """
 import collections
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -40,7 +41,16 @@ import torch
 
 KBT = 2.494          # kJ/mol at 300 K
 COORDS = ("bb_bond", "intra_pc", "intra_cn", "angle", "dihedral", "stack")
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+# The deposited-structure database. It lives OUTSIDE this repository (191 PDB files, 686.7 MB), so
+# a checkout on another machine has to be told where it is. TORUSFOLD_RSRNASP overrides; the
+# Windows default is kept so nothing here changes on the machine it was measured on.
+#
+# Only THIS file matters for the IBI chain: ibi_round0.py, ibi_bonded.py and
+# sample_bonded_chain.py all reach the database through boltzmann_bonded. Seventeen other scripts
+# carry their own copy of the same literal and need editing individually if they are to run
+# elsewhere; see docs/dev_machine_handoff.md.
+DATA = Path(os.environ.get(
+    "TORUSFOLD_RSRNASP", r"D:\torusfold-cgdata\rsRNASP\Training_set"))
 MIN_L, MAX_L = 20, 120
 
 
