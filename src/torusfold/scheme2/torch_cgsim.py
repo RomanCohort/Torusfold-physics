@@ -1628,22 +1628,30 @@ def batch_langevin_step(
     c1 = math.exp(-friction * dt_ps)
     c2 = math.sqrt(max(1.0 - c1 * c1, 0.0))
     half_dt = dt_ps * 0.5
-    # Unit conversion: kJ/mol/nm = amu·nm/ps² × 100
-    unit_conv = 100.0
-    # O-step noise. For v <- c1*v + A*xi the stationary variance is A^2/(1-c1^2), and this
-    # integrator works in nm/ps, so the target is kB*T/(mass*unit_conv). The previous form
-    # sqrt(2*gamma*kB/m) * sqrt(T*dt) * c2 was off by sqrt(2*gamma*dt*unit_conv): it lacked the
-    # unit_conv conversion that the force kick below has, and carried a spurious sqrt(dt).
-    # Measured on a free particle, whose stationary <v^2> must be kB*T/m whatever the potential
-    # does: the old form gave 0.038 / 0.399 / 0.390 / 1.994 times that at (gamma, dt) =
-    # (0.1, 0.002) / (1.0, 0.002) / (0.1, 0.02) / (5.0, 0.002), each matching 100*2*gamma*dt.
-    # The shipped parameters are gamma = 1.0 and dt = 0.002, so the GPU path ran at 0.4*T.
-    sigma_base = math.sqrt(KB_KJ / (unit_conv * mass_amu))
+    # Units. This integrator works in nm, ps, amu and kJ/mol, and in that set the conversion
+    # factor is exactly 1: 1 kJ/mol/nm acting on 1 amu gives 1 nm/ps^2, and kB = 0.0083145
+    # kJ/(mol K) is numerically the same in amu nm^2/(ps^2 K). So F*dt/m needs no rescaling and
+    # the O-step noise target is flatly kB*T/mass.
+    #
+    # It used to divide both force kicks by unit_conv = 100. That factor belongs to force
+    # CONSTANTS quoted in kJ/mol/angstrom^2 (1 kJ/mol/A^2 = 100 kJ/mol/nm^2), not to forces.
+    # The consequence was an effective mass of 100*mass_amu, and nothing could catch it: a
+    # stationary distribution does not depend on the mass, so every equilibrium average stayed
+    # right and only the clock was wrong. Measured in scripts/integrator_mass_probe.py from the
+    # period of two 110 amu beads on a 500 kJ/mol/nm^2 spring, which is 2.0839 ps in closed
+    # form: the code gave 20.8389 ps, a ratio of 10.000.
+    #
+    # The O-step noise for v <- c1*v + A*xi is A = sqrt(kB*T/m * (1 - c1^2)). The previous form,
+    # sqrt(2*gamma*kB/m) * sqrt(T*dt) * c2, carried a spurious sqrt(dt); measured on a free
+    # particle, whose stationary <v^2> must be kB*T/m whatever the potential does, it gave
+    # 0.038 / 0.399 / 0.390 / 1.994 times that at (gamma, dt) = (0.1, 0.002) / (1.0, 0.002) /
+    # (0.1, 0.02) / (5.0, 0.002), each matching 100*2*gamma*dt.
+    sigma_base = math.sqrt(KB_KJ / mass_amu)
     noise_scale = sigma_base * torch.sqrt(
         temperatures.view(-1, 1, 1))
 
     # B step: half-step velocity update
-    vel.add_((forces * half_dt / mass_amu) / unit_conv)
+    vel.add_(forces * half_dt / mass_amu)
     # A step: half-step position update
     pos.add_(vel * half_dt)
     # O step: Langevin drag + noise
@@ -1653,7 +1661,7 @@ def batch_langevin_step(
     pos.add_(vel * half_dt)
     # B step: half-step velocity update (using the same forces; a simplified
     # version - the exact one would require recomputing the forces)
-    vel.add_((forces * half_dt / mass_amu) / unit_conv)
+    vel.add_(forces * half_dt / mass_amu)
     _require_finite(pos, "integrated coordinates")
     _require_finite(vel, "integrated velocities")
     return pos, vel

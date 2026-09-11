@@ -72,6 +72,10 @@ K_SHIPPED = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA, "intra_cn": C.K_INTRA,
              "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
 counts = {c: np.zeros(len(TAB[c]["U"]), dtype=np.int64) for c in B.COORDS}
 acc = {c: [0.0, 0.0, 0] for c in B.COORDS}     # sum, sumsq, n
+# Clash watch. The analytical claim about the intra-bead bonds assumes the repulsion never
+# fires, and C4'-N sits at 0.335 nm against a 0.300 nm cutoff, so that is not free.
+clash_min = []
+clash_below = 0
 import time
 t0 = time.time()
 for step in range(NSTEPS):
@@ -95,6 +99,11 @@ for step in range(NSTEPS):
                 k = np.round((q - t["centre"][0]) / t["binw"]).astype(np.int64)
                 ok = (k >= 0) & (k < len(t["U"]))
                 counts[c] += np.bincount(k[ok], minlength=len(t["U"]))
+            beads = pos.reshape(NREP, -1, 3)
+            dd = torch.cdist(beads, beads)
+            dd = dd + torch.eye(dd.shape[-1], device=dd.device) * 10.0
+            clash_min.append(float(dd.min()))
+            clash_below += int((dd < C.CLASH_DIST).sum())
     if (step + 1) % max(NSTEPS // 10, 1) == 0:
         el = time.time() - t0
         parts = []
@@ -113,6 +122,9 @@ for step in range(NSTEPS):
 
 el = time.time() - t0
 print(f"done in {el:.0f} s, {NSTEPS / el:.1f} steps/s")
+print()
+print(f"clash watch: cutoff {C.CLASH_DIST:.3f} nm, closest bead pair ever {min(clash_min):.4f} nm, "
+      f"pairs below the cutoff over the run {clash_below}")
 print()
 
 # reference density from the stored table, on the same bins

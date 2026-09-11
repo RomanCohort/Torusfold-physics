@@ -29,6 +29,7 @@ import math
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -38,9 +39,9 @@ C = pytest.importorskip("torusfold.scheme2.torch_cgsim")
 
 MASS = 110.0
 T = 300.0
-UNIT_CONV = 100.0
-# kB*T/m already converted into the integrator's (nm/ps)^2
-KBT_OVER_M = C.KB_KJ * T / (UNIT_CONV * MASS)
+# In nm/ps/amu/kJ/mol the conversion is 1, and kB*T in amu nm^2/ps^2 is numerically the same
+# number as kB*T in kJ/mol. So this is the physical moment, with no factor to hide behind.
+KBT_OVER_M = C.KB_KJ * T / MASS
 
 
 def _step(pos, vel, forces, temps, gamma, dt):
@@ -65,7 +66,7 @@ def test_one_step_from_rest_has_the_exact_noise_variance():
     # 450k samples puts the sampling error of a variance near 0.2 percent
     assert got == pytest.approx(exact, rel=0.02), (
         f"one-step noise variance {got:.6e} against the exact {exact:.6e} "
-        f"(ratio {got / exact:.4f}); the pre-fix form was off by 1/(2*gamma*dt*{UNIT_CONV})")
+        f"(ratio {got / exact:.4f}); the pre-fix form was off by 1/(2*gamma*dt)")
 
 
 @pytest.mark.parametrize("gamma,dt", [(0.1, 0.002), (1.0, 0.002), (0.1, 0.02), (5.0, 0.002)])
@@ -77,7 +78,7 @@ def test_noise_variance_does_not_depend_on_gamma_or_dt(gamma, dt):
     100*2*gamma*dt, so it failed at every one of these four points -- with the four factors
     0.04, 0.4, 0.4 and 2.0, which is what made the bug invisible: two of them are within a
     factor of three of the truth.
-    """
+    """  # noqa: D401
     c1 = math.exp(-gamma * dt)
     exact = KBT_OVER_M * (1.0 - c1 * c1)
 
@@ -153,3 +154,45 @@ def test_lone_harmonic_bond_reaches_its_exact_width():
     assert sig == pytest.approx(exact, rel=0.10), (
         f"bond sigma {sig:.6f} nm against sqrt(kB*T/k) = {exact:.6f} "
         f"(ratio {sig / exact:.4f}, implied T = {T * (sig / exact) ** 2:.1f} K)")
+
+def test_force_kick_uses_the_stated_mass_not_a_hundredth_of_it():
+    """An oscillation period, which is the only thing that can see a wrong mass.
+
+    A stationary distribution does not depend on the mass at all, so getting the mass wrong by
+    any factor leaves every equilibrium average correct and only the clock wrong -- which is why
+    no energy, force or gradient test ever caught this. Two 110 amu beads on a
+    500 kJ/mol/nm^2 spring have a reduced mass of 55 amu and a closed-form period of 2.0839 ps.
+
+    The pre-fix code divided both force kicks by unit_conv = 100, a factor that belongs to force
+    constants in kJ/mol/angstrom^2. It measured 20.8389 ps, a ratio of exactly 10.000, i.e. an
+    effective mass of 100 * mass_amu. The thermostat fix alone did not catch it either: the
+    noise had been written to be consistent with that heavier mass, so the ensemble looked
+    right while every timescale was ten times too long.
+    """
+    k, r0, dt, n = 500.0, 0.590, 0.002, 3000
+    pos = torch.zeros((1, 3, 3), dtype=torch.float64)
+    pos[0, 1, 0] = r0 + 0.010
+    vel = torch.zeros_like(pos)
+    temps = torch.full((1,), T, dtype=torch.float64)
+    pi = torch.tensor([0])
+    pj = torch.tensor([1])
+
+    k_si = k * 1.660539e-21 / 1e-18          # J/m^2
+    mu_si = 0.5 * MASS * 1.660539e-27        # kg
+    period = 2.0 * math.pi / math.sqrt(k_si / mu_si) * 1e12
+
+    dev = []
+    for _ in range(n):
+        _e, f = C._bond_f(pos, pi, pj, k, r0)
+        # friction 0 turns the thermostat off: c1 = 1 and c2 = 0, so this is classical mechanics
+        pos, vel = _step(pos, vel, f, temps, gamma=0.0, dt=dt)
+        dev.append(float(pos[0, 1, 0] - pos[0, 0, 0]) - r0)
+    dev = np.asarray(dev)
+    t = np.arange(n) * dt
+    cross = np.nonzero((dev[:-1] > 0) != (dev[1:] > 0))[0]
+    assert len(cross) >= 3, (
+        f"only {len(cross)} crossings in {n * dt:.1f} ps; a 10x heavy mass would show 2")
+    half = float(np.diff(t[cross]).mean())
+    assert 2.0 * half == pytest.approx(period, rel=0.02), (
+        f"period {2 * half:.4f} ps against the closed-form {period:.4f} ps "
+        f"(ratio {2 * half / period:.4f}; the pre-fix code gave 10.000)")
