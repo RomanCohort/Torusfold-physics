@@ -180,6 +180,29 @@ class BatchedMetadynamics:
             print(f"    [GPU-MetaD] {n_rep} replicas, {n_steps} steps, "
                   f"hill_freq={hill_freq}, max_hills={max_hills}")
 
+        def _total_force(positions: "torch.Tensor") -> "torch.Tensor":
+            """The full force at `positions`: CG force field + accumulated-hill bias.
+
+            batch_langevin_step's last B half-kick acts at the post-update coordinates,
+            so it must receive the force evaluated there; reusing the force tensor
+            computed before the step makes the deterministic part of the map
+            non-symplectic and grows phase-space volume on every step. This closure
+            must reproduce the FULL force the loop assembles below, bias included --
+            the bias is part of the Hamiltonian the integrator is propagating, so
+            dropping it here would integrate a different system. hills_centers and
+            hills_heights are read at call time, so hills deposited in earlier blocks
+            are part of the force exactly as they are in the loop's own f_total.
+            """
+            with torch.no_grad():
+                pos_grad = positions.detach().clone().requires_grad_(True)
+            _, f_phys = cg_energy_forces(
+                pos_grad, pairs_t, pw, cell_list=cell_list,
+                relax_bond_k=self.relax_bond_k, relax_angle_k=self.relax_angle_k,
+                relax_pair_k=self.relax_pair_k, restraint_k=self.restraint_k)
+            f_bias_new = self._compute_bias_forces(
+                positions, hills_centers, hills_heights, hill_sigma)
+            return f_phys + f_bias_new
+
         for step_idx in range(n_hill_events):
             # ── Integrate hill_freq steps ──
             for _ in range(hill_freq):
@@ -198,10 +221,13 @@ class BatchedMetadynamics:
                 # Total force = CG + bias
                 f_total = f_cg + f_bias
 
-                # Langevin step
+                # Langevin step. force_fn supplies the tail B half-kick with the
+                # force at the post-update coordinates, which is what makes the
+                # deterministic part symplectic; it costs one extra force evaluation.
                 pos, vel = batch_langevin_step(
                     pos, vel, f_total, temps_t,
-                    dt_ps=dt_ps, friction=friction)
+                    dt_ps=dt_ps, friction=friction,
+                    force_fn=_total_force)
 
                 # Clamp positions to prevent explosion
                 pos.data.clamp_(-10.0, 10.0)
