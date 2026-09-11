@@ -470,6 +470,58 @@ change that improves the joint number by less than about 10 percent has not been
 anything, and matching the joint distribution needs IBI iterating on the potential rather than
 another constant.
 
+## Update log
+
+Newest first. Every entry is a measurement from a script in `scripts/`, not a plan.
+
+### Force-field audit round (`441cdd8`, `6e7a44b`)
+
+**The two guide terms were pointing the wrong way, and the cost of fixing it is measured.**
+`_sigmoid_f` computed `E = -k*softplus((r0-r)/w)`: it pulled hardest when a pair was already
+too close and vanished at long range. That is the opposite of the "far/long-range pair guiding
+force" its name and its constant block claim, and the opposite of what its own docstring
+described. It is now `E = +k*softplus((r-r0)/w)` at all five sites. The two shapes give the
+**same force at `r0`** -- `k/(2w)` inward -- and **opposite curvature** there, `-k/(4w^2)` against
+`+k/(4w^2)`, so at `K_PAIR_GUIDE = 20.8` and `w = 0.2` the effective WC pair spring moves from
+`600 - 130` to `600 + 130`. The shape comparison itself, at 0.5 to 3 nm and at the
+pair minimum, is `scripts/measure_guide_shape_fix.py`. The same two commands as the 3ax verification:
+
+| | before | after |
+| :-- | --: | --: |
+| last-quarter T | 302.7 K | 289.4 K (mean 295.9, 0.99x) |
+| potential-energy drift | -3.2 | -171.2 kJ/mol over 40 ps |
+| minimiser | 6000 iters, 0 restarts, max abs F 69.80 | 4427 iters, 6 restarts, max abs F 690.19 |
+| frames below 0.30 nm | 12 / 3000 | **0 / 3000** |
+| joint mean abs ln(sim/ref) | 0.2937 | 0.3263 |
+
+The minimiser row is the open item, and it is why the drift row is not yet meaningful: the script
+descends with a halving step, so six restarts say the method stalls on this landscape, not that a
+690 force is unbalanced. Section 3ay has the full comparison and the curvature arithmetic.
+
+**The defect count now has a list behind it.** `docs/silent_defects.md` indexes **sixteen** silent
+defects, one row each, with the measurement that found it and the test that now holds it. This file
+and `docs/attribution.md` both used to say "nine" with no list behind it. Fifteen of the
+sixteen were producing a wrong number; the sixteenth is four independent copies of the
+excluded-volume law, which agreed at the time and would have gone stale on the next edit.
+
+**`GB_FORCE_CAP` is a guard, measured rather than assumed.** `scripts/check_gb_cap_heating.py` runs
+the same 20 ps at cap 50, 500 and 1e9 and gets the same mean kinetic temperature (311.5 K) and the
+same closest-approach median (0.3147 nm) in all three, so the inner clip is not a heat source. The
+reference thermal speed that script prints was also 10x low and is fixed.
+
+**The stored tables' interpolation gap, in under a second.** `scripts/table_convention_gap.py` and
+`tests/test_table_convention_gap.py`. `boltzmann_bonded._sample` reads `U_i = -kBT ln p_i` as the
+potential at the bin centre when those numbers are bin masses; the gap that matters is the one in
+`results/boltzmann_tables_clean.npz`, because that is the table the IBI path loads. At the core
+maximum: angle 1.045, dihedral 1.800, stack 0.366 kBT. Those are larger than the 0.36 / 0.49 / 0.29
+recorded earlier, and the difference is not a bug -- that reading came from a freshly fitted table.
+The closed-form bin-mass integral is checked against a fine-grid integration of the same
+interpolant, so the pinned numbers are not pinning a bug.
+
+**Also in this round.** The straight Wiki Description version is in `docs/description.md`, carrying
+the real defect count and the three limits. `docs/attribution.md`'s Specific Tasks word count
+was six words off; it is 139, counted on the body. `### If you change a constant` above is new.
+
 ## Data formats & synthetic-biology standards
 
 Input: FASTA-like plain sequence (`sequence.txt`, `T`→`U` handled);
