@@ -3,6 +3,86 @@ physical_relaxation.py — physics-based relaxation post-processing
 
 After segment assembly, quickly relax bond lengths and bond angles on torch GPU
 to remove the geometric discontinuities at the assembly seams.
+
+=====================================================================
+CONVENTION — read this before copying a number out of this file
+=====================================================================
+
+Lengths are nanometres (nm), angles radians, energies kJ/mol.  The public API
+takes Angstroms and divides by 10 once per path, so every r0 and every force
+constant below is in nm.
+
+The torch energy terms (the `_energy` closure in `_relax_torch_gpu`) are
+SINGLE-SIDED harmonics:
+
+    E = K * (x - x0)^2          <- NO 1/2
+
+Three neighbouring fields write the 1/2 explicitly and were checked against the
+code in the working tree: torch_cgsim.cg_energy (`e_bb = 0.5 * K_BB * (d_bb -
+BOND_P_NEXT) ** 2`), openmm_gpu_refiner's CustomBondForce strings
+("0.5*k_bsj*(r-r0)^2" and its siblings), and relax_structure's OWN OpenMM
+branch below, whose HarmonicBondForce was measured on this box to return
+0.5*k*(r-r0)^2 (k = 100 kJ/mol/nm^2, r-r0 = 0.05 / 0.10 / 0.20 nm ->
+0.125 / 0.500 / 2.000 kJ/mol).
+
+So the same numeral means TWICE the stiffness here as it does in those files,
+and no number may be moved across that boundary without converting.  For scale
+on the one coordinate both fields restrain, P(i)-P(i+1) at 0.59 nm: this file's
+K_BB = 5000 is a curvature of 5000 kJ/mol/nm^2, while openmm_gpu_refiner.py
+-- the file an earlier version of this module's docstring claimed to be aligned
+with -- sits at 11.22 kJ/mol/A^2 * 100 * 0.5 = 561, i.e. 8.9x softer.
+
+Whether the missing 1/2 was deliberate is NOT recorded.  This file's entire
+history is two commits (an import and a comment translation), it carries no
+note on the subject, and no constant here is a factor-of-two twin of one in a
+neighbouring file: they are round hand-set restraint strengths (5000 / 5000 /
+200 / 200 / 500) annotated "hard restraint, must be satisfied" and "soft
+preference", never kBT/sigma^2.  What is certain is that the convention is
+load-bearing and undocumented, that the alignment claim was false in both
+numeral and form, and that the OpenMM branch of this same file sits on the
+other side of the 1/2.  Halving a constant is a trajectory change for every
+caller, so it is a decision, not a cleanup.
+
+Numbers defined under `_relax_torch_gpu` (this table IS the code's digits;
+tests/test_physical_relaxation_convention.py fails if the two drift apart):
+
+| constant | value    | unit         | appears in                                          |
+|----------|----------|--------------|-----------------------------------------------------|
+| K_BB     | 5000.0   | kJ/mol/nm^2  | e_bb = (K_BB * (dist_bb - BOND_R0) ** 2).sum()       |
+| K_BSJ    | 5000.0   | kJ/mol/nm^2  | e_bsj = K_BSJ * (d_bsj - BOND_R0) ** 2               |
+| K_ANGLE  | 200.0    | kJ/mol/rad^2 | e_angle = (K_ANGLE * (angles - ANGLE_0) ** 2).sum()  |
+| K_DIH    | 200.0    | kJ/mol/rad^2 | e_dih = (K_DIH * (dihedral - DIH_0) ** 2).sum()      |
+| K_PAIR   | 500.0    | kJ/mol/nm^2  | e_pair = (K_PAIR * pr_w * (dist_pr - PAIR_R0) ** 2).sum() |
+| K_STACK  | 0.0      | kJ/mol/nm^2  | e_stack = (K_STACK * (dist_st - BOND_R0) ** 2).sum(), and e_stack is NOT in the returned sum |
+| K_CLASH  | 5000.0   | kJ/mol/nm^2  | nothing. Dead constant; the clash push-apart uses CLASH_R, not an energy |
+| BOND_R0  | 0.59     | nm           | r0 of the backbone bond, the BSJ closure, and the stacking term |
+| PAIR_R0  | 1.0      | nm           | r0 of the WC pairing term                            |
+| ANGLE_0  | 2.618    | rad          | P-P-P target, 150 deg                                |
+| DIH_0    | 0.5759587| rad          | 33 deg, applied to acos(n1.n2) between consecutive plane normals, which is unsigned and lives in [0, pi] |
+| CLASH_R  | 0.4      | nm           | phase-3 push-apart trigger (4 A)                     |
+| lr_full  | 0.000005 | nm^2 mol/kJ  | phase-2 gradient step size                           |
+
+TWO OTHER PARAMETER SETS LIVE IN THIS SAME FILE, on OpenMM's with-1/2 side:
+
+  - relax_structure's OpenMM branch: bond addBond(i, i+1, 0.59, 31000.0), a
+    curvature of 15500 (3.1x the torch path's 5000); far pairs
+    addBond(i, j, 1.0, 5000.0), a curvature of 2500.  The far-pair restraint
+    exists ONLY here -- _relax_torch_gpu accepts far_pairs and ignores it, and
+    is scheduled first whenever CUDA is available, so which restraint set a
+    caller actually gets depends on torch.cuda.is_available().
+  - _simple_relax (use_openmm=False): no force constant at all, only a
+    0.5-damped correction toward 5.9 A -- the one pair of digits in this file
+    that agrees with itself (5.9 A = BOND_R0).  No caller in this repository
+    passes use_openmm=False, so this branch is reached only through the API.
+
+WHO CALLS THIS MODULE (all through relax_structure; the torch path runs only
+when torch.cuda.is_available(), otherwise the OpenMM branch runs):
+
+    isrnaclong.py:1085         isrnaclong_pipeline        Level 1.5 global relaxation, n_steps=5000, pairs_all
+    isrnaclong.py:1712         isrnaclong_pipeline        Level 2.5b post-CG->AA, n_steps=3000, far_pairs, no pairs_all
+    segmented_vfold3d.py:1592  segmented_vfold3d_pipeline  cross-chunk post-relaxation, far_pairs, no pairs_all
+    torch_gpu_refine.py:269    torch_gpu_refine           Level 2 refine, n_steps=5000, pairs_all
+    __init__.py:227            predict_3d_allatom         relaxation after CG refinement (use_relaxation flag)
 """
 import numpy as np
 from typing import Dict, Optional, Tuple
@@ -25,6 +105,13 @@ def relax_structure(
     """Physics-based relaxation: bond-length/bond-angle restrained minimization + short MD.
 
     Uses the torch GPU path (full CG force field), with OpenMM as a fallback.
+
+    Dispatch, because the two branches are NOT the same force field:
+    use_openmm=False -> _simple_relax; else, if CUDA is available ->
+    _relax_torch_gpu (single-sided harmonics, NO 1/2 -- read the module header
+    before reading one of its constants); else -> the OpenMM branch below, which
+    uses OpenMM's convention (1/2 present) and different numerals.  far_pairs is
+    honoured only on the OpenMM branch.
 
     Args:
         coords: (L, 3) P coordinates (Å)
@@ -68,12 +155,21 @@ def relax_structure(
         for _ in range(L):
             system.addParticle(100.0)
 
+        # OpenMM branch: OpenMM's units and OpenMM's convention.  Its
+        # HarmonicBondForce computes U = 0.5*k*(r-r0)^2 (measured here: k=100,
+        # r-r0 = 0.05/0.10/0.20 nm -> 0.125/0.500/2.000 kJ/mol), so the 1/2 is
+        # present on this branch and absent on the torch branch.  The two are not
+        # the same parameter set and were not made to agree: 31000 kJ/mol/nm^2
+        # here is a curvature of 15500, against the torch path's K_BB = 5000.
         bond_force = mm.HarmonicBondForce()
         for i in range(L - 1):
             bond_force.addBond(i, i + 1, 0.59, 31000.0)
         system.addForce(bond_force)
 
         if far_pairs:
+            # Far-pair restraint: 5000 kJ/mol/nm^2 with the 1/2 -> 2500 of
+            # curvature, at r0 = 1.0 nm.  This term exists ONLY on this branch;
+            # _relax_torch_gpu takes far_pairs and ignores it.
             pair_force = mm.HarmonicBondForce()
             for (i, j) in far_pairs:
                 if 0 <= i < L and 0 <= j < L and abs(i - j) > 1:
@@ -130,30 +226,56 @@ def _relax_torch_gpu(
 ) -> Tuple[np.ndarray, Dict]:
     """torch GPU relaxation: full CG force field + gradient-descent minimization.
 
-    Force field (aligned with openmm_gpu_refiner._build_3bead_system_gpu):
-      - Backbone P-P bond:     K_BB=500,     r0=0.59nm
-      - BSJ closure:           K_BSJ=800,    r0=0.59nm
-      - Backbone P-P-P angle:  K_ANGLE=600,  θ0=150°
-      - P-P-P-P dihedral:      K_DIH=800,    θ0=33°
-      - WC N-N pairing:        K_PAIR=1500,  r0=1.0nm
-      - P(i)-P(i+2) stacking:  K_STACK=500,  r0=0.59nm
-      - soft-sphere clash:     K_CLASH=5000
+    Functional form -- SINGLE-SIDED harmonics, no 1/2 (module header has units,
+    the comparison against the neighbouring fields, and the warning):
+
+        E = K_BB    * (|P(i)-P(i+1)| - BOND_R0)^2          over backbone bonds
+          + K_BSJ   * (|P(0)-P(L-1)| - BOND_R0)^2          BSJ closure
+          + K_ANGLE * (theta(j) - ANGLE_0)^2                P-P-P angle at j, rad
+          + K_DIH   * (phi(i) - DIH_0)^2                    unsigned angle between
+                                                            consecutive plane
+                                                            normals, rad
+          + K_PAIR  * w(i,j) * (|P(i)-P(j)| - PAIR_R0)^2    WC pairs from pairs_all
+
+    The constants below are the ones this function defines and uses.  They are
+    not the numbers of openmm_gpu_refiner._build_3bead_system_gpu, even though
+    an earlier version of this docstring said they were: it listed K_BB=500,
+    K_BSJ=800, K_ANGLE=600, K_DIH=800, K_PAIR=1500, K_STACK=500, K_CLASH=5000
+    -- stale numerals belonging to torch_cgsim.py and the OpenMM refiner, none
+    of which this file has ever computed with (verified back to the initial
+    commit).
+
+    far_pairs is accepted for signature compatibility and IGNORED here: the
+    far-pair restraint is implemented only on relax_structure's OpenMM branch.
+    A caller that passes far_pairs and lands on this branch gets no far-pair
+    term at all (isrnaclong.py:1712, Level 2.5b, is such a caller).
     """
     dev = torch.device("cuda")
     L = len(coords)
 
-    # Force constants (nm units, aligned with the OpenMM version)
+    # Force constants: distances in nm, angles in rad, energies in kJ/mol, and
+    # SINGLE-SIDED -- E = K*(x-x0)^2 with NO 1/2 (module header has the full warning).
+    # These are hand-set restraint strengths for a geometric cleanup, not measured
+    # springs: "hard restraint" and "soft preference" below are the author's own words,
+    # and none of these is a kBT/sigma^2 value.  The old comment here, "aligned with the
+    # OpenMM version", is false in both directions -- the OpenMM branch above uses 31000
+    # and 5000 with the 1/2, and openmm_gpu_refiner.py (the file the docstring claimed)
+    # uses 11.22 kJ/mol/A^2.  A difference is evidence, not an error to smooth away.
     K_BB = 5000.0   # bond: hard restraint, must be satisfied
     K_BSJ = 5000.0  # BSJ: treated like a bond
-    K_ANGLE = 200.0  # angle: soft preference
-    K_DIH = 200.0   # dihedral: soft preference
-    K_PAIR = 500.0   # pairing: soft preference (much weaker than bonds)
-    K_STACK = 0.0    # stacking: not restrained during relaxation
-    K_CLASH = 5000.0
+    K_ANGLE = 200.0  # angle: soft preference  [kJ/mol/rad^2]
+    K_DIH = 200.0   # dihedral: soft preference  [kJ/mol/rad^2]
+    K_PAIR = 500.0   # pairing: soft preference (much weaker than bonds); scaled by pr_w
+    K_STACK = 0.0    # stacking: not restrained during relaxation.  Dead twice over:
+                     # e_stack below is also missing from the returned energy.
+    K_CLASH = 5000.0  # DEAD CONSTANT: referenced by nothing in this file.  Clash is
+                      # handled by the literal push-apart loop in phase 3 (CLASH_R),
+                      # not by an energy term, despite the name and the docstring.
     BOND_R0 = 0.59       # nm
     PAIR_R0 = 1.0        # nm
     ANGLE_0 = 2.618      # rad (150°)
-    DIH_0 = 33.0 * np.pi / 180.0  # rad
+    DIH_0 = 33.0 * np.pi / 180.0  # rad (0.5759587); applied to acos(n1.n2), which is
+                                  # unsigned and in [0, pi], not a signed torsion
 
     pos = torch.tensor(coords / 10.0, dtype=torch.float64, device=dev)
 
@@ -247,13 +369,17 @@ def _relax_torch_gpu(
             dist_pr = diff_pr.norm(dim=1)
             e_pair = (K_PAIR * pr_w * (dist_pr - PAIR_R0) ** 2).sum()
 
-        # Stacking
+        # Stacking.  NOTE: e_stack is built and then NOT returned -- it is absent from
+        # the sum below, which is why K_STACK = 0.0 is dead twice over.  Keeping the
+        # omission visible matters: switching K_STACK back on would otherwise look like
+        # it re-enables a restraint while changing no energy at all.
         e_stack = torch.tensor(0.0, device=dev)
         if L >= 3:
             diff_st = p[stk_i] - p[stk_j]
             dist_st = diff_st.norm(dim=1)
             e_stack = (K_STACK * (dist_st - BOND_R0) ** 2).sum()
 
+        # e_stack deliberately absent (see the comment above).
         return e_bb + e_bsj + e_angle + e_dih + e_pair
 
     # Initial metrics
@@ -310,6 +436,11 @@ def _relax_torch_gpu(
 
     # ── Phase 3: soft-sphere repulsion (iterative push-apart + bond re-calibration) ──
     CLASH_R = 0.4  # nm (4Å, looser than the 3Å used elsewhere)
+    # Reading metrics['final']['clash_count'] alongside this: phase 3 pushes apart every
+    # pair with |i-j| >= 2 closer than CLASH_R (0.4 nm), while the metric is
+    # _count_clashes(): 0.3 nm, |i-j| >= 3, windowed to j < i+30.  So a structure that
+    # hits the 100-iteration cap can stay 0.3-0.4 nm dirty without the metric saying so,
+    # and a clash further apart than 30 residues is never counted at all.
     with torch.no_grad():
         p = pos.clone()
         for iteration in range(100):
@@ -351,7 +482,7 @@ def _relax_torch_gpu(
 def _simple_relax(coords: np.ndarray, sequence: str) -> Tuple[np.ndarray, Dict]:
     """Simple bond-length correction (fallback when OpenMM is unavailable)."""
     relaxed = coords.copy()
-    target_bond = 5.9  # Å
+    target_bond = 5.9  # Å -- the same distance as BOND_R0 = 0.59 nm on the other paths
 
     for iteration in range(10):
         for i in range(len(relaxed) - 1):
