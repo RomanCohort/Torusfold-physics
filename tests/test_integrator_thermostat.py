@@ -196,3 +196,43 @@ def test_force_kick_uses_the_stated_mass_not_a_hundredth_of_it():
     assert 2.0 * half == pytest.approx(period, rel=0.02), (
         f"period {2 * half:.4f} ps against the closed-form {period:.4f} ps "
         f"(ratio {2 * half / period:.4f}; the pre-fix code gave 10.000)")
+
+def test_free_oscillation_survives_when_the_tail_kick_uses_the_new_positions():
+    """A symplectic integrator conserves the amplitude; the shipped B-A-O-A-B map did not.
+
+    Friction 0 and no noise turn batch_langevin_step into a deterministic map. The two B
+    half-kicks used to share one force tensor, f(x_n), even though the second one acts at
+    x_{n+1}: that map has Jacobian determinant 1 - (dt^2/2)*a'(x), which for this bond is
+    1 + (dt*omega)^2/2 = 1 + 1.8e-5 > 1, so phase space and energy grow at every step.
+    Over 40000 steps the predicted energy factor is (1 + 1.8e-5)^40000 = 2.05, against
+    2.04 measured on the amplitude (0.0143 nm against the starting 0.010 nm).
+
+    Passing force_fn makes the last kick f(x'), which is what turns the deterministic part
+    into a composition of exact Hamiltonian shears. The amplitude then stays at the
+    starting 0.010 nm up to the bounded shadow-Hamiltonian oscillation, about 1e-5
+    relative at dt*omega = 0.0060 -- three orders inside the 2 percent asserted here, so
+    this bound is a statement about symplecticity, not about the step size.
+    """
+    k, r0, dt, n = 500.0, 0.590, 0.002, 40000
+    pos = torch.zeros((1, 3, 3), dtype=torch.float64)
+    pos[0, 1, 0] = r0 + 0.010
+    vel = torch.zeros_like(pos)
+    temps = torch.full((1,), T, dtype=torch.float64)
+    pi = torch.tensor([0])
+    pj = torch.tensor([1])
+
+    def force_fn(p):
+        return C._bond_f(p, pi, pj, k, r0)[1]
+
+    r = np.empty(n)
+    for step in range(n):
+        _e, f = C._bond_f(pos, pi, pj, k, r0)
+        # friction 0: c1 = 1 and c2 = 0, so only the deterministic B/A/B part acts
+        pos, vel = C.batch_langevin_step(pos, vel, f, temps, dt_ps=dt,
+                                         mass_amu=MASS, friction=0.0,
+                                         force_fn=force_fn)
+        r[step] = float(pos[0, 1, 0] - pos[0, 0, 0])
+    amp = float(np.abs(r - r0).max())
+    assert amp == pytest.approx(0.010, rel=0.02), (
+        f"amplitude {amp:.5f} nm against the initial displacement 0.010 nm "
+        f"(ratio {amp / 0.010:.4f}); without force_fn the same run grows to 0.0143 nm")

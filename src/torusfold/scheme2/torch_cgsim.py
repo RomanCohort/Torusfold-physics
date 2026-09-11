@@ -21,7 +21,7 @@ Unit conventions match the OpenMM path: internally nm / kJ/mol, at the API in An
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -1602,17 +1602,44 @@ def batch_langevin_step(
     temperatures: "torch.Tensor",           # (B,) K
     dt_ps: float = 0.002, friction: float = 1.0,
     mass_amu: float = 110.0,
+    force_fn: Optional[Callable[["torch.Tensor"], "torch.Tensor"]] = None,
 ) -> Tuple["torch.Tensor", "torch.Tensor"]:
     """Langevin BAOAB integrator (per-replica temperature).
 
     BAOAB scheme (Leimkuhler & Matthews, 2013):
-      B: v += (f/m) * dt/2
+      B: v += (f(x)/m) * dt/2       # f at the incoming coordinates
       A: x += v * dt/2
       O: v = c1*v + c2*ξ  (Langevin drag + noise)
       A: x += v * dt/2
-      B: v += (f/m) * dt/2
+      B: v += (f(x')/m) * dt/2      # f at the post-update coordinates; see force_fn
 
     More accurate than BBK (v-v-r), especially in the high-friction regime.
+
+    force_fn: optional callable force_fn(positions) -> forces, where the result has the
+        same shape, units (kJ/mol/nm) and meaning as the forces argument: the forces of
+        the Hamiltonian at the supplied coordinates. When it is given it is called once,
+        on the post-update pos, to supply the final B half-kick. The deterministic part
+        is then the composition B(dt/2) A(dt/2) A(dt/2) B(dt/2) of exact Hamiltonian
+        shears (the O step is a separate, exact Ornstein-Uhlenbeck update), so it is
+        symplectic with Jacobian determinant 1 and conserves a shadow Hamiltonian.
+        Callers that can recompute their force field should pass it; BatchedREMD and
+        BatchedREMD2D do.
+
+    force_fn=None IS A NON-SYMPLECTIC FALLBACK, kept so that callers which hold only a
+        force tensor keep their exact present behaviour. It reuses the incoming forces
+        for the final B kick as well, although that kick acts at x + dt*v, where the
+        force is generally different. With friction 0 and no noise the map is then
+
+            v' = v + dt*a(x)
+            x' = x + dt*v + (dt^2/2)*a(x)
+
+        whose Jacobian determinant is 1 - (dt^2/2)*a'(x). For a harmonic oscillator
+        (a' = -omega^2) that is 1 + (dt*omega)^2/2 > 1, so phase-space volume and energy
+        grow at every step. Measured (scripts/integrator_mass_probe.py, friction 0, one
+        500 kJ/mol/nm^2 bond, r0 = 0.590 nm, started 0.010 nm out, 40000 steps at
+        dt = 0.002 ps): the amplitude grew from 0.010 nm to 0.0143 nm, an energy factor
+        of 2.04 against the predicted (1 + 1.8e-5)^40000 = 2.05. Do not use this path for
+        production dynamics.
     """
     def _integrator_finite_guard():
         _require_finite(pos, "input coordinates")
@@ -1659,9 +1686,21 @@ def batch_langevin_step(
     vel.add_(_safe_randn(vel.shape, vel.device) * noise_scale * c2)
     # A step: half-step position update
     pos.add_(vel * half_dt)
-    # B step: half-step velocity update (using the same forces; a simplified
-    # version - the exact one would require recomputing the forces)
-    vel.add_(forces * half_dt / mass_amu)
+    # B step: half-step velocity update at the post-update coordinates.
+    # With force_fn the kick is f(x') and the step is symplectic; without it this reuses
+    # f(x) from the incoming tensor, the documented non-symplectic fallback.
+    if force_fn is None:
+        tail_forces = forces
+    else:
+        tail_forces = force_fn(pos)
+        if not torch.is_tensor(tail_forces):
+            raise TypeError("force_fn must return a torch.Tensor of the same shape as forces")
+        if tail_forces.shape != forces.shape:
+            raise ValueError(
+                f"force_fn returned shape {tuple(tail_forces.shape)}, "
+                f"expected {tuple(forces.shape)} (same as forces)")
+        _require_finite(tail_forces, "recomputed forces")
+    vel.add_(tail_forces * half_dt / mass_amu)
     _require_finite(pos, "integrated coordinates")
     _require_finite(vel, "integrated velocities")
     return pos, vel
@@ -1724,8 +1763,11 @@ class BatchedREMD:
         for rep in range(n_reports):
             for _ in range(self.exchange_interval):
                 en, f = cg_forces_3bead(pos, pairs_t, pw)
-                pos, vel = batch_langevin_step(pos, vel, f, temps_t,
-                                               dt_ps=self.dt)
+                # force_fn: the final B half-kick must see the forces at the post-update
+                # coordinates, otherwise the deterministic map is not symplectic.
+                pos, vel = batch_langevin_step(
+                    pos, vel, f, temps_t, dt_ps=self.dt,
+                    force_fn=lambda _p: cg_forces_3bead(_p, pairs_t, pw)[1])
 
             with torch.no_grad():
                 pos = pos.detach()
@@ -2300,7 +2342,10 @@ class BatchedREMD2D:
         with torch.no_grad():
             for _ in range(500):
                 _e, _f = cg_energy_forces(pos, pairs_t, pw, lams=lams_t)
-                pos, vel = batch_langevin_step(pos, vel, _f, temps_t, dt_ps=self.dt)
+                pos, vel = batch_langevin_step(
+                    pos, vel, _f, temps_t, dt_ps=self.dt,
+                    force_fn=lambda _p: cg_energy_forces(
+                        _p, pairs_t, pw, lams=lams_t)[1])
         _require_finite(pos, "equilibrated coordinates")
 
         if verbose:
@@ -2384,6 +2429,9 @@ class BatchedREMD2D:
                 # Bug 5 fix: renamed to clearer variable names (recomputed each step, not accumulated)
                 en_total, f_total = cg_energy_forces(pos, pairs_t, pw, lams=lams_t,
                                                      cell_list=cl_2d)
+                # The TriRNASP part of f_total, when one is injected below; it is held
+                # fixed between refreshes, so the recomputed tail force uses the same term.
+                f_tri_injected = None
 
                 if tri_pot_cpu is None and tri_pot is not None:
                     # ── GPU TriRNASP energy recording only (every 500 steps) ──
@@ -2476,10 +2524,25 @@ class BatchedREMD2D:
 
                     f_tri_full[:, p_idx, :] = f_tri_raw
                     f_total = f_total + f_tri_full
+                    f_tri_injected = f_tri_full
                     # Energies are only computed at exchange/report time, avoiding an O(N²) GPU Tri score every step.
 
-                pos, vel = batch_langevin_step(
-                    pos, vel, f_total, temps_t, dt_ps=self.dt)
+                if f_tri_injected is None:
+                    # force_fn: the final B half-kick needs the forces at the post-update
+                    # positions, so the CG force is recomputed; without it the integrator
+                    # reuses f(x) and the deterministic map is not symplectic.
+                    pos, vel = batch_langevin_step(
+                        pos, vel, f_total, temps_t, dt_ps=self.dt,
+                        force_fn=lambda _p: cg_energy_forces(
+                            _p, pairs_t, pw, lams=lams_t, cell_list=cl_2d)[1])
+                else:
+                    # The cached TriRNASP force is constant across the refresh interval, so
+                    # the tail force is CG(x') + the same injected Tri term.
+                    pos, vel = batch_langevin_step(
+                        pos, vel, f_total, temps_t, dt_ps=self.dt,
+                        force_fn=lambda _p: cg_energy_forces(
+                            _p, pairs_t, pw, lams=lams_t, cell_list=cl_2d)[1]
+                        + f_tri_injected)
 
             e_full, e_solute = _energy_split(pos)
             # Extract the total energy of each swapped state before accepting; rejected states are left untouched.
