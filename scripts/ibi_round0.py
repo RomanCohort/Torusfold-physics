@@ -21,7 +21,16 @@ whether the rest of the loop is worth running.
 The field is used exactly as shipped, including its force cap (force_cap's default, read from the
 signature below rather than written here), because that is what the pipeline runs.
 
-Run: python scripts/ibi_round0.py [n_rep] [n_steps] [struct_idx]
+Run: python scripts/ibi_round0.py [n_rep] [n_steps] [struct_idx] [friction] [stride] [burn]
+
+The BURN argument is separate from NSTEPS on purpose. It used to be NSTEPS // 5, so asking for a
+longer run moved the sampling window as well as lengthening it, and a residual that fell could
+not be told apart from a window that had merely slid past a transient. Pass it explicitly to keep
+the window fixed while the run grows. 0 or omitted means NSTEPS // 5, the old behaviour.
+
+The progress line reports each coordinate's sim/ref and the joint mean |ln(sim/ref)| over the
+window SO FAR, so one long run shows whether the estimate has stopped moving. Before this it
+printed sim/1D, which is the coupling correction and not the acceptance number.
 """
 import sys
 from pathlib import Path
@@ -96,7 +105,12 @@ pw = torch.ones(len(ij), dtype=torch.float32)
 temps = torch.full((NREP,), 300.0, dtype=torch.float64)
 
 torch.manual_seed(SEED)
-burn = NSTEPS // 5
+# The sampling window, decoupled from the run length. See the docstring.
+_burn_arg = int(sys.argv[6]) if len(sys.argv) > 6 else 0
+burn = _burn_arg if _burn_arg > 0 else max(NSTEPS // 5, 1)
+print(f"burn = {burn} steps = {burn * 0.002:.1f} ps; sampling window "
+      f"{burn * 0.002:.1f}-{NSTEPS * 0.002:.1f} ps")
+print("  progress: each column is sim/ref; J is the joint mean |ln(sim/ref)| over the window so far")
 # hoisted so the progress line can print the coupling ratio while the run is going
 K_SHIPPED = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_CN,
              "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
@@ -152,19 +166,21 @@ for step in range(NSTEPS):
             clash_below_live += int((dd < C.CLASH_SIGMA).sum())
     if (step + 1) % max(NSTEPS // 10, 1) == 0:
         el = time.time() - t0
-        parts = []
+        parts, _joint = [], []
         for c in B.COORDS:
             s1, s2, n = acc[c]
             if n:
                 mm = s1 / n
                 ss = float(np.sqrt(max(s2 / n - mm * mm, 0.0)))
-                k = K_SHIPPED[c]
-                s1d = np.sqrt(B.KBT / k) if k > 0 else np.nan
-                parts.append(f"{c[:5]} {ss / s1d:5.2f}" if s1d == s1d
-                             else f"{c[:5]}  n/a")
+                rs = TAB[c]["sigma"]
+                r = ss / rs if rs > 0 else float("nan")
+                parts.append(f"{c[:5]} {r:5.3f}")
+                if r == r and r > 0:
+                    _joint.append(abs(float(np.log(r))))
             else:
                 parts.append(f"{c[:5]}   --")
-        print(f"  {step+1:>7d} {el:6.0f}s  " + "  ".join(parts))
+        _j = float(np.mean(_joint)) if _joint else float("nan")
+        print(f"  {step+1:>7d} {el:6.0f}s  " + "  ".join(parts) + f"   J {_j:.4f}")
 
 el = time.time() - t0
 print(f"done in {el:.0f} s, {NSTEPS / el:.1f} steps/s")
