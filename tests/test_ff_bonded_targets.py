@@ -398,6 +398,32 @@ def test_kmg_reaches_the_explicit_paths_that_use_it():
     assert after[0] != before[0], "cg_forces_explicit_batched ignored a change to K_MG"
     assert after[1] != before[1], "cg_forces_explicit ignored a change to K_MG"
 
+def test_the_force_does_not_depend_on_whether_the_caller_wants_a_graph():
+    """cg_energy_forces must return the same force inside and outside torch.no_grad().
+
+    BatchedREMD2D.run wraps both its 500-step Langevin relaxation and its stepping loop in
+    torch.no_grad(), so the shipped GPU path called this function with grad disabled. The GB/SA
+    and Manning graph used to be built outside any grad-enabled region, so the later .backward()
+    could only propagate through the Manning term: the solvation force was absent while its
+    energy was still added to total_E. Measured on 1ET4 that was 35 of 105 beads differing by up
+    to 7.77 kJ/mol/nm out of a maximum of 2447.92, and the energy short by the 23.22 kJ/mol
+    Manning term.
+
+    A force that depends on the caller's autograd mode is not a force.
+    """
+    pos, pairs = _chain()
+    cl = C.GPUCellList(cell_size=1.5)
+    cl.build(pos)
+    e_on, f_on = C.cg_energy_forces(pos, pairs, None, cell_list=cl, force_cap=None)
+    with torch.no_grad():
+        e_off, f_off = C.cg_energy_forces(pos, pairs, None, cell_list=cl, force_cap=None)
+    assert torch.equal(f_on, f_off), (
+        "the force changed inside torch.no_grad(); part of the field now depends on the caller's "
+        "graph, and the REMD drivers all call it that way")
+    assert torch.equal(e_on, e_off), (
+        "the energy changed inside torch.no_grad(), so a term is being skipped rather than merely "
+        "not differentiated")
+
 
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

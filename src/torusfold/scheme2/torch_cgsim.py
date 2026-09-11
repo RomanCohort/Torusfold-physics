@@ -157,6 +157,11 @@ K_DIH = 7.2         # P-P-P-P dihedral (kBT/sigma^2; was 500.0)
 # Stiffness of the excluded volume whose form, range and criterion are set out at
 # CLASH_SIGMA below (the constant is the same name, the same units and a different law:
 # the old one-sided linear spring saturated at K_CLASH*0.300 = 150 kJ/mol/nm).
+# Cap on the GB/SA + Manning gradient alone, inside cg_energy_forces. Kept as a module constant
+# so it can be measured rather than argued about; see the note at its use site. Setting it to a
+# large value effectively removes it.
+GB_FORCE_CAP = 50.0
+
 K_CLASH = 20000.0   # E = 0.5*k*(sigma-d)^2*(sigma/d)^2, sigma = CLASH_SIGMA
 K_BSJ = 600.0       # BSJ closure ← lowered from 800 to 600
 K_BSJ_GUIDE = 100.0 # BSJ closure guiding force (logistic sigmoid)
@@ -1087,43 +1092,70 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         total_F.index_add_(1, NN(pj), -f_bpp.squeeze(-1))
 
     # ── 13-17. GB/SA/Mg2+: O(L·K) cell-list optimized ──
-    gb_pos = pos_nm[:,P(torch.arange(L,device=dev)),:].detach().clone().requires_grad_(True)
-    ion_s = c_mg*2.0+c_na
-    ld = 0.304/math.sqrt(max(ion_s,1e-6))
-    SA_CUTOFF = 0.58; MG_CUTOFF = 1.0   # GB_CUTOFF is the module constant above
+    #
+    # THE GRAPH FOR THIS BLOCK IS BUILT HERE, NOT AT THE BACKWARD BELOW. The caller is often
+    # inside torch.no_grad() -- BatchedREMD2D.run wraps both its 500-step Langevin relaxation
+    # and its stepping loop in it -- and the caller's no_grad is about the caller's own graph,
+    # not about whether the force field has a solvation force. With the ops below under an
+    # outer no_grad they built no graph at all, so the later .backward() could only propagate
+    # through the Manning term: the GB/SA force was absent while its energy was still added.
+    # Measured on 1ET4, 35 of 105 beads differed by up to 7.77 kJ/mol/nm out of a maximum of
+    # 2447.92, and the reported energy was short by the 23.22 kJ/mol Manning term.
+    with torch.enable_grad():
+        gb_pos = pos_nm[:,P(torch.arange(L,device=dev)),:].detach().clone().requires_grad_(True)
+        ion_s = c_mg*2.0+c_na
+        ld = 0.304/math.sqrt(max(ion_s,1e-6))
+        SA_CUTOFF = 0.58; MG_CUTOFF = 1.0   # GB_CUTOFF is the module constant above
 
-    # P-particle cell-list
-    p_coords = gb_pos[0]
-    p_cell = torch.floor(p_coords / GB_CUTOFF).long()
-    ci = p_cell[:,None,:]; cj = p_cell[None,:,:]
-    p_in_cell = (ci-cj).abs().max(dim=2).values <= 1
-    p_idx_arr = torch.arange(L, device=dev)
-    p_seq_near = (p_idx_arr[:,None]-p_idx_arr[None,:]).abs() <= 2
-    p_valid = p_in_cell & ~p_seq_near & torch.triu(torch.ones(L,L,device=dev,dtype=bool), diagonal=1)
-    p_pairs = torch.nonzero(p_valid, as_tuple=False)
+        # P-particle cell-list
+        p_coords = gb_pos[0]
+        p_cell = torch.floor(p_coords / GB_CUTOFF).long()
+        ci = p_cell[:,None,:]; cj = p_cell[None,:,:]
+        p_in_cell = (ci-cj).abs().max(dim=2).values <= 1
+        p_idx_arr = torch.arange(L, device=dev)
+        p_seq_near = (p_idx_arr[:,None]-p_idx_arr[None,:]).abs() <= 2
+        p_valid = p_in_cell & ~p_seq_near & torch.triu(torch.ones(L,L,device=dev,dtype=bool), diagonal=1)
+        p_pairs = torch.nonzero(p_valid, as_tuple=False)
 
-    # Keep a differentiable tensor for backward
-    _gb_e_tot = torch.zeros(B, device=dev)
+        # Keep a differentiable tensor for backward
+        _gb_e_tot = torch.zeros(B, device=dev)
 
-    if p_pairs.numel() > 0:
-        pi_g, pj_g = p_pairs[:,0], p_pairs[:,1]
-        d_ij = gb_pos[:, pi_g, :] - gb_pos[:, pj_g, :]
-        r_ij = _safe_norm(d_ij, dim=-1, eps=eps)
-        inv_r = 1.0 / r_ij
+        if p_pairs.numel() > 0:
+            pi_g, pj_g = p_pairs[:,0], p_pairs[:,1]
+            d_ij = gb_pos[:, pi_g, :] - gb_pos[:, pj_g, :]
+            r_ij = _safe_norm(d_ij, dim=-1, eps=eps)
+            inv_r = 1.0 / r_ij
 
-        # Fused: merge the 3 exps
-        neg_r = -r_ij
-        exp_gb = torch.exp(neg_r / ld) * inv_r
-        sa_overlap = torch.clamp(1.0 - r_ij / SA_CUTOFF, min=0.0)
-        exp_mg = torch.exp(neg_r / 0.3)
+            # Fused: merge the 3 exps
+            neg_r = -r_ij
+            exp_gb = torch.exp(neg_r / ld) * inv_r
+            sa_overlap = torch.clamp(1.0 - r_ij / SA_CUTOFF, min=0.0)
+            exp_mg = torch.exp(neg_r / 0.3)
 
-        e_pair = (0.73*exp_gb + 2.12e-2*4*math.pi*0.0225*sa_overlap - c_mg*exp_mg) \
-            * _gb_switch(r_ij)
-        _gb_e_tot = 2.0 * e_pair.sum(dim=-1)
-        total_E += _gb_e_tot.detach()
+            e_pair = (0.73*exp_gb + 2.12e-2*4*math.pi*0.0225*sa_overlap - c_mg*exp_mg) \
+                * _gb_switch(r_ij)
+            _gb_e_tot = 2.0 * e_pair.sum(dim=-1)
+            total_E += _gb_e_tot.detach()
 
-    # Manning O(L)
-    if torch.is_grad_enabled():
+    # Manning O(L), and the GB/SA + Manning backward. THIS BLOCK MUST RUN EVEN WHEN THE CALLER
+    # IS INSIDE torch.no_grad().
+    #
+    # It is where the GB/SA and Manning forces are computed; the caller's no_grad is about the
+    # caller's own graph, not about whether the force field has a solvation force at all. The
+    # guard used to be "if torch.is_grad_enabled()", so under an outer no_grad the block was
+    # skipped entirely: the energy still received _gb_e_tot.detach() above and lost only the
+    # Manning term, while the force lost the whole GB/SA + Manning contribution.
+    #
+    # BatchedREMD2D.run wraps both its 500-step Langevin relaxation and its stepping loop in
+    # torch.no_grad(), so the shipped GPU path was integrating a field with the solvation energy
+    # present and the solvation force absent. Measured on 1ET4: energy 5386.152832 against
+    # 5409.370605, i.e. the Manning term missing, and 35 of 105 beads differing by up to
+    # 7.77 kJ/mol/nm out of a maximum of 2447.92.
+    #
+    # A real defect and a small one: 7.77 is 0.3 percent of that structure's largest force, so it
+    # does not explain the collapse measured in these runs or the three-fold rise in kinetic
+    # temperature. It is fixed because it is unambiguously wrong, not because it is the cause.
+    with torch.enable_grad():
         gb_dd_full = torch.cdist(gb_pos, gb_pos, p=2).clamp(min=eps)
         eye_diag = torch.eye(L,device=dev).unsqueeze(0) * 100
         rl = (gb_dd_full + eye_diag).min(dim=-1).values
@@ -1135,11 +1167,30 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         gb_total = _gb_e_tot + e_mi
         gb_total.sum().backward()
         if gb_pos.grad is not None:
-            # ★ Force cap: the GB/SA gradient can explode when atoms get too close (exp(-r/ld)/r → ∞)
-            # Limit each atom's GB force to ≤ 50 kJ/mol/nm to stop the next position step flying off
+            # A SECOND force cap, on the GB/SA + Manning gradient only and 100x smaller than the
+            # outer one. Its stated purpose is that the gradient "can explode when atoms get too
+            # close (exp(-r/ld)/r -> inf)", which is true, and clipping it is the wrong repair:
+            #
+            # the ENERGY of this block is added to total_E in full, with no matching clip. So
+            # wherever this fires the returned force is not -dE/dx, and it fires exactly when the
+            # energy is largest. A bead approaching a neighbour sees the energy climb while the
+            # force pushing it back stays at 50; when something else pulls it out, that stored
+            # energy is released as kinetic energy. It is a heater, by construction.
+            #
+            # It also predicts an observation made before it was found: raising the OUTER cap from
+            # 200 to 5000 raised the mean kinetic temperature from 440.8 K to 606.6 K against a
+            # 300 K target, because every other term then delivers more of its true force while
+            # this one stays clipped at 50.
+            #
+            # The clip can now be removed rather than retuned, because the excluded volume was
+            # rebuilt from the database with sigma = 0.3975 nm and diverges as d -> 0. It holds P
+            # beads at the distance real structures keep them, so the GB singularity it was
+            # guarding against is no longer reachable. If that is wrong, the honest repair is a
+            # soft-core GB pair term whose energy and gradient are clipped together -- not a clip
+            # on the gradient alone, which is what this was.
             gb_f = -gb_pos.grad
             _gb_f_mag = gb_f.norm(dim=-1, keepdim=True).clamp(min=1e-12)
-            gb_f = gb_f * torch.clamp(50.0 / _gb_f_mag, max=1.0)
+            gb_f = gb_f * torch.clamp(GB_FORCE_CAP / _gb_f_mag, max=1.0)
             total_F[:,P(torch.arange(L,device=dev))] += gb_f
 
     # ── Global safety net: NaN/Inf detection + force cap ──
