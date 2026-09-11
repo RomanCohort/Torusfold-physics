@@ -21,7 +21,7 @@
 | **Role** | Student |
 | **Tasks** | Software, Analysis, Data Curation |
 
-## Specific Tasks（约 144 词）
+## Specific Tasks（139 词，正文，不含标题）
 
 `<Name>` is a methodical, exacting computational biologist who rebuilt the calibration of
 TorusFold's coarse-grained RNA force field. Across Software, Analysis and Data Curation, they
@@ -29,9 +29,9 @@ re-derived the stiffnesses of four bonded coordinates from the statistical distr
 deposited structures (`k = kBT/sigma^2`), zeroed a fifth that was exactly redundant, added four
 backbone distances the field had never covered, and re-cut the excluded-volume range to the
 database minimum with its stiffness by Boltzmann inversion. In the same field they found and
-repaired nine silent defects — a thermostat running at 0.4 T, an effective mass 100x too large, a
-non-symplectic integrator, pair-summed forces that dropped duplicate-index contributions, and a
-solvation force that vanished under `torch.no_grad`. They established the first measured upper
+repaired sixteen silent defects, listed in `docs/silent_defects.md` — among them a thermostat
+running at 0.4 T, an effective mass 100x too large, and a base-pair restraint silently switched
+off for 89 percent of true pairs. They established the first measured upper
 bound on the base-pairing spring by scoring register-shift decoys, and reported the null results as
 plainly as the others.
 
@@ -45,9 +45,9 @@ plainly as the others.
 - **引用编号。** 范例里每条具体工作是 `(1, 2)` / `(3-5)` 这样标到 Wiki 或
   GitLab 上的证据。现在一个都没有 —— 需要你填：
   - 力场常数与四个新项的来源 → 分析脚本 / 数据库说明
-  - 九个缺陷 → 各自对应的 commit
+  - 十六个缺陷 → 各自对应的 commit（清单与各自的证据在 `docs/silent_defects.md`）
   - 配准位移诱饵的上界 → 那个脚本
-- **词数。** 现在 144 词，落在那句「150 词左右」上。
+- **词数。** 139 词，正文，不含标题。口径：`python -c` 数标题与 `---` 之间的非空行。落在那句「150 词左右」上。
 
 ## 两个必须你定的
 

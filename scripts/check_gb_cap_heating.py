@@ -40,7 +40,8 @@ x0 = torch.tensor(s0["pos"].reshape(1, 3 * L, 3), dtype=torch.float64).repeat(NR
 temps = torch.full((NREP,), TARGET, dtype=torch.float64)
 
 print(f"{s0['name']} L={L}, {NREP} replicas, {PS} ps, dt {DT}, cap 5000 (outer), friction 1.0")
-print(f"thermal |v| at {TARGET:.0f} K = {np.sqrt(2.494 / 100 / MASS):.4f} nm/ps")
+# sqrt(kBT/m): kBT = 2.494 kJ/mol = 2.494 amu nm^2/ps^2, m in amu -> nm/ps directly.
+print(f"thermal |v| at {TARGET:.0f} K = {np.sqrt(2.494 / MASS):.4f} nm/ps")
 print()
 print(f"{'GB_FORCE_CAP':>13s} {'mean T (K)':>12s} {'T/target':>9s} "
       f"{'closest median (nm)':>20s} {'finite':>8s}")

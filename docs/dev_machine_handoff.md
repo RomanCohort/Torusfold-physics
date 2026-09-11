@@ -76,7 +76,7 @@ sample_bonded_chain.py 不能直接改成那个：它刻意只跑 P 原子的四
 ## 六、到那台机器上的顺序
 
 ```
-python -m pytest tests/ -q                      # 131 个测试，确认环境对
+python -m pytest tests/ -q                      # 135 个测试，确认环境对
 python scripts/audit_field_state.py             # 全部在场常数 + 哪条路径是活的
 python scripts/ibi_round0.py 8 8000             # 第 0 轮残差，同时也是速率基准
 ```

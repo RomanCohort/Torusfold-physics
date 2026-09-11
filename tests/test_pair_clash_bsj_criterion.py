@@ -138,6 +138,46 @@ def test_the_pair_guide_cannot_move_the_base_pair_minimum_by_more_than_one_sprea
         f"from PAIR_NN; the criterion allows at most 1.00")
 
 
+def test_the_guide_pulls_at_long_range_and_leaves_the_well_alone():
+    """The guide's sign was wrong: it pulled hardest where the pair was already too close.
+
+    scripts/measure_guide_shape_fix.py, at K_PAIR_GUIDE = 20.8, width 0.2:
+
+        r (nm)     0.5     1.0     1.5     2.0     3.0
+        new       7.89   52.00   96.11  103.30  104.00
+        old      96.11   52.00    7.89    0.70    0.00
+
+    The two agree exactly at r0 and are mirror images about it. A pair at 3 nm now feels
+    104 kJ/mol/nm instead of 0.00, and a pair at 0.5 nm feels 7.89 instead of 96.11, so the well
+    is no longer out-pulled. The effect on the minimum was 7.43 spreads of PAIR_NN at
+    K_PAIR_GUIDE = 100 with the old sign, against 1.93 now.
+    """
+    K, W = C.K_PAIR_GUIDE, 0.2
+    sat = K / W
+
+    def guide_force(x):
+        _e, sig = C._sigmoid_f(torch.tensor([[[x]]], dtype=torch.float64),
+                               C.PAIR_NN, K, W)
+        return float(sig) * sat
+
+    assert guide_force(3.0) > 0.9 * sat, (
+        f"the guide applies {guide_force(3.0):.2f} at 3 nm against a saturation of {sat:.2f}; with "
+        f"the sign the wrong way round this was 0.00 and the term did nothing at long range")
+    assert guide_force(0.5) < 0.15 * sat, (
+        f"the guide applies {guide_force(0.5):.2f} at 0.5 nm; it must not pull hard where the "
+        f"pair is already too close, which is what moved the restraint's minimum")
+    # both shapes give sigmoid(0) at r0, so this is the one place they must agree
+    assert guide_force(C.PAIR_NN) == pytest.approx(0.5 * sat, rel=1e-9)
+    # and the minimum the criterion is about
+    rr = torch.linspace(0.05, 2.5, 20001, dtype=torch.float64)
+    e = (0.5 * C.K_PAIR * (rr - C.PAIR_NN) ** 2
+         + C._sigmoid_f(rr.reshape(1, -1, 1), C.PAIR_NN, K, W)[0].reshape(-1))
+    r_min = float(rr[int(torch.argmin(e))])
+    assert C.PAIR_NN - r_min <= SIGMA_NN, (
+        f"the pair minimum is {C.PAIR_NN - r_min:.4f} nm from PAIR_NN, above the one-spread "
+        f"criterion")
+
+
 def test_the_excluded_volume_range_and_what_it_costs_on_native_geometry():
     """The range is set by the P-P minimum, and the set it acts on reaches below that.
 

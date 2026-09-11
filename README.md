@@ -389,8 +389,13 @@ coordinate by chemical identity. **No measurement** means exactly that.
   `bsj contact` 23.46). They act on `P(0)-P(L-1)`, which only exists in a circular molecule. A run
   on a linear chain should set all three to zero and say so in its provenance line.
 - **The field is too soft in the coupled chain.** IBI round 0 measures the simulated spread at
-  1.09 to 1.36 times the single-coordinate prediction for every bonded coordinate but the
-  dihedral. That residual is coupling and belongs to IBI, not to another k.
+  1.15 to 1.70 times the single-coordinate prediction for every bonded coordinate but the
+  dihedral (which sits at 0.97). That residual is coupling and belongs to IBI, not to another k.
+  It was 1.09 to 1.36 before `_sigmoid_f` was put into its correct long-range shape; the
+  eleven percent it cost, and the curvature arithmetic behind it, are in section 3ay.
+- **The minimiser in `check_field_after_fix.py` currently stalls.** Six restarts, max abs F
+  690.19 kJ/mol/nm against a 236.3 force floor, so that script's starting point is not a true
+  minimum. This is the one open item in the acceptance table below.
 - **The excluded volume has one range for all bead types.** It presses outward on 167 of 2 022 024
   pairs. Per-type ranges were measured and rejected: they would remove 0.008 percent of contacts
   and the criterion cannot supply a per-type stiffness.
@@ -414,8 +419,56 @@ python scripts/audit_field_state.py                  # every live constant, and 
 python scripts/scan_unreturned_energies.py           # terms computed and never read
 ```
 
-`python -m pytest tests/` is 131 tests. Several of them exist to stop a constant moving away from
+`python -m pytest tests/` is 135 tests. Several of them exist to stop a constant moving away from
 the measurement above without the suite saying so.
+
+The sixteen silent defects that were found and repaired in this field - a number this file and
+`docs/attribution.md` both used to state as nine, without a list - are indexed in
+`docs/silent_defects.md`, one row each, with the measurement that found it and the test that
+now holds it. The index exists so the count can be checked.
+
+### If you change a constant
+
+The numbers in sections 3ax and 3ay of `docs/statistical_potentials_as_forces.md` are the
+acceptance test for any edit to `torch_cgsim.py`, not only for the constants those sections
+changed. Run these four and compare against the table below.
+
+```
+python scripts/audit_field_state.py                  # every live constant, and which entry points are live
+python -m pytest tests/ -q                           # 135 tests; several pin the constants to their measurements
+python scripts/ibi_round0.py 8 8000                  # the sim/ref residual, 8 replicas x 16 ps
+python scripts/check_field_after_fix.py 40.0 2 6000  # 40 ps of dynamics, then minimisation
+```
+
+| what it checks | what it measures now | how it fails |
+| :-- | --: | :-- |
+| last-quarter T | 289.4 K (mean 295.9, 0.99x) | far from 300 K: the thermostat or a cap broke |
+| potential-energy drift | -171.2 kJ/mol over 40 ps | measured from an unconverged start; see below |
+| minimiser | 4427 iterations, 6 restarts, max abs F 690.19 | **this row currently fails** |
+| frames below 0.30 nm | 0 / 3000 | this is the collapse check |
+| joint mean abs ln(sim/ref) | 0.3263 | see the paragraph below |
+
+**The minimiser row is the one open item, and it is why the drift row is not yet meaningful.**
+`check_field_after_fix.py` descends with a halving step (accept `x + s*f` and grow it by 1.2, else
+halve, restart below 1e-12), so six restarts say the method stalls on this landscape, not that a
+690 kJ/mol/nm force is unbalanced. It is nonetheless above the P-C4' force floor of 236.3, so that
+run's starting point is not a true minimum and its -171.2 drift is the relaxation of that start
+rather than a property of the field.
+
+Section 3ay has the full comparison and the identified cause: putting `_sigmoid_f` into its
+correct long-range shape changed its curvature at the well from -130 to +130 kJ/mol/nm^2, which
+raises the effective WC pair spring from about 470 to about 730 at `K_PAIR_GUIDE = 20.8`.
+Rebalancing that means touching `K_PAIR`, whose criterion only bounds it to
+[204.8, 2173.9] with no measurement inside.
+
+**Expect the joint metric not to move, and do not treat that as failure.** One `k` buys one
+coordinate and sells another: raising `K_BB` sharpened bb_bond to exactly the reference
+sigma (1.588 down from 1.945) and pushed intra_pc, intra_cn and angle from 1.36 / 1.36 / 1.09 to
+1.50 / 1.49 / 1.19, leaving the joint residual at 0.2937 against 0.2895. The `_sigmoid_f` correction
+then moved it to 0.3263, eleven percent the other way. Both are measurements, not tolerances. A
+change that improves the joint number by less than about 10 percent has not been shown to do
+anything, and matching the joint distribution needs IBI iterating on the potential rather than
+another constant.
 
 ## Data formats & synthetic-biology standards
 

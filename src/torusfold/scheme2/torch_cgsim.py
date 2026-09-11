@@ -285,11 +285,16 @@ K_BSJ = 1122.4      # BSJ closure; transferability, was 600.0 (itself lowered fr
 # (scripts/decompose_pair_spread.py: 3059 WC pairs over 99 chains, 98.6 percent of it within-chain),
 # and the criterion solves to K_PAIR_GUIDE <= 20.865 (scripts/solve_pair_guide_scale.py).
 #
-# What this does NOT fix, stated because it is the larger question: the term is named and
-# commented "far/long-range pair guiding force", but its shape is a SHORT-range reward -- the
-# docstring at _sigmoid_f describes exactly that, so the shape matches the docstring and not the
-# name. A term that acts only at long range would be E = +K*softplus((r - r0)/w), whose force is
-# inward and which is zero for r < r0. Changing it would move both guides, and is not done here.
+# This WAS the larger question and it is now fixed. The term is named and commented
+# "far/long-range pair guiding force" and its shape used to be a SHORT-range reward,
+# E = -K*softplus((r0-r)/w), which pulled hardest when the pair was already too close and
+# vanished at long range. It is now E = +K*softplus((r - r0)/w): zero for r < r0, a bounded
+# inward pull above it.
+#
+# The two shapes agree IN FORCE at r0 -- both give K/(2w) inward -- and differ in curvature.
+# That is why the swap is not free: at the well the old shape contributed -K/(4w^2) and the new
+# one +K/(4w^2), so at K = 20.8, w = 0.2 the effective pair spring moved from 600-130 to 600+130.
+# Measured cost and gain: docs/statistical_potentials_as_forces.md section 3ay.
 # ── K_BSJ_GUIDE: two shipped targets disagreed about one coordinate, and the guide won ──
 # K_BSJ restrains P(0)-P(L-1) toward BOND_P_NEXT = 0.590. The guide's r0 is PAIR_NN = 1.0, and its
 # force never vanishes. So the closure coordinate had two declared targets, 0.590 and 1.0, and the
@@ -304,6 +309,11 @@ K_BSJ = 1122.4      # BSJ closure; transferability, was 600.0 (itself lowered fr
 # With the shipped pair the two ends of the chain are driven to a point overlap: the guide's pull
 # saturates at K/0.2 and never turns off, so nothing holds the coordinate once its harmonic is
 # outpulled. Setting K_BSJ by transferability (below) does not fix it on its own.
+#
+# THAT TABLE IS THE OLD SHAPE. Its pull was inward at every distance INCLUDING r < r0, which is
+# what walked the ends through each other. With the corrected shape the force is exactly zero
+# below r0, so the overlap row cannot recur; at 11.6 the closure minimum measures 0.5842 nm
+# against the 0.590 target, a shift of 0.0058 nm, one eighth of the one-bond criterion.
 #
 # The criterion is the same one used for K_PAIR_GUIDE, with the spread this coordinate actually
 # has: the closure IS a P-P phosphodiester bond, and that bond's measured spread is 0.0470 nm, so
@@ -901,15 +911,15 @@ def cg_energy_3bead(
     if pairs_ij.numel() > 0:
         pi, pj = pairs_ij[:, 0].long(), pairs_ij[:, 1].long()
         d_guide = dist[:, P(pi), P(pj)]
-        # logistic sigmoid: force decreases near r0
-        e_guide = -K_PAIR_GUIDE * _stable_softplus(
-            -(PAIR_NN - d_guide) / 0.2).sum(dim=-1)
+        # long-range guide: zero below r0, bounded pull above it (see _sigmoid_f)
+        e_guide = K_PAIR_GUIDE * _stable_softplus(
+            (d_guide - PAIR_NN) / 0.2).sum(dim=-1)
 
     # ── BSJ closure guiding force ──
-    # E_bsj_guide = -K_BSJ_GUIDE × log(1 + exp(-(r0 - r)/0.2nm))
+    # E_bsj_guide = +K_BSJ_GUIDE * log(1 + exp((r - r0)/0.2nm))
     d_bsj = dist[:, P(0), P(L - 1)]
-    e_bsj_guide = -K_BSJ_GUIDE * _stable_softplus(
-        -(PAIR_NN - d_bsj) / 0.2)
+    e_bsj_guide = K_BSJ_GUIDE * _stable_softplus(
+        (d_bsj - PAIR_NN) / 0.2)
 
     # ── Contacts near the BSJ (distance-decaying) ──
     # Non-paired contact contribution within ±8nt
@@ -1126,16 +1136,28 @@ def _clash_f(pos, cell_list, k, sigma):
 
 
 def _sigmoid_f(dist, r0, k, width):
-    """Bounded near-attraction guide: E = -k*softplus(x), x = (r0-dist)/width.
+    """Long-range guide: E = +k*softplus(x), x = (dist - r0)/width.
 
-    r >> r0: x << 0 -> E -> 0 (no action far away); r < r0: x > 0 -> finite
-    attraction reward (bounded by -k*r0/width). dE/dr = +k*sig/width, so
-    F = -dE/dr * delta/r = -k*sig/width * delta/r (pulls paired residues
-    together). Returns (e, sig).
+    r << r0: x << 0 -> E -> 0, so the guide does not touch the well.
+    r >> r0: x >> 0 -> E grows linearly and the force saturates at k/width, so a distant pair is
+    pulled in with a BOUNDED force.
+    dE/dr = +k*sig/width, so F = -dE/dr * delta/r = -k*sig/width * delta/r (pulls together).
+    Returns (e, sig).
+
+    THE SIGN OF x USED TO BE THE OTHER WAY, and that made the term do the opposite of its name.
+    With x = (r0 - dist)/width it pulled hardest when the pair was already too close and did
+    nothing at long range. Its constant is commented "far/long-range pair guiding force" and the
+    pipeline uses it for far-pair-guided annealing, so the behaviour and the purpose disagreed.
+
+    Measured consequence, at K_PAIR_GUIDE = 100 (scripts/measure_pair_equilibrium.py): the
+    base-pair minimum sat at 0.1805 nm, 7.43 measured database spreads from the PAIR_NN the field
+    itself declares, because a guide that pulls hardest at short range simply out-pulls the
+    harmonic. With the sign corrected the short-range force vanishes and a pair at 3 nm feels
+    k/width * sigmoid(10) instead of k/width * sigmoid(-10) -- a real pull instead of none.
     """
-    x = (r0-dist)/width
+    x = (dist - r0) / width
     sig = torch.sigmoid(x)
-    e = -k * _stable_softplus(x)
+    e = k * _stable_softplus(x)
     return e, sig
 
 
@@ -1627,12 +1649,11 @@ def cg_forces_explicit_batched(
     # ── 9. BSJ guide: O(1) ──
     d_bsj_g = pos_nm[:,P(0)]-pos_nm[:,P(L-1)]
     dist_bg = _safe_norm(d_bsj_g, dim=-1, keepdim=True, eps=eps)
-    # Bounded near-attraction guide: E = -K*softplus(x), x = (R0-dist)/0.2.
-    # dE/dr = +K*sig/0.2, so F = -dE/dr * delta/r = -K*sig/0.2 * delta/r
-    # (pulls the BSJ ends together; far away the force vanishes).
-    sig = torch.sigmoid((PAIR_NN-dist_bg)/0.2)
-    e_bg = (-K_BSJ_GUIDE*_stable_softplus(
-        (PAIR_NN-dist_bg)/0.2)).sum(dim=-1)
+    # Long-range guide: E = +K*softplus(x), x = (dist-R0)/0.2. Zero for a close pair, a bounded
+    # pull for a distant one. dE/dr = +K*sig/0.2, so F = -K*sig/0.2 * delta/r.
+    sig = torch.sigmoid((dist_bg-PAIR_NN)/0.2)
+    e_bg = (K_BSJ_GUIDE*_stable_softplus(
+        (dist_bg-PAIR_NN)/0.2)).sum(dim=-1)
     f_bg = (-K_BSJ_GUIDE/0.2*sig/dist_bg*d_bsj_g).squeeze(-1)
     total_E += e_bg
     total_F[:,P(0)] += f_bg; total_F[:,P(L-1)] -= f_bg
@@ -2016,13 +2037,13 @@ def cg_forces_explicit(
     total_E += e_clash; total_F += f_clash
 
     # ── BSJ guide (single pair) ──
-    # Bounded near-attraction: x = (R0 - dist)/0.2; E = -K*softplus(x);
-    # dE/dr = +K*sig/0.2 -> F = -K*sig/0.2 * delta/r (pulls together)
+    # Long-range guide: x = (dist - R0)/0.2; E = +K*softplus(x). Zero for a close pair, a bounded
+    # pull for a distant one; dE/dr = +K*sig/0.2 -> F = -K*sig/0.2 * delta/r.
     delta_bsj_g = pos_nm[:, P(0)] - pos_nm[:, P(L - 1)]
     dist_bsj_g = delta_bsj_g.norm(dim=-1, keepdim=True).clamp(min=eps)
-    sig = torch.sigmoid((PAIR_NN - dist_bsj_g) / 0.2)
-    e_bsj_guide = -K_BSJ_GUIDE * _stable_softplus(
-        (PAIR_NN - dist_bsj_g) / 0.2).sum(dim=-1)
+    sig = torch.sigmoid((dist_bsj_g - PAIR_NN) / 0.2)
+    e_bsj_guide = K_BSJ_GUIDE * _stable_softplus(
+        (dist_bsj_g - PAIR_NN) / 0.2).sum(dim=-1)
     f_bsj_guide_mag = -K_BSJ_GUIDE / 0.2 * sig / (dist_bsj_g + eps)
     f_bsj_guide_vec = (f_bsj_guide_mag * delta_bsj_g / dist_bsj_g).squeeze(-1)
     total_E += e_bsj_guide
