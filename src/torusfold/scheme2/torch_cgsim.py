@@ -258,7 +258,14 @@ K_CLASH = 20000.0   # E = 0.5*k*(sigma-d)^2*(sigma/d)^2, sigma = CLASH_SIGMA
 #
 # A run that is not on a covalently closed chain should set all three to zero and SAY SO in its
 # provenance line -- scripts/ibi_round0.py prints a fingerprint for exactly that reason.
-K_BSJ = 600.0       # BSJ closure ← lowered from 800 to 600
+# K_BSJ is set by TRANSFERABILITY, not by measurement, and the difference matters. The target
+# (BOND_P_NEXT = 0.590 nm) is measured: mean over 6638 phosphodiester bonds. The stiffness is not:
+# no deposited chain is covalently closed (1 of 126 has its ends within 0.7 nm), so kBT/sigma^2
+# cannot be computed for this coordinate at all -- the free-end sd is 2.467 nm and means nothing.
+# What IS available is the identity argument: the BSJ is a 3'-5' phosphodiester bond, chemically
+# the same link as P(i)-P(i+1), so it inherits that bond's stiffness. 1122.4, the same value K_BB
+# now has. A transfer argument is weaker than a measurement and is labelled as such here.
+K_BSJ = 1122.4      # BSJ closure; transferability, was 600.0 (itself lowered from 800)
 # The two sigmoid guides. Their functional form is E = -K * softplus((r0 - r)/w), so their
 # gradient is +K*sigmoid((r0-r)/w)/w, which is INWARD at every separation: they pull harder the
 # closer the pair already is, and they do not vanish anywhere. On a coordinate that also carries a
@@ -283,7 +290,26 @@ K_BSJ = 600.0       # BSJ closure ← lowered from 800 to 600
 # docstring at _sigmoid_f describes exactly that, so the shape matches the docstring and not the
 # name. A term that acts only at long range would be E = +K*softplus((r - r0)/w), whose force is
 # inward and which is zero for r < r0. Changing it would move both guides, and is not done here.
-K_BSJ_GUIDE = 100.0 # BSJ closure guiding force (logistic sigmoid); see the note above and below
+# ── K_BSJ_GUIDE: two shipped targets disagreed about one coordinate, and the guide won ──
+# K_BSJ restrains P(0)-P(L-1) toward BOND_P_NEXT = 0.590. The guide's r0 is PAIR_NN = 1.0, and its
+# force never vanishes. So the closure coordinate had two declared targets, 0.590 and 1.0, and the
+# measured minimum went to neither:
+#
+#     scripts/measure_bsj_equilibrium.py   K_BSJ   K_BSJ_GUIDE   minimum at
+#                                            600       0           0.5900  <- the control
+#                                            600     100           0.0000  <- the ends OVERLAP
+#                                         1122.4     100           0.1508
+#                                         1122.4      20           0.5079
+#
+# With the shipped pair the two ends of the chain are driven to a point overlap: the guide's pull
+# saturates at K/0.2 and never turns off, so nothing holds the coordinate once its harmonic is
+# outpulled. Setting K_BSJ by transferability (below) does not fix it on its own.
+#
+# The criterion is the same one used for K_PAIR_GUIDE, with the spread this coordinate actually
+# has: the closure IS a P-P phosphodiester bond, and that bond's measured spread is 0.0470 nm, so
+# the guide must not move the minimum by more than that. Solves to K_BSJ_GUIDE <= 11.6304
+# (scripts/solve_bsj_guide_scale.py); 11.6 is adopted.
+K_BSJ_GUIDE = 11.6  # BSJ closure guide; <= 11.63 by the one-bond-spread criterion (was 100.0)
 K_PAIR_GUIDE = 20.8 # base-pair guide; <= 20.865 by the one-spread criterion above (was 100.0)
 K_BSJ_CONTACT = 50.0 # contacts near the BSJ (distance-decaying)
 # BPP soft constraint. E = -K_BPP * w * softplus((1.0 - r)/0.3), so its force is

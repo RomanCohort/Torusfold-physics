@@ -341,6 +341,82 @@ entry points to the module that implements it.
    between 1.0 and 2.0 kcal/mol. The thresholds are empirical, but the
    quantity being thresholded is a physical free-energy cost.
 
+## Force-field constants: what each one is set by
+
+Every constant in `src/torusfold/scheme2/torch_cgsim.py` is set by one of four things, and the
+four are not equally strong. This is the index; the reasoning, the numbers and the failed attempts
+are in `docs/statistical_potentials_as_forces.md` and in the comment at each constant.
+
+| constant | value | set by | where the number comes from |
+| :-- | --: | :-- | :-- |
+| `BOND_P_NEXT` | 0.590 | **measured** | mean over 6638 phosphodiester P(i)-P(i+1) bonds |
+| `K_BB` | 1122.4 | **criterion** | `kBT/sigma^2`, sigma = 0.0470 nm over those 6638 bonds |
+| `K_INTRA_PC` | 20752.7 | **criterion** | `kBT/sigma^2`, sigma = 0.010963 nm |
+| `K_INTRA_CN` | 36399.2 | **criterion** | `kBT/sigma^2`, sigma = 0.008278 nm |
+| `K_INTRA_PN` | 1785.9 | **criterion** | `kBT/sd^2`, sd = 0.0374 nm over 6764 observations |
+| `K_LINK_CP` | 9574.4 | **criterion** | `kBT/sd^2`, sd = 0.0161 nm |
+| `K_LINK_NP` | 5477.7 | **criterion** | `kBT/sd^2`, sd = 0.0213 nm |
+| `K_LINK_NC` | 383.0 | **criterion** | `kBT/sd^2`, sd = 0.0807 nm |
+| `K_ANGLE` | 28.1 | **criterion** | `kBT/sigma^2`, sigma = 0.297764 |
+| `K_DIH` | 7.2 | **criterion** | `kBT/sigma^2`, sigma = 0.587994 |
+| `CLASH_SIGMA` | 0.3975 | **measured** | the database's minimum non-bonded P-P distance |
+| `K_CLASH` | 20000.0 | **criterion, thin** | Boltzmann inversion of two bins containing ONE pair |
+| `K_BPP` | 13.4 | **criterion** | `0.6 * kBT / sigma_NN` |
+| `K_PAIR_GUIDE` | 20.8 | **criterion** | must not move the pair minimum by more than one spread |
+| `K_BSJ` | 1122.4 | **transferability** | the BSJ *is* a phosphodiester bond; not measured |
+| `K_BSJ_GUIDE` | 11.6 | **criterion** | same, on the closure coordinate, one *bond* spread |
+| `GB_FORCE_CAP` | 50.0 | **guard** | caps the solvation gradient only |
+| `force_cap` | 5000.0 | **guard** | above the 4103.6 max force at native geometry |
+| `K_STACK` | 0.0 | **ablation** | exactly redundant with `K_BB` and `K_ANGLE` |
+| `K_PAIR` | 600.0 | **no measurement** | bracket [204.8, 2173.9]; see below |
+| `K_BSJ_CONTACT` | 50.0 | **no criterion** | 17.3 percent of the energy at native geometry |
+
+The distinction that matters: **criterion** means `k = kBT/sigma^2` over the deposited-structure
+database, applied uniformly. **Transferability** means the value was inherited from a different
+coordinate by chemical identity. **No measurement** means exactly that.
+
+### Known limits, stated so they are not rediscovered as surprises
+
+- **`K_PAIR` has a measured floor and a measured ceiling and nothing inside.** The floor is
+  `kBT/sigma_NN^2 = 204.8`; the ceiling is 2173.9, where a register-shift decoy starts preferring
+  the wrong pairing. Nothing measured separates 600 from 1500, and the reason is now known: the
+  database has **no thermal width** for this coordinate. 98.6 percent of its spread is
+  residue-to-residue inside one conformation, so the pooled sigma is not a thermal width and no
+  amount of statistics will make it one.
+- **`K_BSJ` and the two related terms are the only ones set without a measurement**, because no
+  deposited chain is covalently closed.
+- **Three terms are 91.55 percent of the energy on a linear reference** (`bsj closure` 68.17,
+  `bsj contact` 23.46). They act on `P(0)-P(L-1)`, which only exists in a circular molecule. A run
+  on a linear chain should set all three to zero and say so in its provenance line.
+- **The field is too soft in the coupled chain.** IBI round 0 measures the simulated spread at
+  1.09 to 1.36 times the single-coordinate prediction for every bonded coordinate but the
+  dihedral. That residual is coupling and belongs to IBI, not to another k.
+- **The excluded volume has one range for all bead types.** It presses outward on 167 of 2 022 024
+  pairs. Per-type ranges were measured and rejected: they would remove 0.008 percent of contacts
+  and the criterion cannot supply a per-type stiffness.
+- **`cg_energy_forces` is the production field.** Four other entry points in the same module
+  compute different potentials under the same constant names; they raise unless
+  `ALLOW_ALTERNATE_FIELDS` is set.
+
+### Reproducing any of it
+
+Every number above comes from a script, and each script prints what it measured:
+
+```
+python scripts/decompose_pair_spread.py              # the base-pair spread, and why it has no thermal part
+python scripts/determine_k_bb.py                     # the K_BB sweep and the cap-saturation check
+python scripts/measure_pair_equilibrium.py           # where the pair minimum actually sits
+python scripts/solve_pair_guide_scale.py             # K_PAIR_GUIDE from the one-spread criterion
+python scripts/measure_bsj_equilibrium.py            # the closure coordinate, same question
+python scripts/measure_bsj_on_linear_references.py   # the 91.55 percent
+python scripts/ibi_round0.py 8 8000                  # the residual IBI would correct
+python scripts/audit_field_state.py                  # every live constant, and which paths are live
+python scripts/scan_unreturned_energies.py           # terms computed and never read
+```
+
+`python -m pytest tests/` is 131 tests. Several of them exist to stop a constant moving away from
+the measurement above without the suite saying so.
+
 ## Data formats & synthetic-biology standards
 
 Input: FASTA-like plain sequence (`sequence.txt`, `T`→`U` handled);
