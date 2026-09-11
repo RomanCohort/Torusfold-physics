@@ -717,17 +717,23 @@ def _dihedral_f(pos, k, target_cos):
 
 
 def _clash_f(pos, cell_list, k, r_cut):
-    """Clash force (cell-list)."""
+    """Clash force, evaluated for every replica.
+
+    The mask used to be (dist[0] < r_cut), so replica 0 decided which pairs counted as
+    clashing for all of them. A pair overlapping at 0.05 nm in replica 1 contributed exactly
+    zero if replica 0 had it 6 nm apart. It is now per batch, and over is zeroed where the
+    pair is outside the cutoff in that batch so the sum of squares is not polluted.
+    """
     pi, pj, delta, dist = cell_list.get_pair_info(pos)
-    mask = (dist[0] < r_cut)
-    if mask.sum() == 0:
+    if len(pi) == 0:
         return torch.zeros(pos.shape[0], device=pos.device), torch.zeros_like(pos)
-    pi_m, pj_m = pi[mask], pj[mask]
-    d_m = delta[:, mask, :]; r_m = dist[:, mask].unsqueeze(-1).clamp(min=1e-6)
-    f = k*(r_cut-r_m).clamp(min=0) * d_m/r_m  # F = k(rc-r)*delta/r
+    r = dist.clamp(min=1e-6)
+    over = (r_cut - r).clamp(min=0.0)
+    f = (k * over / r).unsqueeze(-1) * delta           # F = k(rc-r)*delta/r
     F = torch.zeros_like(pos)
-    F[:, pi_m] += f.squeeze(-1); F[:, pj_m] -= f.squeeze(-1)
-    e = (0.5*k*(r_cut-r_m.squeeze(-1)).clamp(min=0)**2).sum(dim=-1)
+    F[:, pi] += f
+    F[:, pj] -= f
+    e = (0.5 * k * over ** 2).sum(dim=-1)
     return e, F
 
 
@@ -749,7 +755,7 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
                      cell_list=None, c_mg=C_MG_DEFAULT, c_na=C_NA_DEFAULT,
                      lams=None,
                      relax_bond_k=None, relax_angle_k=None,
-                     relax_pair_k=None, restraint_k=None):
+                     relax_pair_k=None, restraint_k=None, force_cap=200.0):
     """Unified energy+forces: all 15 terms computed in one function, removing REMD inconsistency.
 
     lams: (B,) per-replica λ, overriding the scalar lam (for the merged forward).
@@ -937,9 +943,18 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
 
     _require_finite(total_E, "energy")
     _require_finite(total_F, "forces before cap")
-    # Force cap: total force per particle ≤ 200 kJ/mol/nm, so the Langevin integrator step size cannot explode
-    f_mag = _safe_norm(total_F, dim=-1, keepdim=True)
-    total_F = total_F * torch.clamp(200.0 / f_mag, max=1.0)
+    # Force cap: total force per particle ≤ force_cap kJ/mol/nm, so the Langevin integrator
+    # step size cannot explode.
+    #
+    # force_cap=None disables it. That is not a tuning knob: rescaling the summed vector is a
+    # nonlinear operation on the OUTPUT and not a term in the energy, so wherever it fires
+    # the returned force is not -dE/dx by construction, and no term-level check can pass
+    # there. tests/test_force_gradcheck.py could not be satisfied while it was always on, and
+    # the parameter exists so that the term consistency and the cap can be tested separately
+    # rather than one hiding the other.
+    if force_cap is not None:
+        f_mag = _safe_norm(total_F, dim=-1, keepdim=True)
+        total_F = total_F * torch.clamp(float(force_cap) / f_mag, max=1.0)
     _require_finite(total_F, "forces after cap")
 
     return total_E, total_F
@@ -1171,50 +1186,66 @@ class GPUCellList:
         self.neighbor_pairs = None  # numpy (M, 2)
 
     def build(self, pos_nm: "torch.Tensor"):
-        """Build the neighbor table with a CPU numpy implementation, avoiding the GPU nonzero ROCm col2im crash."""
+        """Neighbour table as the UNION over replicas, searched over the 27-cell neighbourhood.
+
+        Three defects used to live here, all of them silent.
+
+        1. The table was built from pos_nm[0] alone. A pair far apart in replica 0 and
+           overlapping in replica 5 was never in it, so the clash term could not see it --
+           and the pipeline runs 64 replicas, which is 63 of them with no excluded volume.
+        2. Pairs were enumerated only within a single cell, so a pair straddling a cell
+           boundary was missed even in replica 0. With the old cell_size of 1.5 nm and a
+           0.30 nm clash cutoff that is a real fraction of contacts.
+        3. _clash_f then thresholded on dist[0], repeating defect 1 at the mask.
+
+        1 and 2 are fixed here, 3 in _clash_f. The search cell is min(cell_size, CLASH_DIST)
+        so that the 27-cell neighbourhood spans 3*CLASH_DIST and therefore contains every
+        pair that can possibly be inside the clash cutoff, while keeping the pair count
+        small -- a 1.5 nm cell would make the neighbourhood span 4.5 nm and enumerate an
+        order of magnitude more pairs for no benefit.
+        """
         dev = pos_nm.device
-        pos_np = pos_nm[0].detach().cpu().float().numpy()  # (N, 3)
-        N = len(pos_np)
-        cs = self.cell_size
+        B = pos_nm.shape[0]
+        cs = min(self.cell_size, CLASH_DIST)
 
-        # Spatial-hash grouping
-        cell = np.floor(pos_np / cs).astype(np.int32)
-        cell_hash = cell[:, 0] * 73856093 + cell[:, 1] * 19349663 + cell[:, 2] * 83492791
-        sort_idx = np.argsort(cell_hash)
-        sorted_hash = cell_hash[sort_idx]
+        offsets = [(0, 0, 0)]
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if (dx, dy, dz) > (0, 0, 0):
+                        offsets.append((dx, dy, dz))
 
-        # Find group boundaries
-        changes = np.concatenate([[True], sorted_hash[1:] != sorted_hash[:-1], [True]])
-        group_starts = np.where(changes)[0]
+        pair_set = set()
+        for b in range(B):
+            pos_np = pos_nm[b].detach().cpu().float().numpy()
+            cell = np.floor(pos_np / cs).astype(np.int64)
+            buckets = {}
+            for idx in range(len(cell)):
+                buckets.setdefault((int(cell[idx, 0]), int(cell[idx, 1]),
+                                    int(cell[idx, 2])), []).append(idx)
+            for c, idxs in buckets.items():
+                for off in offsets:
+                    other = buckets.get((c[0] + off[0], c[1] + off[1], c[2] + off[2]))
+                    if not other:
+                        continue
+                    if off == (0, 0, 0):
+                        for a in range(len(idxs)):
+                            for bb in range(a + 1, len(idxs)):
+                                i, j = idxs[a], idxs[bb]
+                                pair_set.add((i, j) if i < j else (j, i))
+                    else:
+                        for i in idxs:
+                            for j in other:
+                                pair_set.add((i, j) if i < j else (j, i))
 
-        pairs_i, pairs_j = [], []
-        for g in range(len(group_starts) - 1):
-            s, e = group_starts[g], group_starts[g + 1]
-            if e - s < 2:
-                continue
-            # All pairs within the group
-            for a in range(s, e):
-                for b in range(a + 1, e):
-                    pairs_i.append(sort_idx[a])
-                    pairs_j.append(sort_idx[b])
-
-        if not pairs_i:
+        if not pair_set:
             self.neighbor_pairs = np.zeros((0, 2), dtype=np.int64)
             return self.neighbor_pairs
 
-        pi = np.array(pairs_i, dtype=np.int64)
-        pj = np.array(pairs_j, dtype=np.int64)
-
-        # Distance filtering
-        delta = pos_np[pi] - pos_np[pj]
-        dist = np.linalg.norm(delta, axis=1)
-        close = dist < cs * 2.0
-        seq_near = np.abs(pi - pj) <= 2
-        valid = close & ~seq_near
-        pi, pj = pi[valid], pj[valid]
-
-        self.neighbor_pairs = np.stack([pi, pj], axis=1) if len(pi) > 0 else \
-            np.zeros((0, 2), dtype=np.int64)
+        arr = np.array(sorted(pair_set), dtype=np.int64)
+        seq_near = np.abs(arr[:, 0] - arr[:, 1]) <= 2
+        arr = arr[~seq_near]
+        self.neighbor_pairs = arr if len(arr) else np.zeros((0, 2), dtype=np.int64)
         return self.neighbor_pairs
 
     def get_pair_info(self, pos_nm: "torch.Tensor"):
