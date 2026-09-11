@@ -1369,6 +1369,63 @@ C_MG 0.01 M  C_NA 0.15 M
 2. **`clash` 一次都没触发**（平均能量 0.0，力 0.0）。要么这批天然结构的碰撞阈值内没有对，
    要么这一项有问题。这两种可能我都没排除。
 
+### 3y. 我改的是 GPU 版 —— 而这台机器不走它
+
+**这一条比前面任何一条都实在，而且是我的疏忽。**
+
+这个力场有**两份并行的实现**，各自带一套常数：
+
+| | `torch_cgsim.py`（我改的） | `openmm_gpu_refiner.py`（没动） |
+|---|---|---|
+| K_PAIR | 600 | **1500** |
+| **K_ANGLE** | **28.1** | **600** |
+| **K_DIHEDRAL** | **7.2** | **800** |
+| K_CLASH | 500 | **300** |
+| K_BSJ | 600 | **800** |
+| K_BSJ_GUIDE | 100 | **1200** |
+| **DIH_PPPP** | **12.84°** | **33°** |
+| **STACK_R0** | **1.125 nm，作用在 P(i)–P(i+2)** | **5.05 Å，作用在 N(i)–N(i+1)** |
+| ANGLE_PPP | 150° | 150°（唯一一致的一项） |
+
+**六个常数不一致。我改的四个里，三个在 OpenMM 那边还是旧值。**
+
+**而 `openmm_gpu_refiner.py` 不是死代码**，它被至少六个模块引用：
+`isrnaclong.py:1042` / `:1388`、**`rest2_remd_2d.py:231, 400`（CPU 回落）**、
+`rest2_sampler.py:50, 222, 329`、`metadynamics_sampler.py:345`、`torch_gpu_refine.py:63, 89`。
+
+**这台机器走哪条（实测）：**
+
+```
+torch 2.10.0+cpu
+cuda available: False
+device count: 0
+```
+
+`isrnaclong.py:2018` 是 `_use_gpu_rest2 = torch.cuda.is_available()`，所以 **Level 4 的 REST2 直接跳过
+`BatchedREMD2D`，落到 2054 行的 CPU 回落** —— 而那条路 import 的是 `openmm_gpu_refiner`。
+
+按层级看：
+
+| 层级 | 走哪套力场 | 我的改动生效吗 |
+|---|---|---|
+| Level 1.5 全局弛豫 | `physical_relaxation`，自述「aligned with `openmm_gpu_refiner._build_3bead_system_gpu`」 | **不** |
+| Level 2 refine | 优先 `torch_gpu_refine`，它用 `cg_energy_fores`（`torch_cgsim`） | **是**（前提是它 import 得成功） |
+| Level 4 REST2 | CUDA 判断为假 → `rest2_remd_2d` → `openmm_gpu_refiner` | **不** |
+
+**所以：这一整轮的四个常数、三个力 bug、那个快照，全部落在 `torch_cgsim.py` 里；
+而在这台机器上，三个层级里有两个不走它。**
+
+**我错在哪。** 上一轮回答「离接入还有多远」时，我读了 `isrnaclong.py:2024` 那一支就下了结论
+「管线走的是活路径」，**但我读的是 GPU 那一支，也从没查过 `torch.cuda.is_available()` 在这台机器上是什么**。
+两件事叠在一起才成了这个错：读对了一行，没读它的条件。
+
+**这不代表改动没用。** 它们是关于 `torch_cgsim.py` 的、经过验证的事实；部署机（按记录是带 AMD GPU 的
+AutoDL）上 CUDA/ROCm 可用时，Level 4 会走那条路。而且 `kBT/σ²` 那个判据是**关于「刚度该是多少」的陈述**，
+它对 `openmm_gpu_refiner` 的 K_ANGLE 600 / K_DIHEDRAL 800 同样成立 —— 那两项按同一个判据也错 21 倍和 111 倍。
+
+**但不能照抄。** 两边的二面角目标本来就不同（33° 对 180°），堆叠项作用在**不同原子对**上
+（N(i)–N(i+1) 对 P(i)–P(i+2)），kinetic 常数也各自标定过。那是一次需要自己推导的移植，不是复制粘贴。
+
 ## 5. 下一步
 
 **已定的方向（§3l）：路 1 先做，路 2 是真正的答案。**
@@ -1391,6 +1448,12 @@ C_MG 0.01 M  C_NA 0.15 M
    **§3q 里我给的机制（φ→0 奇异）是错的**，改成约束 φ 也修不掉（两者共用 `dφ/dx`）。
    **§3r 已证明整体调软对漏斗是恒等的（3000 倍范围 rank 小数点后三位不变）** ——
    所以杠杆是标度，而且零代价。**在标度解决之前，IBI 迭代的是被帽子截断的力，没有意义。**
+2q. **改的是 GPU 版，而这台机器不走它（§3y）。** 力场有两份并行实现，六个常数不一致；
+   `torch.cuda.is_available()` 实测 **False**，所以 Level 4 走 CPU 回落（`openmm_gpu_refiner`），
+   Level 1.5 也走它。**三个层级里两个不吃我的改动。**
+   我上一轮说「管线走的是活路径」时读的是 GPU 那一支、没读它的条件 —— 这是我的疏忽。
+   **`openmm_gpu_refiner.py` 的 K_ANGLE 600 / K_DIHEDRAL 800 按 `kBT/σ²` 判据也错 21 倍和 111 倍，
+   但不能照抄**（二面角目标不同、堆叠项在不同原子对上）。
 2o. **力场现状有了实测（§3x），并更正一条**：重定标之后 **bpp 成了整个力场**
    （占净能量 100–118%，单项超帽 22.31%；真实权重下 101.1% / 13.02%），
    而 angle+dihedral+stacking 加起来只剩 3%。
