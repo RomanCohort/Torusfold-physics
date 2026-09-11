@@ -152,14 +152,39 @@ def _write_refined_pdb(
 
 # ── Force field parameters (measured for THIS file's functional form) ──
 #
-# Units, spelled out because torch_cgsim.py declares the same numerals in other units:
-# this file declares the distance terms in kJ/mol/angstrom^2 and multiplies them by 100
-# at use (nm^-2), while torch_cgsim.py declares kJ/mol/nm^2 and uses them raw.  A number
-# here and the same number there do not mean the same thing and must not be made to agree
-# by copying numerals.
+# UNIT OF EVERY CONSTANT, AS USED.  The numeral alone does not carry the unit and the
+# declaration does not carry it either: the conversion happens at each use site, and it
+# is NOT the same at every use site.  Read the table; do not infer one constant's
+# conversion from another's, and do not assume the whole block shares one unit.
 #
-#   K_BB, K_INTRA_PC, K_INTRA_CN, K_STACK  kJ/mol/angstrom^2, E = 0.5*k*(r-r0)^2
-#   K_ANGLE, K_DIHEDRAL                    kJ/mol/rad^2,      E = 0.5*k*(theta-theta0)^2
+#                  declared as         factor at use   what OpenMM receives            term
+#   K_BB           kJ/mol/angstrom^2   * 100           1122   kJ/mol/nm^2   HarmonicBondForce,   E = 0.5*k*(r-r0)^2
+#   K_INTRA_PC     kJ/mol/angstrom^2   * 100          22390   kJ/mol/nm^2   HarmonicBondForce,   E = 0.5*k*(r-r0)^2
+#   K_INTRA_CN     kJ/mol/angstrom^2   * 100          37680   kJ/mol/nm^2   HarmonicBondForce,   E = 0.5*k*(r-r0)^2
+#   K_STACK        kJ/mol/angstrom^2   * 100           95.9   kJ/mol/nm^2   CustomBondForce,     E = 0.5*k*(r-r0)^2
+#   K_ANGLE        kJ/mol/rad^2        * 1   (raw)     16.78  kJ/mol/rad^2  HarmonicAngleForce,  E = 0.5*k*(th-th0)^2
+#   K_DIHEDRAL     kJ/mol/rad^2        * 1   (raw)      2.12  kJ/mol/rad^2  CustomTorsionForce,  E = 0.5*k*(th-th0)^2
+#   K_PAIR         kJ/mol/nm^2         * 1   (raw)   1500     kJ/mol/nm^2   CustomBondForce,     E = 0.5*k*(r-r0)^2
+#   K_BSJ          kJ/mol/nm^2         * 1   (raw)    800     kJ/mol/nm^2   CustomBondForce,     E = 0.5*k*(r-r0)^2
+#   K_BSJ_GUIDE    kJ/mol/nm^2         * 1   (raw)   1200     kJ/mol/nm^2   CustomBondForce,     E = 0.5*k*(r-r0)^2
+#   K_CLASH        no unit declared    * 10          3000     kJ/mol/nm^2   CustomBondForce,     E = k*(dmin-r)^2*step(dmin-r)
+#
+# Three of these (K_PAIR, K_BSJ, K_BSJ_GUIDE) are NOT converted: they reach OpenMM raw.
+# Reading them as if the block-wide *100 applied would understate them by a factor of 100,
+# and that mistake is invisible -- the System builds, the numbers are legal, nothing
+# objects.  K_CLASH is the other half: multiplied by 10, and its expression carries no
+# 0.5 while every row above does, so 3000 there is 6000 in the 0.5*k convention those rows
+# use.  The clash is not softer than the pairing force just because its numeral is smaller.
+#
+# NO VALUE WAS CHANGED WHEN THIS TABLE WAS WRITTEN.  K_PAIR in particular stays 1500:
+# the base-pair stiffness the database supports is bracketed to roughly [205, 1881], and
+# 1500 lies inside that bracket, so there is nothing to change it to.
+#
+# The "what OpenMM receives" column is a READBACK of a built System, not arithmetic on the
+# declared number: tests/test_force_constant_units.py rebuilds this System (and the minimal
+# model's) and fails if any use site changes its factor.  This comment block and
+# torch_cgsim.py declare the same numerals in different units -- a number here and the same
+# number there do not mean the same thing and must not be made to agree by copying numerals.
 #
 # Measured by scripts/measure_cpu_constants.py from D:\torusfold-cgdata\rsRNASP\
 # Training_set through the boltzmann_bonded machinery (126 gap-free chains, 6386-6764
@@ -169,32 +194,39 @@ def _write_refined_pdb(
 # kBT/sigma^2 is a LOWER BOUND on the stiffness, not the stiffness.  The mean
 # within-chain sigma is given for scale and gives a stiffer (still bounded) value.
 # tests/test_cpu_force_constants.py locks each constant to its own sigma.
-K_BB = 11.22         # P-P;         sigma = 0.4714 A over 6638 bonds (0.4454 within-chain)
-K_INTRA_PC = 223.9   # P-C4';       sigma = 0.1055 A over 6764       (0.0917)
-K_INTRA_CN = 376.8   # C4'-N;       sigma = 0.0814 A over 6764       (0.0736)
-K_STACK = 0.959      # N(i)-N(i+1); sigma = 1.6127 A over 6638       (1.4959)
-K_ANGLE = 16.78      # P-P-P angle; sigma = 0.3855 rad over 6512     (0.3570)
-K_DIHEDRAL = 2.12    # P-P-P-P dih; sigma = 1.0846 rad over 6386     (1.0249)
+K_BB = 11.22         # P-P;         *100 at use ->  1122 kJ/mol/nm^2;  sigma = 0.4714 A over 6638 bonds (0.4454)
+K_INTRA_PC = 223.9   # P-C4';       *100 at use -> 22390 kJ/mol/nm^2;  sigma = 0.1055 A over 6764       (0.0917)
+K_INTRA_CN = 376.8   # C4'-N;       *100 at use -> 37680 kJ/mol/nm^2;  sigma = 0.0814 A over 6764       (0.0736)
+K_STACK = 0.959      # N(i)-N(i+1); *100 at use ->  95.9 kJ/mol/nm^2;  sigma = 1.6127 A over 6638       (1.4959)
+K_ANGLE = 16.78      # P-P-P angle;   *1 at use -> 16.78 kJ/mol/rad^2; sigma = 0.3855 rad over 6512     (0.3570)
+K_DIHEDRAL = 2.12    # P-P-P-P dih;   *1 at use ->  2.12 kJ/mol/rad^2; sigma = 1.0846 rad over 6386     (1.0249)
 # K_STACK stays non-zero here although torch_cgsim.py zeroes its stacking term.  That
 # file restrains P(i)-P(i+2), which the identity in its header shows is a function of
 # K_BB and K_ANGLE and is therefore redundant.  This file restrains N(i)-N(i+1), and
 # N(i) is bonded only to C4'(i): no other term in this force field positions the base
 # beads relative to each other, so the term is load-bearing and its value is measured.
-K_PAIR = 1500.0    # WC base-pair N-N (raised 800->1500, strong pairing for convergence)
-K_CLASH = 300.0    # clash (raised 200->300)
-K_BSJ = 800.0      # BSJ closure (raised 500->800)
-K_BSJ_GUIDE = 1200.0  # BSJ guide force (raised 800->1200)
+K_PAIR = 1500.0       # WC base-pair N-N; RAW at use -> 1500 kJ/mol/nm^2 (NOT *100; raised 800->1500)
+K_CLASH = 300.0       # no declared unit; *10 at use -> 3000 kJ/mol/nm^2 in E = k*(dmin-r)^2*step(dmin-r),
+                      #   which has no 0.5, i.e. 6000 in the 0.5*k convention of the rows above (200->300)
+K_BSJ = 800.0         # BSJ closure; RAW at use -> 800 kJ/mol/nm^2 (NOT *100; raised 500->800)
+K_BSJ_GUIDE = 1200.0  # BSJ guide force; RAW at use -> 1200 kJ/mol/nm^2 (NOT *100; raised 800->1200)
 
-# Geometric parameters (Angstroms)
-BOND_P_NEXT = 5.90
-BOND_P_C4 = 3.90
-BOND_C4_N = 3.35
-ANGLE_PPP = 2.618   # rad, 150 deg
-DIH_PPPP = 33.0 * np.pi / 180.0  # rad
-STACK_R0 = 5.05
-PAIR_N_N = 10.0
-CLASH_DIST = 3.0
-CUTOFF = 12.0
+# ── Geometric parameters: unit of each AS USED (same rule as the table above) ──
+# The four lengths are declared in Angstroms and divided by 10 at their own use site, so
+# what the force receives is nm.  The two angles are radians and used raw.
+BOND_P_NEXT = 5.90        # A -> r0 = 0.59 nm  (P(i)-P(i+1) and the BSJ closure r0)
+BOND_P_C4 = 3.90          # A -> r0 = 0.39 nm  (P-C4')
+BOND_C4_N = 3.35          # A -> r0 = 0.335 nm (C4'-N)
+ANGLE_PPP = 2.618         # rad, 150 deg, used raw
+DIH_PPPP = 33.0 * np.pi / 180.0  # rad, used raw
+STACK_R0 = 5.05           # A -> r0 = 0.505 nm (N(i)-N(i+1))
+PAIR_N_N = 10.0           # A -> r0 = 1.0 nm   (WC base-pair N(i)-N(j))
+CLASH_DIST = 3.0          # A; read by NO use site in this file -- the clash force passes the literal
+                          #   0.3 nm instead (measured readback).  Kept for importers; no module
+                          #   imports this name from here.
+CUTOFF = 12.0             # A; read by NO use site in this file -- the NonbondedForce is built with
+                          #   NoCutoff at 999 nm (measured readback).  No module imports this name.
+                          #   Neither is a unit trap: both are simply dead declarations.
 
 
 def _build_3bead_system_gpu(
@@ -289,7 +321,8 @@ def _build_3bead_system_gpu(
     # Force: harmonic attractor, r0 = 10 A (slightly larger than the WC distance, allowing flexibility)
     # The force constant decays with distance from the junction: k = K_BSJ_CONTACT * (1 - d/max_d)^2
     bsj_contact_nt = min(8, L // 4)  # 8 nt per side, or 1/4 of the sequence
-    K_BSJ_CONTACT = 200.0  # kJ/mol/angstrom^2
+    K_BSJ_CONTACT = 200.0  # AS USED kJ/mol/nm^2 -- handed over RAW, NOT *100.  The old comment
+                           #   here claimed kJ/mol/angstrom^2; no conversion is applied at the use site.
     r0_bsj_contact = 1.0   # nm = 10 A
     bsj_contact_force = mm.CustomBondForce(
         "0.5*k_c*(r-r0)^2 * (1 - dist_ratio)^2")
@@ -328,7 +361,8 @@ def _build_3bead_system_gpu(
     #   Residue pairs with high bpp are pulled toward the native distance; low-bpp pairs explore freely.
     #   d_native = 10.5 A (WC-paired C1'-C1' distance)
     if bpp_matrix is not None and bpp_matrix.shape[0] == L:
-        K_BPP_SOFT = 100.0  # kJ/mol/angstrom^2 (soft restraint, weaker than the hard pairing force)
+        K_BPP_SOFT = 100.0  # AS USED kJ/mol/nm^2 -- handed over RAW, NOT *100.  The old comment
+                            #   here claimed kJ/mol/angstrom^2; 0.5*k_bpp*(r-r0)^2 takes r in nm.
         d_native_bpp = 1.05  # nm = 10.5 A
         bpp_soft_force = mm.CustomBondForce("0.5*k_bpp*(r-r0)^2")
         bpp_soft_force.addPerBondParameter("k_bpp")
@@ -536,18 +570,54 @@ def _build_3bead_system_gpu(
     return (system, coords_nm, pair_force, stack_force, bsj_force, bsj_guide)
 
 
+# ── Second, separate model: P-only "minimal" field, its own unmeasured constants ──
+#     Nothing in the constant block at the top of this file describes it.  See its docstring.
 def _build_minimal_system_gpu(
     p_coords: np.ndarray,
     pairs: List[Tuple[int, int, float]],
     pair_scale: float = 1.0,
 ):
-    """Build a minimal P-only folding force field (two-stage scheme, stage 1).
+    """Build the MINIMAL P-only folding force field (two-stage scheme, stage 1).
 
-    Contains only:
-      1. P backbone bonds P[i]-P[i+1] (r0=5.9A, k=31000 kJ/mol/nm^2)
-      2. P-P base-pair bonds (r0=5.9A, k=40000*w*pair_scale)
-    No clash/stacking/angle/C4'N — those terms hinder folding in the full force field
-    (measured: the full force field stalls pairs at 45A; the minimal one folds to 21A).
+    THIS IS A DIFFERENT COARSE-GRAINED MODEL, NOT A REDUCED VIEW OF THE 3-BEAD ONE ABOVE.
+    One bead per nucleotide here (P only, 110 Da) against three (P/C4'/N) there; the two
+    share no constant, no unit convention and no clash functional form.  The force-constant
+    block at the top of this file does NOT describe this function: every constant below is a
+    literal in the body, none was derived from the database measurement that block cites (no
+    kBT/sigma^2, no per-constant sigma), and no test locks them to a measurement.  Their sizes
+    are not comparable with that block's -- 31000 here against 1122 there is not a stiffer
+    bond, it is another model's number for another coordinate set.  Do not copy a value from
+    either list into the other and do not "align" them.
+
+    It is LIVE, not dead code: the default path reaches it via
+    _run_parallel_minimal_annealing -> _run_minimal_anneal_worker, and again for the
+    L > 50 far-pair pre-pull with pair_scale=3.0.
+
+    Measured readback of the System this builds -- read off getForces(), not copied from the
+    source; tests/test_force_constant_units.py rebuilds it and fails if any of these move:
+
+      particles      L of them, mass 110.0 Da
+      forces         HarmonicBondForce, HarmonicAngleForce, CustomNonbondedForce,
+                     CustomBondForce -- and NO NonbondedForce and NO GBSAOBCForce, i.e. no
+                     implicit solvent and no electrostatics at all (the 3-bead model has both)
+      bonds          k = 31000.0 kJ/mol/nm^2, r0 = 0.59 nm, per P(i)-P(i+1)
+                     k =   500.0 kJ/mol/nm^2, r0 = 0.59 nm, the single BSJ closure (0, L-1)
+      angles         k =   500.0 kJ/mol/rad^2, theta0 = 2.618 rad, per P(i)-P(i+1)-P(i+2)
+      clash          "step(d_min - r) * 0.5 * k_clash * (d_min - r)^2" with
+                     k_clash = 5000.0 kJ/mol/nm^2 and d_min = 0.3 nm, applied through one
+                     interaction group over a +/-15 nt window.  It carries the 0.5 that the
+                     3-bead clash expression does not.
+      pairs          "0.5*k_pair*(r-r0)^2" with r0 = 0.59 nm and
+                     k_pair = 30000.0 * w * pair_scale * far_boost kJ/mol/nm^2, far_boost = 2.0
+                     when the cyclic separation exceeds 100 nt.  The literal is 30000.0, not
+                     the 40000 this docstring used to claim: the built System says 30000.0, and
+                     correcting that prose is the only numeral edited when this table was
+                     written.  No behaviour changed.
+
+    The old "no clash/angle" line was stale: this model has both, as the readback shows.  The
+    rationale sentence that survives is inherited, not re-measured here -- the full force field
+    was reported to stall pairs at 45 A where this one folds to 21 A, and nothing in the repo
+    records that measurement.
 
     Args:
         p_coords: (L,3) P coordinates (Angstroms)
@@ -562,15 +632,15 @@ def _build_minimal_system_gpu(
 
     system = mm.System()
     for _ in range(L):
-        system.addParticle(110.0)
+        system.addParticle(110.0)  # 110 Da, minimal P-only model
 
     # 1. P backbone bonds
     bond_bb = mm.HarmonicBondForce()
-    bb_k = 31000.0  # kJ/mol/nm^2
+    bb_k = 31000.0  # kJ/mol/nm^2 -- this model's own literal, unmeasured (see docstring table)
     for i in range(L - 1):
         bond_bb.addBond(i, i + 1, BOND_P_NEXT / 10.0, bb_k)
     # 1b. BSJ closure bond: force first-last P-P ~5.9A to stop the ring opening during annealing
-    bond_bb.addBond(0, L - 1, BOND_P_NEXT / 10.0, 500.0)
+    bond_bb.addBond(0, L - 1, BOND_P_NEXT / 10.0, 500.0)  # 500.0 kJ/mol/nm^2, minimal model, unmeasured
     system.addForce(bond_bb)
 
     # 1c. Backbone angle restraint: prevent the backbone angle from collapsing during folding
@@ -578,13 +648,13 @@ def _build_minimal_system_gpu(
     for i in range(L - 2):
         angle_bb.addAngle(i, i + 1, i + 2,
                           2.618,  # 150 deg in rad (A-form RNA backbone)
-                          500.0)  # kJ/mol/rad^2
+                          500.0)  # kJ/mol/rad^2 -- minimal model, unmeasured
     system.addForce(angle_bb)
 
     # 1d. Clash repulsion: prevent atoms from overlapping (critical: without it the structure collapses into a ball)
     clash = mm.CustomNonbondedForce(
         "step(d_min - r) * 0.5 * k_clash * (d_min - r)^2")
-    clash.addGlobalParameter("k_clash", 5000.0)  # kJ/mol/nm^2
+    clash.addGlobalParameter("k_clash", 5000.0)  # kJ/mol/nm^2 -- minimal model, unmeasured
     clash.addGlobalParameter("d_min", 0.3)  # 3.0A = 0.3nm minimum distance
     for _ in range(L):
         clash.addParticle()
@@ -612,6 +682,8 @@ def _build_minimal_system_gpu(
         if (0 <= i < L and 0 <= j < L and abs(i - j) > 1
                 and not (i == 0 and j == L - 1)):
             # Far pairs (>100 nt) get 2x the force constant
+            # 30000.0 kJ/mol/nm^2 is the minimal model's own literal (this file's 3-bead field above
+            #   does not use this number at all; the docstring used to claim 40000 here)
             far_boost = 2.0 if (min(abs(j-i), L-abs(j-i)) > 100) else 1.0
             pair_force.addBond(
                 i, j, [30000.0 * w * pair_scale * far_boost, BOND_P_NEXT / 10.0])
