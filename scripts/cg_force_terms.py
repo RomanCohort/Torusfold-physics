@@ -59,6 +59,18 @@ def term_energies_forces(pos_nm, pairs_ij, pair_w=None, cell_list=None):
     add("intra P-C4'", f1, e1)
     add("intra C4'-N", f2, e2)
 
+    # 3b. the three backbone pairs nothing else covers (see C.K_INTRA_PN). The two that cross a
+    # backbone link stop at L-1 for the reason recorded in C.cg_energy_forces.
+    li = torch.arange(L - 1, device=dev)
+    e3, f3 = C._bond_f(pos_nm, P(r), NN(r), C.K_INTRA_PN, C.BOND_INTRA_PN)
+    e4, f4 = C._bond_f(pos_nm, C4(li), P(li + 1), C.K_LINK_CP, C.BOND_LINK_CP)
+    e5, f5 = C._bond_f(pos_nm, NN(li), P(li + 1), C.K_LINK_NP, C.BOND_LINK_NP)
+    e6, f6 = C._bond_f(pos_nm, NN(li), C4(li + 1), C.K_LINK_NC, C.BOND_LINK_NC)
+    add("intra P-N9/N1", f3, e3)
+    add("link C4'-P", f4, e4)
+    add("link N9/N1-P", f5, e5)
+    add("link N9/N1-C4'", f6, e6)
+
     # 4. BSJ closure
     d = pos_nm[:, P(0)] - pos_nm[:, P(L - 1)]
     rb = C._safe_norm(d, dim=-1, keepdim=True, eps=eps)

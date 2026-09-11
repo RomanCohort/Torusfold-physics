@@ -111,6 +111,49 @@ K_BB = 500.0        # P-P backbone bond (baseline)
 # one-dimensional harmonic whose thermal width is sqrt(kBT/k), and nothing else competes.
 K_INTRA_PC = 20752.7   # P-C4'
 K_INTRA_CN = 36399.2   # C4'-N
+# The four backbone pairs nothing else covers. The 3-bead nucleotide is P-C4'-N9/N1, so its only
+# bonds are the two above, and the excluded volume skips |i-j| <= 2 in both the cell list and the
+# O(N^2) mask. Enumerating every bead pair at gap 1, 2 and 3 (scripts/audit_intra_residue_pairs.py,
+# nine classes, derived from the bead indexing rather than listed by hand) leaves four with no
+# bonded term AND no excluded volume:
+#     P(i)-N9/N1(i)      |i-j| = 2
+#     C4'(i)-P(i+1)      |i-j| = 2
+#     N9/N1(i)-P(i+1)    |i-j| = 1
+#     N9/N1(i)-C4'(i+1)  |i-j| = 2
+# Nothing in the field assigned them an energy, so they had no equilibrium and no cost.
+#
+# Measured before the terms existed (1L2X, 27 residues, 81 beads):
+#   - a minimiser drove P(15)-N9(15) to 0.1511 nm against a database minimum of 0.3801;
+#   - 811 of 900 sampled frames of a 3 ps Langevin run had their closest contact on one of the
+#     three, the deepest at 0.0058 nm, i.e. beads passing through each other, while the pairs the
+#     wall does cover stayed at or above 0.0863 nm (scripts/identify_penetrating_pair.py);
+#   - the wall is not at fault: unit-tested at 0.0863 nm it returns 608203 kJ/mol/nm and the cell
+#     list does contain the pair (scripts/unit_test_clash_reach.py).
+#   - filling the three at a minimum recomputed WITH them, the thermostat reads 300.4 K mean and
+#     300.8 K over the last quarter with the deepest approach at 0.3086 nm, against 326.6 K,
+#     292.5 K and 0.0058 nm without (scripts/test_backbone_13_terms.py, 15 ps, 2 replicas).
+#
+# Constants by the same criterion as every other bonded coordinate -- harmonic, k = kBT/sd^2,
+# r0 = the database mean -- over 126 gap-free chains (scripts/audit_intra_residue_pairs.py):
+#   P-N9/N1          min 0.3801  mean 0.5370  sd 0.0374  ->  k = 1785.9  floor  66.7
+#   C4'(i)-P(i+1)    min 0.2810  mean 0.3800  sd 0.0161  ->  k = 9574.4  floor 154.5
+#   N9/N1(i)-P(i+1)  min 0.4731  mean 0.5457  sd 0.0213  ->  k = 5477.7  floor 116.9
+#   N9/N1(i)-C4'(i+1) min 0.3799 mean 0.6303  sd 0.0807  ->  k =  383.0  floor  30.9
+# C4'(i)-P(i+1) has a database MEAN of 0.3800 nm, below CLASH_SIGMA = 0.3975, so the excluded
+# volume cannot stand in for it: a one-sided wall has no r0 and would instead push the median of a
+# 0.0161 nm-wide distribution outward.
+#
+# The two that cross a backbone link apply to the L-1 internal links only. They are NOT wrapped
+# onto the closure: the constants come from a linear database that has no closure link, and the
+# pipeline starts from an extended chain, so a wrapped harmonic would add a ~1e5 kJ/mol barrier
+# against the very compaction K_BSJ exists to drive. The closure pairs have bead gaps of
+# 3L-3, 3L-2 and 3L-1, all >= 3, so the excluded volume covers them. The residual cost, stated:
+# once the ends do meet, C4'(L-1)-P(0) sits at its database mean of 0.3800 nm, below
+# CLASH_SIGMA = 0.3975, so the wall presses outward on that one pair.
+K_INTRA_PN = 1785.9    # P(i)-N9/N1(i)
+K_LINK_CP = 9574.4     # C4'(i)-P(i+1)
+K_LINK_NP = 5477.7     # N9/N1(i)-P(i+1)
+K_LINK_NC = 383.0      # N9/N1(i)-C4'(i+1)
 K_PAIR = 600.0      # WC base-pair N-N (λ-scalable) ← lowered from 1500 to 600
 # Base stacking. Set to zero, because the term does not model stacking and is exactly
 # redundant with two terms that do.
@@ -197,6 +240,11 @@ C_NA_DEFAULT = 0.15  # default Na+ concentration (M, ionic strength)
 BOND_P_NEXT = 0.590   # nm
 BOND_P_C4 = 0.390
 BOND_C4_N = 0.335
+# The three pairs above, at the database mean, the same way the three above this line are.
+BOND_INTRA_PN = 0.5370   # P(i)-N9/N1(i)
+BOND_LINK_CP = 0.3800    # C4'(i)-P(i+1)
+BOND_LINK_NP = 0.5457    # N9/N1(i)-P(i+1)
+BOND_LINK_NC = 0.6303    # N9/N1(i)-C4'(i+1)
 PAIR_NN = 1.00        # pairing target on N beads; native 0.954 +/- 0.115 nm, unchanged
 
 # Stacking target for P(i)-P(i+2). Native RNA holds this pair 1.12 nm apart, not 0.505:
@@ -564,6 +612,9 @@ def cg_energy_3bead(
     Force-field terms:
       backbone bond P-P        K_BB
       intra-bead bond P-C4'/C4'-N K_INTRA_PC / K_INTRA_CN
+      intra-residue 1-3 P-N9/N1  K_INTRA_PN
+      backbone link C4'(i)-P(i+1) / N9/N1(i)-P(i+1) / N9/N1(i)-C4'(i+1)
+                                   K_LINK_CP / K_LINK_NP / K_LINK_NC
       pairing  N_i-N_j        K_PAIR·λ
       stacking P_i-P_{i+2}    K_STACK·λ
       backbone angle P-P-P    K_ANGLE
@@ -602,6 +653,18 @@ def cg_energy_3bead(
     d_cn = dist[:, C4(all_res), NN(all_res)]
     e_intra = (0.5 * K_INTRA_PC * (d_pc - BOND_P_C4) ** 2).sum(dim=-1) \
         + (0.5 * K_INTRA_CN * (d_cn - BOND_C4_N) ** 2).sum(dim=-1)
+    # The three pairs nothing else covers (see K_INTRA_PN). The two that cross a backbone link
+    # stop at L-1: the constants are fitted on a linear database, which has no closure link, and
+    # the closure is already held by K_BSJ. Wrapping them onto residue 0 would add a term the fit
+    # has no observation for, and on a chain whose ends are far apart it would add strain on top
+    # of what K_BSJ already carries.
+    _li = _arange_dev(L - 1, dev)
+    e_intra = e_intra \
+        + (0.5 * K_INTRA_PN * (dist[:, P(all_res), NN(all_res)] - BOND_INTRA_PN) ** 2
+           ).sum(dim=-1) \
+        + (0.5 * K_LINK_CP * (dist[:, C4(_li), P(_li + 1)] - BOND_LINK_CP) ** 2).sum(dim=-1) \
+        + (0.5 * K_LINK_NP * (dist[:, NN(_li), P(_li + 1)] - BOND_LINK_NP) ** 2).sum(dim=-1) \
+        + (0.5 * K_LINK_NC * (dist[:, NN(_li), C4(_li + 1)] - BOND_LINK_NC) ** 2).sum(dim=-1)
 
     # ── BSJ ──
     e_bsj = 0.5 * K_BSJ * (dist[:, P(0), P(L - 1)] - BOND_P_NEXT) ** 2
@@ -746,7 +809,11 @@ def cg_energy_3bead(
     # ── Mg2+ screening (shares exp_d) ──
     e_mg_screen = -0.5 * c_mg * (exp_d / (d_norm + eps)).sum(dim=-1).sum(dim=-1)
 
-    energy = (e_bb.view(B, -1).sum(dim=-1) + e_bsj + e_pair + e_stack +
+    # e_intra was computed above and left OUT of this sum, so this path reported an energy with no
+    # P-C4', no C4'-N9/N1 and no backbone-link term in it at all. Nothing caught it because the
+    # only caller differences two runs of this same function (tests/test_clash_single_potential.py),
+    # and a term missing from both runs cancels out of the difference.
+    energy = (e_bb.view(B, -1).sum(dim=-1) + e_intra + e_bsj + e_pair + e_stack +
               e_angle + e_dih + e_clash + e_guide + e_bsj_guide +
               e_bsj_contact + e_bpp + e_gb + e_sasa + e_mg +
               e_mg_screen + e_mg_ion)
@@ -992,7 +1059,17 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
     r = torch.arange(L, device=dev)
     e1, f1 = _bond_f(pos_nm, P(r), C4(r), K_INTRA_PC, BOND_P_C4)
     e2, f2 = _bond_f(pos_nm, C4(r), NN(r), K_INTRA_CN, BOND_C4_N)
-    total_E += e1+e2; total_F += f1+f2
+    # The three pairs nothing else covers (see K_INTRA_PN). The two that cross a backbone link
+    # stop at L-1: the constants are fitted on a linear database, which has no closure link, and
+    # the closure is already held by K_BSJ. Wrapping them onto residue 0 would add a term the fit
+    # has no observation for, and on a chain whose ends are far apart it would add strain on top
+    # of what K_BSJ already carries.
+    li = torch.arange(L - 1, device=dev)
+    e3, f3 = _bond_f(pos_nm, P(r), NN(r), K_INTRA_PN, BOND_INTRA_PN)
+    e4, f4 = _bond_f(pos_nm, C4(li), P(li + 1), K_LINK_CP, BOND_LINK_CP)
+    e5, f5 = _bond_f(pos_nm, NN(li), P(li + 1), K_LINK_NP, BOND_LINK_NP)
+    e6, f6 = _bond_f(pos_nm, NN(li), C4(li + 1), K_LINK_NC, BOND_LINK_NC)
+    total_E += e1+e2+e3+e4+e5+e6; total_F += f1+f2+f3+f4+f5+f6
 
     # ── 3. BSJ: O(1) analytic ──
     d = pos_nm[:,P(0)]-pos_nm[:,P(L-1)]
@@ -1306,7 +1383,14 @@ def cg_forces_explicit_batched(
     all_r = torch.arange(L, device=dev)
     e1, f1 = _bond(pos_nm, P(all_r), C4(all_r), K_INTRA_PC, BOND_P_C4)
     e2, f2 = _bond(pos_nm, C4(all_r), NN(all_r), K_INTRA_CN, BOND_C4_N)
-    total_E += e1+e2; total_F += f1+f2
+    # The three pairs nothing else covers (see K_INTRA_PN); the two that cross a backbone link
+    # stop at L-1 for the reason recorded in cg_energy_forces.
+    li = torch.arange(L - 1, device=dev)
+    e3, f3 = _bond(pos_nm, P(all_r), NN(all_r), K_INTRA_PN, BOND_INTRA_PN)
+    e4, f4 = _bond(pos_nm, C4(li), P(li + 1), K_LINK_CP, BOND_LINK_CP)
+    e5, f5 = _bond(pos_nm, NN(li), P(li + 1), K_LINK_NP, BOND_LINK_NP)
+    e6, f6 = _bond(pos_nm, NN(li), C4(li + 1), K_LINK_NC, BOND_LINK_NC)
+    total_E += e1+e2+e3+e4+e5+e6; total_F += f1+f2+f3+f4+f5+f6
 
     # ── 3. BSJ: O(1) ──
     delta_b = pos_nm[:, P(0)] - pos_nm[:, P(L-1)]
@@ -1697,7 +1781,19 @@ def cg_forces_explicit(
         pos_nm, torch.stack([P(all_res), C4(all_res)], dim=1), K_INTRA_PC, BOND_P_C4)
     e_cn, f_cn = _explicit_forces_bonds(
         pos_nm, torch.stack([C4(all_res), NN(all_res)], dim=1), K_INTRA_CN, BOND_C4_N)
-    total_E += e_pc + e_cn; total_F += f_pc + f_cn
+    # The three pairs nothing else covers (see K_INTRA_PN); the two that cross a backbone link
+    # stop at L-1 for the reason recorded in cg_energy_forces.
+    li = torch.arange(L - 1, device=dev)
+    e_pn, f_pn = _explicit_forces_bonds(
+        pos_nm, torch.stack([P(all_res), NN(all_res)], dim=1), K_INTRA_PN, BOND_INTRA_PN)
+    e_cp, f_cp = _explicit_forces_bonds(
+        pos_nm, torch.stack([C4(li), P(li + 1)], dim=1), K_LINK_CP, BOND_LINK_CP)
+    e_np, f_np = _explicit_forces_bonds(
+        pos_nm, torch.stack([NN(li), P(li + 1)], dim=1), K_LINK_NP, BOND_LINK_NP)
+    e_nc, f_nc = _explicit_forces_bonds(
+        pos_nm, torch.stack([NN(li), C4(li + 1)], dim=1), K_LINK_NC, BOND_LINK_NC)
+    total_E += e_pc + e_cn + e_pn + e_cp + e_np + e_nc
+    total_F += f_pc + f_cn + f_pn + f_cp + f_np + f_nc
 
     # ── BSJ: O(1) ──
     delta_bsj = pos_nm[:, P(0)] - pos_nm[:, P(L - 1)]
