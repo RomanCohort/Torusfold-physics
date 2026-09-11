@@ -57,6 +57,18 @@ print(f"structure {s0['name']}  L={L}  pairs={len(s0['pairs'])}")
 print(f"{NREP} replicas, {NSTEPS} steps of 0.002 ps = {NSTEPS * 0.002:.1f} ps per replica")
 print(f"full field as shipped, 300 K, mass 110 Da, friction {FRICTION}/ps, "
       f"sampling every {STRIDE} steps")
+# Provenance. Three earlier runs of this experiment were invalidated by a force-field defect
+# found after they started -- a thermostat at 0.4 T, an effective mass 100x too large, and a
+# K_INTRA 52x too soft -- and none of them recorded which field they had actually run against,
+# so each result had to be judged by its numbers alone. Print the field's fingerprint instead.
+print("field: " + "  ".join(
+    f"{n}={getattr(C, n)}" for n in
+    ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_PAIR", "K_ANGLE", "K_DIH", "K_BPP",
+     "K_STACK", "K_CLASH", "K_BSJ", "K_BSJ_GUIDE")))
+print("second B half-kick: non-symplectic fallback (no force_fn passed). At gamma "
+      f"{FRICTION} and dt 0.002 the pump is dt*omega^2/(4*gamma) = "
+      f"{0.002 * 3.015 ** 2 / (4 * FRICTION):.4f} of the drag per step, so the stationary "
+      "state is perturbed at that level and this is not the source of any large effect.")
 print()
 
 pos = torch.tensor(s0["pos"].reshape(1, 3 * L, 3), dtype=torch.float64).repeat(NREP, 1, 1)
