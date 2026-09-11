@@ -535,6 +535,9 @@ def isrnaclong_pipeline(
     pair_head_weight: float = 1.0,
     bsj_head_weight: float = 0.5,
     clash_head_weight: float = 0.3,
+    # Pair weights: keep the method-agreement weights, or overwrite them with the RCM
+    # confidence. Default False; the reason is measured and written out at the block below.
+    use_rcm_reweight: bool = False,
 ) -> LongPipelineResult:
     """Full isRNAcircLong pipeline.
 
@@ -759,28 +762,51 @@ def isrnaclong_pipeline(
         pairs = [(i, j, 1.0) for i, j in hard_pairs]
         pairs += soft_pairs
 
-        # ── RCM reweighting: replace BPP probabilities with reverse-complement matching ──
-        try:
-            from torusfold.scheme2.rcm import compute_rcm_score
-            _flank = min(200, len(sequence) // 4)  # flanking window 200bp
-            _rcm_pairs = []
-            for i, j, w in pairs:
-                # extract flanking sequence (circular RNA: upstream of i + downstream of j)
-                seq_up = sequence[max(0, i - _flank):i]
-                seq_down = sequence[j:min(len(sequence), j + _flank)]
-                if len(seq_up) >= 5 and len(seq_down) >= 5:
-                    rcm = compute_rcm_score(seq_up, seq_down)
-                    _rcm_pairs.append((i, j, rcm['confidence']))
-                else:
-                    _rcm_pairs.append((i, j, w))  # too short: keep the original weight
-            pairs = _rcm_pairs
-            if verbose:
-                _rcm_vals = [w for _, _, w in pairs]
-                print(f"  RCM reweighting: mean={np.mean(_rcm_vals):.3f}, "
-                      f"min={min(_rcm_vals):.3f}, max={max(_rcm_vals):.3f}")
-        except Exception as e:
-            if verbose:
-                print(f"  RCM reweighting skipped: {e}")
+        # ── RCM reweighting (OFF by default; opt in with use_rcm_reweight=True) ──
+        #
+        # This overwrites every method-agreement weight built just above with
+        # compute_rcm_score(...)['confidence'], a ratio of kmer reverse-complement match counts.
+        # That quantity was measured against the Watson-Crick pairs of the deposited-structure
+        # database (scripts/measure_pair_weight_quality.py) and it does not carry what this use
+        # assumes. Against geometry-matched negatives its AUC is 0.5019, 95 percent CI
+        # [0.4939, 0.5093]; its sequence-specific component, real minus shuffled, is +0.0021
+        # with a CI spanning zero (p=0.350). It is also not a graded weight: of 2330 true pairs
+        # 88.84 percent score exactly 0.0 and only five distinct values occur in total. pair_w
+        # multiplies the WC spring stiffness in torch_cgsim.cg_energy_forces, so a confidence of
+        # zero switches that restraint off, and the old behaviour was disabling pairing for
+        # about 89 percent of the pairs it was handed. The one-bit base complementarity the
+        # pipeline already has in hand scores 0.8197 on the same rows.
+        #
+        # Left in place rather than deleted so earlier runs stay reproducible. NOTE: the weights
+        # this replaces -- 1.0 hard, 1.0/0.8/0.6/bpp_mid soft -- have NOT themselves been
+        # measured as discriminative; that needs MFE/PF/DivideFold, which was not run. Turning
+        # this off is a measured improvement over turning it on. It is not a claim that what
+        # remains is good.
+        if use_rcm_reweight:
+            try:
+                from torusfold.scheme2.rcm import compute_rcm_score
+                _flank = min(200, len(sequence) // 4)  # flanking window 200bp
+                _rcm_pairs = []
+                for i, j, w in pairs:
+                    # extract flanking sequence (circular RNA: upstream of i + downstream of j)
+                    seq_up = sequence[max(0, i - _flank):i]
+                    seq_down = sequence[j:min(len(sequence), j + _flank)]
+                    if len(seq_up) >= 5 and len(seq_down) >= 5:
+                        rcm = compute_rcm_score(seq_up, seq_down)
+                        _rcm_pairs.append((i, j, rcm['confidence']))
+                    else:
+                        _rcm_pairs.append((i, j, w))  # too short: keep the original weight
+                pairs = _rcm_pairs
+                if verbose:
+                    _rcm_vals = [w for _, _, w in pairs]
+                    print(f"  RCM reweighting: mean={np.mean(_rcm_vals):.3f}, "
+                          f"min={min(_rcm_vals):.3f}, max={max(_rcm_vals):.3f}")
+            except Exception as e:
+                if verbose:
+                    print(f"  RCM reweighting skipped: {e}")
+        elif verbose:
+            print("  pair weights: method-agreement (hard 1.0, soft 1.0/0.8/bpp_mid/0.6); "
+                  "RCM reweighting off")
 
         if verbose:
             n_multi = sum(1 for v in pair_votes.values() if v >= 2)
