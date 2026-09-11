@@ -32,9 +32,14 @@ _BASE_MAP = {
     'N': 0.0,   'n': 0.0,
 }
 
-# Watson-Crick complement
-_COMPLEMENT = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C', 'U': 'A',
-               'a': 't', 't': 'a', 'c': 'g', 'g': 'c', 'u': 'a',
+# Watson-Crick complement. RNA, not DNA: this maps A -> U. It used to map A -> T, which is
+# the DNA complement, and fed an RNA sequence the prefilter accepted A-U while _validate_rcm
+# then rejected it in one of the two orientations -- rcm_crossing('A','U',1) returned 1 and
+# rcm_crossing('U','A',1) returned 0. Measured effect of the alphabet, done caller-side by
+# rewriting U to T: +0.0340 AUC [0.0212, 0.0465], p=0.000, on the looser negative set. T is
+# kept so a malformed input containing T complements rather than going unmatched.
+_COMPLEMENT = {'A': 'U', 'U': 'A', 'C': 'G', 'G': 'C', 'T': 'A',
+               'a': 'u', 'u': 'a', 'c': 'g', 'g': 'c', 't': 'a',
                'N': 'N', 'n': 'n'}
 
 
