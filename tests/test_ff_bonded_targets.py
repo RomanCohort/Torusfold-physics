@@ -144,13 +144,16 @@ def test_bond_stiffness_was_not_moved_to_the_variance_matching_value():
 
 
 def test_bpp_stiffness_is_not_five_times_the_force_cap():
-    # At the target distance the softplus derivative is sigmoid(0) = 0.5, so this term
-    # applies K_BPP / 0.6 to every pair regardless of geometry. The cap in cg_energy_forces
-    # is 200, and 600/0.6 = 1000, which is why bpp alone saturated 22.31 percent of beads.
+    # At the target distance the softplus derivative is sigmoid(0) = 0.5, so this term applies
+    # K_BPP / 0.6 to every pair regardless of geometry. At the old cap of 200 that made bpp alone
+    # saturate 22.31 percent of beads; the cap was later raised to the value the field's own
+    # undamaged forces require, so the number to compare against is read live.
+    import inspect
+    cap = inspect.signature(C.cg_energy_forces).parameters["force_cap"].default
     force_at_target = C.K_BPP / 0.6
-    assert force_at_target < 200.0, (
+    assert force_at_target < cap, (
         f"bpp applies {force_at_target:.0f} kJ/mol/nm at its own target distance, above the "
-        f"200 cap")
+        f"{cap} cap")
     # 0.6 * kBT / sigma_NN with sigma_NN = 0.112 nm over 561 observed pairs
     assert abs(C.K_BPP - 13.4) < 1e-9, (
         f"K_BPP is {C.K_BPP}, expected 0.6 * kBT / sigma_NN = 13.4")

@@ -929,11 +929,32 @@ def _gb_switch(r: "torch.Tensor") -> "torch.Tensor":
     return (1.0 - x) ** 3 * (1.0 + 3.0 * x + 6.0 * x * x)
 
 
+# The force cap is a blow-up guard, not a force law. It rescales the SUMMED force vector per
+# bead, so anything it clips is a bias in the stationary distribution rather than a physical
+# force; it is not the gradient of any potential. It sat at 200 kJ/mol/nm, and at that value it
+# was the force law: 53.77 percent of beads sat exactly on it before the constants were
+# recalibrated.
+#
+# 200 is below what the field produces on undamaged native geometry. Measured with the cap off
+# (scripts/measure_force_floor.py, 25 structures), and with K_BSJ set to zero because it
+# restrains |P(0)-P(L-1)| to 0.590 nm while these references are LINEAR deposited chains whose
+# ends are 3.927 nm apart on average and up to 11.833 -- on a linear test case that term is a
+# workload artifact and it inflated the maximum by more than a third:
+#
+#     max |F| 4103.6   p99.9 2021.9   p99 1185.5   median 150.5   39.78 percent above 200
+#
+# The matched intra-residue bonds alone have an equilibrium force scale of sqrt(k*kBT), which is
+# 227.5 for P-C4' and 301.3 for C4'-N, independent of sigma. That is a floor, not an average, and
+# it is already above the old cap, so keeping both the measured K_INTRA and a 200 cap is not
+# possible.
+#
+# 5000 sits above every force observed on undamaged geometry and below anything a numerical
+# blow-up produces. That is the only range in which a cap does no harm.
 def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
                      cell_list=None, c_mg=C_MG_DEFAULT, c_na=C_NA_DEFAULT,
                      lams=None,
                      relax_bond_k=None, relax_angle_k=None,
-                     relax_pair_k=None, restraint_k=None, force_cap=200.0):
+                     relax_pair_k=None, restraint_k=None, force_cap=5000.0):
     """Unified energy+forces: all 15 terms computed in one function, removing REMD inconsistency.
 
     lams: (B,) per-replica λ, overriding the scalar lam (for the merged forward).

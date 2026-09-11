@@ -41,8 +41,13 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import torusfold.scheme2.torch_cgsim as C  # noqa: E402
 
+import inspect
+
 KBT = 2.494                # kJ/mol at 300 K
-FORCE_CAP = 200.0          # kJ/mol/nm, cg_energy_forces force_cap
+# read live rather than pinned: the cap was raised from 200 to its measured physical value, and
+# a hardcoded 200 here would have gone stale silently
+FORCE_CAP = inspect.signature(
+    C.cg_energy_forces).parameters["force_cap"].default
 SIGMA_NN = 0.1103          # nm, 3059 accepted WC pairs over 99 chains
 MEAN_ABS_OFFSET = 0.1063   # nm, mean |d - PAIR_NN| over the same 3059 pairs
 CLASH_CLOSEST = 0.3092     # nm, closest of 2022024 bead pairs with |i-j| >= 3, 126 chains
@@ -52,14 +57,25 @@ E2E_SD = 2.467             # nm, |P(0)-P(L-1)| over 126 free-ended chains
 
 
 def test_pair_spring_lies_between_the_spread_bound_and_the_cap_bound():
-    """K_PAIR is bracketed by two measured bounds, but nothing measured selects 600."""
+    """K_PAIR has a measured LOWER bound and no measured value.
+
+    The upper bound used to come from the force cap: at 200 kJ/mol/nm with a mean |d - 1.0| of
+    0.1063 nm, the pair term alone could not exceed k = 1881 without saturating the cap. The cap
+    has since been raised to the value the field's own undamaged forces require, and that makes
+    the upper bound vacuous -- 5000/0.1063 is 47035, forty-seven times the criterion value.
+
+    So the honest statement is this: nothing measured selects 600 over 1500. The lower bound is
+    the only measurement, and choosing inside the bracket needs a fold or ranking run. The
+    vacuity is asserted rather than left implicit, so that lowering the cap again is visible
+    here instead of silently restoring a constraint.
+    """
     k_lower = KBT / SIGMA_NN ** 2
     k_cap = FORCE_CAP / MEAN_ABS_OFFSET
     assert k_lower == pytest.approx(205.0, rel=5e-3), (
         f"sigma_NN = {SIGMA_NN} nm should imply kBT/sigma^2 = 204.8; got {k_lower:.1f}")
-    assert k_cap == pytest.approx(1881.0, rel=5e-3), (
-        f"mean |d - 1.0| = {MEAN_ABS_OFFSET} nm against a {FORCE_CAP} kJ/mol/nm cap "
-        f"should imply k <= 1881; got {k_cap:.1f}")
+    assert k_cap > 10 * k_lower, (
+        f"the cap bound is {k_cap:.0f} against a lower bound of {k_lower:.0f}, so it is binding "
+        f"again -- the cap was lowered, and K_PAIR now has a real upper constraint to satisfy")
     assert k_lower <= C.K_PAIR <= k_cap, (
         f"K_PAIR = {C.K_PAIR} is outside [{k_lower:.1f}, {k_cap:.1f}].  It is not what the "
         f"criterion gives (that is {k_lower:.1f}, a bound); it is only allowed inside the "
