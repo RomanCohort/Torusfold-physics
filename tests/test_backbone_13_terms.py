@@ -23,6 +23,21 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 import torusfold.scheme2.torch_cgsim as C     # noqa: E402
+
+@pytest.fixture(autouse=True)
+def _allow_alternate_fields():
+    """This module characterises entry points that are NOT the production field.
+
+    cg_energy / cg_forces_autograd (1 bead per residue), cg_energy_3bead and the two explicit
+    paths all raise by default, because they share this module's constant names while computing a
+    different potential. Saying so once here is what the opt-in exists for; a reader of this file
+    can see which field each test is about.
+    """
+    saved = C.ALLOW_ALTERNATE_FIELDS
+    C.ALLOW_ALTERNATE_FIELDS = True
+    yield
+    C.ALLOW_ALTERNATE_FIELDS = saved
+
 import torch                                  # noqa: E402
 import cg_force_terms as FT                   # noqa: E402
 

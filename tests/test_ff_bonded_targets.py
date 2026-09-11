@@ -29,10 +29,29 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import torusfold.scheme2.torch_cgsim as C
+import cg_force_terms as FT
+
+
+@pytest.fixture(autouse=True)
+def _allow_alternate_fields():
+    """This module characterises entry points that are NOT the production field.
+
+    cg_energy / cg_forces_autograd (1 bead per residue), cg_energy_3bead and the two explicit
+    paths all raise by default, because they share this module's constant names while computing a
+    different potential. Saying so once here is what the opt-in exists for; a reader of this file
+    can see which field each test is about.
+    """
+    saved = C.ALLOW_ALTERNATE_FIELDS
+    C.ALLOW_ALTERNATE_FIELDS = True
+    yield
+    C.ALLOW_ALTERNATE_FIELDS = saved
+
 
 
 def _chain(L=8, pair_ij=()):
@@ -260,6 +279,60 @@ def _three_paths(pos, pairs, weights):
         float(C.cg_forces_explicit_batched(pos, pairs, weights, cell_list=cl)[0]),
         float(C.cg_forces_explicit(pos, pairs, weights, cell_list=cl)[0]),
     )
+
+
+def test_the_alternate_fields_refuse_to_run_silently():
+    """The four/five non-production entry points raise unless the caller opts in.
+
+    Measured on 1L2X at one geometry: cg_energy_forces 1358.5544 kJ/mol, cg_forces_explicit and
+    cg_forces_explicit_batched -1107.1753 (ratio -0.8150), cg_energy_3bead -6978.6758
+    (ratio -5.1368). Same module, same constant names, different potential. A caller who reached
+    for one of them used to get that quietly.
+    """
+    saved = C.ALLOW_ALTERNATE_FIELDS
+    try:
+        C.ALLOW_ALTERNATE_FIELDS = False
+        for name in ("cg_energy", "cg_forces_autograd", "cg_energy_3bead",
+                     "cg_forces_explicit_batched", "cg_forces_explicit"):
+            fn = getattr(C, name)
+            with pytest.raises(RuntimeError) as exc:
+                fn(None, None, None)
+            msg = str(exc.value)
+            assert name in msg, f"{name} raised something that does not name it: {msg}"
+            assert "cg_energy_forces" in msg, (
+                f"{name} does not say which function IS the production field: {msg}")
+        assert C.ALLOW_ALTERNATE_FIELDS is False
+    finally:
+        C.ALLOW_ALTERNATE_FIELDS = saved
+
+
+def test_the_decomposition_does_not_sum_to_the_field_and_names_the_gap():
+    """The decomposition's terms are the analytic ones; the solvation block is deliberately absent.
+
+    Measured on 1L2X (L=27): the terms sum to 1567.1319 kJ/mol against cg_energy_forces's
+    1358.5544, a gap of 208.58, which is GB/SA + Manning + Mg. It is not reimplemented in
+    cg_force_terms because a fourth duplicate of a library term there would drift the same way the
+    first three did -- and would drift silently inside the one tool whose job is to notice drift.
+    Anything reporting a per-term SHARE has to add solvation_remainder(), or that gap lands in
+    whatever category is left over.
+    """
+    pos, pairs = _folded_chain(9)
+    cl = C.GPUCellList(cell_size=1.5)
+    cl.build(pos)
+    _F, e = FT.term_energies_forces(pos, pairs, None, cell_list=cl)
+    total = float(C.cg_energy_forces(pos, pairs, None, cell_list=cl)[0])
+    rem = FT.solvation_remainder(pos, pairs, None, cell_list=cl)
+    assert sum(e.values()) + rem == pytest.approx(total, rel=1e-9, abs=1e-6), (
+        "the remainder is DEFINED as the difference, so this can only fail if the decomposition "
+        "and the field were evaluated on different geometries")
+    assert rem != pytest.approx(0.0, abs=1e-9), (
+        "the solvation block contributed nothing; if cg_energy_forces stopped adding it, that is a "
+        "different change and this test should fail loudly rather than pass on a zero remainder")
+    # the SIGN is structure-dependent: -208.58 on 1L2X and about +19.47 on this folded 9-mer.
+    # Only the magnitude is asserted, because only the magnitude is a property of the block.
+    assert abs(rem) > 1.0, (
+        f"the solvation remainder is {rem:+.4f} kJ/mol, too small to be the block this test "
+        f"exists to name; either the block shrank or the decomposition grew")
 
 
 def test_no_frozen_snapshot_of_any_live_constant():

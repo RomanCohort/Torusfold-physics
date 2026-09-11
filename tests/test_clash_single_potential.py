@@ -34,6 +34,21 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import torusfold.scheme2.torch_cgsim as C  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _allow_alternate_fields():
+    """This module characterises entry points that are NOT the production field.
+
+    cg_energy / cg_forces_autograd (1 bead per residue), cg_energy_3bead and the two explicit
+    paths all raise by default, because they share this module's constant names while computing a
+    different potential. Saying so once here is what the opt-in exists for; a reader of this file
+    can see which field each test is about.
+    """
+    saved = C.ALLOW_ALTERNATE_FIELDS
+    C.ALLOW_ALTERNATE_FIELDS = True
+    yield
+    C.ALLOW_ALTERNATE_FIELDS = saved
+
+
 KBT = 2.494
 
 # The database, rsRNASP/Training_set, 191 PDB files / 126 gap-free chains: 213732 non-bonded
@@ -44,12 +59,14 @@ DB_PP_MIN = 0.3975
 DB_BINS = ((0.36, 0.40, 1), (0.40, 0.45, 6), (0.45, 0.50, 8), (0.50, 0.60, 60))
 
 POTENTIAL_FUNCTIONS = ("_clash_pair_energy", "_clash_pair_dedr", "_clash_pair_energy_force")
-# Functions that may name K_CLASH or CLASH_SIGMA: the five field entry points plus the
-# cell-list search radius, which is min(cell_size, CLASH_SIGMA) because the 27-cell
-# neighbourhood has to span the range.
+# Functions that may name K_CLASH or CLASH_SIGMA: the five field entry points plus the two
+# cell-list search radii. GPUCellList.build and _ClashNeighborList._build both use
+# min(cell_size, CLASH_SIGMA), because the 27-cell neighbourhood has to span the range; neither
+# defines or evaluates the pair law, and both sizes are derived from the one constant rather than
+# written down twice.
 NAMED_CONSTANT_ALLOWLIST = {
     "cg_energy", "cg_energy_3bead", "cg_energy_forces",
-    "cg_forces_explicit_batched", "cg_forces_explicit", "build",
+    "cg_forces_explicit_batched", "cg_forces_explicit", "build", "_build",
 }
 
 SOURCE = Path(C.__file__).read_text(encoding="utf-8")
@@ -361,7 +378,7 @@ def test_the_one_bead_path_uses_the_same_potential():
     # bead 3 is a bead-index gap of 3, so it is inside the neighbour list's mask
     pos[0, 3] = torch.tensor([0.25, 0.0, 0.0], dtype=torch.float64)
     no_pairs = torch.zeros((0, 2), dtype=torch.long)
-    C._clash_nlist.nlist = None          # the list is cached across calls; force a rebuild
+    C._clash_nlist.nlist = None          # left over from when the list was cached; now a no-op
     saved = (C.K_CLASH, C.CLASH_SIGMA)
     try:
         C.K_CLASH = 0.0

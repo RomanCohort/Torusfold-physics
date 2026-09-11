@@ -169,6 +169,32 @@ def term_energies_forces(pos_nm, pairs_ij, pair_w=None, cell_list=None):
     return terms, energies
 
 
+def solvation_remainder(pos_nm, pairs_ij, pair_w=None, cell_list=None, lam=1.0):
+    """GB/SA + Manning + Mg, obtained as cg_energy_forces MINUS the terms in this module.
+
+    The decomposition deliberately does not carry a second copy of the solvation block. That block
+    is about ninety lines of cell-filtered pair sums with its own autograd backward, and this
+    module has already drifted from the library three times where it duplicated a term -- the
+    constants, the BSJ contact force and the BSJ contact energy (see the note at bpp below). A
+    fourth copy would drift the same way, and worse, it would drift silently inside the one tool
+    whose job is to notice drift.
+
+    Measured on 1L2X (L=27, 16 WC pairs): the terms sum to 1567.1319 kJ/mol against
+    cg_energy_forces's 1358.5544, so this returns about -208.58 there. scripts/audit_field_state.py
+    prints the same table. The SIGN is structure-dependent -- on a folded 9-mer it is about +19.47
+    -- so it should be treated as a magnitude, not as a correction in a known direction.
+
+    ANY caller that reports a per-term SHARE of the field must add this in. Without it the
+    solvation block is silently attributed to whatever is left over, which is the same failure
+    shape as the 200 kJ/mol/nm cap being read as a force law: a real quantity that never appears
+    in the ledger it belongs to.
+    """
+    _terms, energies = term_energies_forces(pos_nm, pairs_ij, pair_w, cell_list=cell_list)
+    total = float(C.cg_energy_forces(pos_nm, pairs_ij, pair_w, lam=lam,
+                                     cell_list=cell_list)[0])
+    return total - sum(energies.values())
+
+
 def _scatter(pos_nm, ii, jj, f):
     F = torch.zeros_like(pos_nm)
     F[:, ii] += f.squeeze(-1)

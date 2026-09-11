@@ -20,6 +20,7 @@ Unit conventions match the OpenMM path: internally nm / kJ/mol, at the API in An
 """
 from __future__ import annotations
 
+import functools
 import math
 from typing import Callable, List, Optional, Tuple
 
@@ -471,31 +472,43 @@ def _clash_pair_energy_force(delta, dist, k, sigma):
 
 
 class _ClashNeighborList:
-    """GPU spatial-hash neighbor list: rebuilt every N steps, O(N) clash-pair lookup."""
+    """Spatial-hash neighbour table for the one-bead energy path, rebuilt on every call.
 
-    def __init__(self, cell_size=1.2, rebuild_freq=10):
-        self.cell_size = cell_size  # nm (2 × CLASH_CUTOFF)
-        self.rebuild_freq = rebuild_freq
-        self.step = 0
+    Three silent defects used to live here, and they are the same three that were fixed in
+    GPUCellList for the three-bead path:
+
+      1. _build used pos_nm[0] alone, so a pair far apart in replica 0 and overlapping in replica
+         5 was never in the table -- 63 of 64 replicas had no excluded volume at all;
+      2. get() refreshed only every rebuild_freq (=10) calls, so a pair that moved inside the
+         range between rebuilds was invisible;
+      3. the instance is the module-level singleton _clash_nlist, so the step counter and the
+         table were shared by every caller, and one caller's rebuild schedule was every other
+         caller's too.
+
+    With no caching left there is nothing for the singleton to share, so keeping it is harmless.
+    The search cell is min(cell_size, CLASH_SIGMA), the same choice GPUCellList makes: the
+    27-cell neighbourhood then spans 3*CLASH_SIGMA and contains every pair that can be inside the
+    excluded-volume range, instead of enumerating an order of magnitude more pairs at 1.2 nm.
+
+    The old docstring said "rebuilt every N steps, O(N) clash-pair lookup". Neither was true: it
+    was rebuilt every 10 calls, and the adjacency test is a dense (N, N) mask.
+    """
+
+    def __init__(self, cell_size=1.2):
+        self.cell_size = cell_size
         self.nlist = None
 
     def _build(self, pos_nm):
         B, N, _ = pos_nm.shape
         dev = pos_nm.device
-        p0 = pos_nm[0]  # (N, 3)
+        cs = min(self.cell_size, CLASH_SIGMA)
 
-        # Spatial hash: each particle → its cell coordinate (all on GPU)
-        cell = torch.floor(p0 / self.cell_size).long()  # (N, 3)
+        cell = torch.floor(pos_nm / cs).long()                  # (B, N, 3), every replica
+        ci = cell[:, :, None, :]
+        cj = cell[:, None, :, :]
+        # union over replicas of the 27-cell adjacency
+        in_cell = ((ci - cj).abs().max(dim=-1).values <= 1).any(dim=0)   # (N, N)
 
-        # Vectorized: cell differences for all particle pairs (N×N×3, but only the first replica is used)
-        ci = cell[:, None, :]  # (N, 1, 3)
-        cj = cell[None, :, :]  # (1, N, 3)
-        delta = (ci - cj).abs()  # (N, N, 3)
-
-        # Adjacency test: all dimension differences <= 1
-        in_cell = delta.max(dim=2).values <= 1  # (N, N)
-
-        # Exclude self and sequence neighbors (|i-j|<=2)
         idx = torch.arange(N, device=dev)
         seq_near = (idx[:, None] - idx[None, :]).abs() <= 2
         valid = in_cell & ~seq_near & torch.triu(
@@ -509,14 +522,73 @@ class _ClashNeighborList:
                           torch.zeros(0, dtype=torch.long, device=dev))
 
     def get(self, pos_nm):
-        self.step += 1
-        if self.nlist is None or self.step % self.rebuild_freq == 0:
-            self._build(pos_nm)
+        """No caching: the table is a function of the positions, so it is stale once they move."""
+        self._build(pos_nm)
         return self.nlist
 
 
 _clash_nlist = _ClashNeighborList()
 
+# ── Alternate fields: five entry points that are NOT the production field ─────────────────
+# cg_energy_forces is the field the pipeline runs; cg_forces_3bead is a thin forwarder to it.
+# The five decorated below are different energy functions that share this module's constant
+# NAMES, so a caller who reaches for one of them gets a different potential and nothing said so.
+# Measured on 1L2X (L=27, 16 WC pairs) at ONE geometry, force_cap=None:
+#
+#     cg_energy_forces               1358.5544 kJ/mol     <- the production field
+#     cg_forces_explicit_batched    -1107.1753 kJ/mol     ratio -0.8150
+#     cg_forces_explicit            -1107.1753 kJ/mol     ratio -0.8150
+#     cg_energy_3bead               -6978.6758 kJ/mol     ratio -5.1368
+#     cg_energy / cg_forces_autograd  1 bead per residue, not the 3-bead layout at all
+#
+# (scripts/audit_field_state.py reproduces that table.) None of the five has a caller anywhere in
+# src/. They are kept because tests/test_clash_single_potential.py, tests/test_ff_bonded_targets.py
+# and tests/test_backbone_13_terms.py characterise them deliberately -- which is exactly what the
+# opt-in is for. Setting this flag is a statement that you know you are not running the field.
+ALLOW_ALTERNATE_FIELDS = False
+
+_ALTERNATE_WHY = {
+    "cg_energy": "cg_energy is a ONE-BEAD-PER-RESIDUE model: adjacent beads are backbone P-P "
+                 "bonds and |i-j| <= 2 is the 1-2/1-3 exclusion. The production field is "
+                 "3-bead (P/C4'/N9-N1) and does not have the same term list.",
+    "cg_forces_autograd": "cg_forces_autograd differentiates cg_energy, which is a "
+                          "ONE-BEAD-PER-RESIDUE model, not the 3-bead production field.",
+    "cg_energy_3bead": "cg_energy_3bead is 3-bead but a different field: measured -6978.6758 "
+                       "kJ/mol against cg_energy_forces's 1358.5544 on the same geometry, a "
+                       "ratio of -5.1368.",
+    "cg_forces_explicit_batched": "cg_forces_explicit_batched is a different field: measured "
+                                  "-1107.1753 kJ/mol against cg_energy_forces's 1358.5544 on the "
+                                  "same geometry, a ratio of -0.8150. It is missing bpp, pair "
+                                  "guide and BSJ contact, and its GB coefficients differ by 4x.",
+    "cg_forces_explicit": "cg_forces_explicit is a different field: measured -1107.1753 kJ/mol "
+                          "against cg_energy_forces's 1358.5544 on the same geometry, a ratio of "
+                          "-0.8150. It is missing bpp, pair guide and BSJ contact, and its GB "
+                          "coefficients differ by 4x.",
+}
+
+
+def _alternate_field(fn):
+    """Refuse to run an alternate field unless the caller has said so.
+
+    The point is that the failure mode was SILENT: same module, same constant names, a different
+    potential, and no caller in src/ to notice. A RuntimeError naming the measured ratio is worth
+    more than a docstring nobody reads at the call site.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not ALLOW_ALTERNATE_FIELDS:
+            raise RuntimeError(
+                f"{fn.__name__} is not the production force field. {_ALTERNATE_WHY[fn.__name__]} "
+                f"The production entry point is cg_energy_forces. If this call is deliberate, set "
+                f"torusfold.scheme2.torch_cgsim.ALLOW_ALTERNATE_FIELDS = True first.")
+        return fn(*args, **kwargs)
+    wrapper.__doc__ = (fn.__doc__ or "") + (
+        "\n\n    NOT THE PRODUCTION FIELD. Raises unless ALLOW_ALTERNATE_FIELDS is set; see the "
+        "note above it for the measured difference from cg_energy_forces.")
+    return wrapper
+
+
+@_alternate_field
 def cg_energy(
     pos_nm: "torch.Tensor",
     pairs_ij: "torch.Tensor",
@@ -575,6 +647,7 @@ def cg_energy(
     return e_bb.view(B, -1).sum(dim=-1) + e_bsj + e_pair + e_clash
 
 
+@_alternate_field
 def cg_forces_autograd(
     pos_nm: "torch.Tensor",
     pairs_ij: "torch.Tensor",
@@ -597,6 +670,7 @@ def cg_forces_autograd(
 # 3-bead full force field (P / C4' / N) — geometry-aligned with the OpenMM path
 # ══════════════════════════════════════════════════════════════
 
+@_alternate_field
 def cg_energy_3bead(
     pos_nm: "torch.Tensor",               # (B, 3L, 3) particle order: [P,C4',N]×L
     pairs_ij: "torch.Tensor",             # (P, 2) residue indices
@@ -1311,6 +1385,7 @@ def cg_forces_3bead(
                            cell_list=cell_list, c_mg=c_mg, c_na=c_na)
 
 
+@_alternate_field
 def cg_forces_explicit_batched(
     pos_nm: "torch.Tensor",    # (B, N, 3) particle coordinates
     pairs_ij: "torch.Tensor",  # (P, 2) pair indices
@@ -1739,6 +1814,7 @@ def _explicit_forces_clash(
     return _clash_f(pos, cell_list, k, sigma)
 
 
+@_alternate_field
 def cg_forces_explicit(
     pos_nm: "torch.Tensor",
     pairs_ij: "torch.Tensor",
