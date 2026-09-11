@@ -2376,6 +2376,36 @@ DBI 的字面输出是它唯一真正落地的地方 —— 那已经记在这�
 修法不是「更小心」，是**让默认分支不可能吸收**：`label_of` 的最后一行返回 `UNCLASSIFIED {cl}`，
 一个没被命名的类别会**显式出现**而不是被吞掉。
 
+### 3at. 力场现状审计：一条活路径，四条死路径，常数全部就位
+
+`scripts/audit_field_state.py` 打印全部在场常数并检查路径一致性。
+实测（1L2X，L=27，16 个 WC 对，**同一几何**，`force_cap=None`）：
+
+| 入口 | 能量 (kJ/mol) | 相对 `cg_energy_forces` | `src/` 调用者 |
+| :-- | --: | --: | :-- |
+| `cg_energy_forces` | **1358.5544** | 1.0000 | **有**（`torch_gpu_refine`、`metadynamics_gpu`、`BatchedREMD2D`）|
+| `cg_forces_explicit_batched` | −1107.1753 | **−0.8150** | 无 |
+| `cg_forces_explicit` | −1107.1753 | −0.8150 | 无 |
+| `cg_energy_3bead` | −6978.6758 | −5.1368 | 无 |
+| `cg_energy` / `cg_forces_autograd` | （1-bead 模型）| — | 无 |
+
+**五个入口里只有一个有生产调用者。** 另外四个用同一套常数名算的是**别的场**（少了 bpp / pair guide /
+BSJ contact，GB 系数差 4 倍）。这不是生产路径的错误——没人调它们——但它是个地雷：
+调用者会拿到一套同名常数下的不同势，而且不会有任何东西报警。
+
+分解（`scripts/cg_force_terms.py`）的 17 项合计 **1567.1319**，比 `cg_energy_forces` 高 **208.58**，
+因为它**按设计不含 GB/SA 与 Mg**。拿它做力项归因时必须写明这一点，
+否则那 208.58 会被当成"其它项"或者"没解释的部分"。
+
+**常数全部就位**，与文档一致：`K_INTRA_PC` 20752.7、`K_INTRA_CN` 36399.2、`K_INTRA_PN` 1785.9、
+`K_LINK_CP` 9574.4、`K_LINK_NP` 5477.7、`K_LINK_NC` 383.0、`K_ANGLE` 28.1、`K_DIH` 7.2、
+`K_STACK` 0.0、`K_PAIR` 600.0、`K_BPP` 13.4、`K_CLASH` 20000.0 / `CLASH_SIGMA` 0.3975、
+`GB_FORCE_CAP` 50.0、`force_cap` 5000.0（`CLASH_DIST` 0.30 保留但已退休）。
+
+**仍无测量支撑的三个标度选择**：`K_BSJ_GUIDE` 100.0、`K_PAIR_GUIDE` 100.0、`K_BSJ_CONTACT` 50.0。
+`tests/test_pair_clash_bsj_criterion.py` 自己写着 `K_BSJ_GUIDE` "no criterion … its scale is an
+annealing-schedule choice"。
+
 ## 5. 下一步
 
 **已定的方向（§3l）：路 1 先做，路 2 是真正的答案。**
