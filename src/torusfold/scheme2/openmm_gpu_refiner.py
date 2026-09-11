@@ -150,15 +150,37 @@ def _write_refined_pdb(
     shutil.copy2(allatom_pdb_path, output_path)
 
 
-# ── Force field parameters (aligned with cg_forcefield.py) ──
-
-# Force constants (kJ/mol/angstrom^2; internal nm units need *100)
-K_BB = 500.0       # backbone P-P (raised 310->500, stiffen the local backbone)
-K_INTRA = 400.0    # P-C4', C4'-N
+# ── Force field parameters (measured for THIS file's functional form) ──
+#
+# Units, spelled out because torch_cgsim.py declares the same numerals in other units:
+# this file declares the distance terms in kJ/mol/angstrom^2 and multiplies them by 100
+# at use (nm^-2), while torch_cgsim.py declares kJ/mol/nm^2 and uses them raw.  A number
+# here and the same number there do not mean the same thing and must not be made to agree
+# by copying numerals.
+#
+#   K_BB, K_INTRA_PC, K_INTRA_CN, K_STACK  kJ/mol/angstrom^2, E = 0.5*k*(r-r0)^2
+#   K_ANGLE, K_DIHEDRAL                    kJ/mol/rad^2,      E = 0.5*k*(theta-theta0)^2
+#
+# Measured by scripts/measure_cpu_constants.py from D:\torusfold-cgdata\rsRNASP\
+# Training_set through the boltzmann_bonded machinery (126 gap-free chains, 6386-6764
+# observations per coordinate).  A harmonic whose equilibrium spread is sigma needs
+# k = kBT/sigma^2, with kBT = 2.494 kJ/mol at 300 K.  The sigma quoted below is pooled
+# over every chain, so it folds sequence and conformer variation into the thermal width:
+# kBT/sigma^2 is a LOWER BOUND on the stiffness, not the stiffness.  The mean
+# within-chain sigma is given for scale and gives a stiffer (still bounded) value.
+# tests/test_cpu_force_constants.py locks each constant to its own sigma.
+K_BB = 11.22         # P-P;         sigma = 0.4714 A over 6638 bonds (0.4454 within-chain)
+K_INTRA_PC = 223.9   # P-C4';       sigma = 0.1055 A over 6764       (0.0917)
+K_INTRA_CN = 376.8   # C4'-N;       sigma = 0.0814 A over 6764       (0.0736)
+K_STACK = 0.959      # N(i)-N(i+1); sigma = 1.6127 A over 6638       (1.4959)
+K_ANGLE = 16.78      # P-P-P angle; sigma = 0.3855 rad over 6512     (0.3570)
+K_DIHEDRAL = 2.12    # P-P-P-P dih; sigma = 1.0846 rad over 6386     (1.0249)
+# K_STACK stays non-zero here although torch_cgsim.py zeroes its stacking term.  That
+# file restrains P(i)-P(i+2), which the identity in its header shows is a function of
+# K_BB and K_ANGLE and is therefore redundant.  This file restrains N(i)-N(i+1), and
+# N(i) is bonded only to C4'(i): no other term in this force field positions the base
+# beads relative to each other, so the term is load-bearing and its value is measured.
 K_PAIR = 1500.0    # WC base-pair N-N (raised 800->1500, strong pairing for convergence)
-K_STACK = 500.0    # base stacking (raised 300->500, enforce helix extension)
-K_ANGLE = 600.0    # backbone bond angle (raised 400->600, reduce local strain)
-K_DIHEDRAL = 800.0  # backbone dihedral (raised 500->800, enforce A-form geometry)
 K_CLASH = 300.0    # clash (raised 200->300)
 K_BSJ = 800.0      # BSJ closure (raised 500->800)
 K_BSJ_GUIDE = 1200.0  # BSJ guide force (raised 800->1200)
@@ -325,12 +347,12 @@ def _build_3bead_system_gpu(
         if n_bpp_soft > 0:
             system.addForce(bpp_soft_force)
 
-    # 2. Intra-residue bonds P-C4', C4'-N
+    # 2. Intra-residue bonds P-C4', C4'-N.  Separate constants: the measured spreads
+    #    differ by 1.7x (0.1055 A vs 0.0814 A), so one shared value cannot match both.
     bond_intra = mm.HarmonicBondForce()
-    ik = K_INTRA * 100.0
     for i in range(L):
-        bond_intra.addBond(P(i), C4(i), BOND_P_C4 / 10.0, ik)
-        bond_intra.addBond(C4(i), N(i), BOND_C4_N / 10.0, ik)
+        bond_intra.addBond(P(i), C4(i), BOND_P_C4 / 10.0, K_INTRA_PC * 100.0)
+        bond_intra.addBond(C4(i), N(i), BOND_C4_N / 10.0, K_INTRA_CN * 100.0)
     system.addForce(bond_intra)
 
     # 3. Backbone angle P-P-P
@@ -420,21 +442,23 @@ def _build_3bead_system_gpu(
     stack_force.addBond(N(L - 1), N(0), [sk, STACK_R0 / 10.0])
     system.addForce(stack_force)
 
-    # 6. Nonbonded: implicit-solvent GB/SA + ion screening + short-range clash
+    # 6. Nonbonded: implicit-solvent GB/SA + short-range clash  (ion screening is NOT
+    #    implemented here; see the note where the charges are set below)
     #
     # The two main driving forces of RNA folding:
     #   (a) Electrostatic screening: the phosphate backbone is negatively charged and
     #       must be screened by Mg2+/Na+ before folding
-    #       -> GB model + 0.145M salt, roughly equivalent to ~50mM MgCl2
-    #          (standard conditions for RNA folding)
+    #       -> GB/SA only.  The intended 0.145M salt term was a global parameter on
+    #          mm.NonbondedForce, which has a fixed functional form and no user
+    #          expression, so no force could ever read it; it was deleted after being
+    #          measured inert.  Adding real Debye screening is a physics decision.
     #   (b) Hydrophobic effect: base stacking surfaces are buried inside while the
     #       phosphate backbone is exposed
     #       -> SA (solvent-accessible area) term
     #
     # Short-range clash repulsion is kept as well (GB does not handle Pauli repulsion)
     #
-    # -- A. GB/SA implicit solvent + ion screening --
-    # Use GBOBC2 (Onufriev-Bashford-Case) + salt screening
+    # -- A. GB/SA implicit solvent (OBC2).  No salt screening --
     nonbonded = mm.NonbondedForce()
     nonbonded.setNonbondedMethod(mm.NonbondedForce.NoCutoff)
     # GBOBC2 parameters (Onufriev et al.; well suited to nucleic acids)
@@ -452,10 +476,17 @@ def _build_3bead_system_gpu(
         nonbonded.addParticle(_Q_C4, _R_C4, 0.0)  # C4'
         nonbonded.addParticle(_Q_N, _R_N, 0.0)    # N
 
-    # Salt concentration: 0.145M is roughly equivalent to ~50mM MgCl2 (divalent cations screen more strongly)
-    nonbonded.addGlobalParameter("screeningLength", 1.0 / np.sqrt(0.145 * 0.06022 * 2))
-    # screeningLength = 1/sqrt(kappa), kappa = 4*pi*Na*e^2*I/(eps*kT)
-    # Simplified: 0.145M -> screeningLength ~= 0.78nm (Debye length)
+    # Salt screening: absent, and it used to be a lie in the parameter list.  A plain
+    # mm.NonbondedForce is a fixed 1/r Coulomb + LJ with no user expression, so a global
+    # parameter added to it can never be read.  Measured in a live Context
+    # (scripts/characterize_nonbonded_block.py, section B): perturbing the old
+    # "screeningLength" over 1e-4 .. 1000 nm changed the total energy by 0.0 kJ/mol and
+    # every force by 0.0 kJ/mol/nm; the built P-P pair potential is bare 1/r Coulomb
+    # plus GBSA.  The dead parameter was deleted instead of left standing as a claim of
+    # screening.  Real 0.145M screening needs a screened pair term (CustomNonbondedForce
+    # or CustomGBForce) and is a physics decision, not a cleanup.
+    # tests/test_nonbonded_block_invariants.py fails if any global parameter in this
+    # System is read by no force.
 
     # Excluded pairs (GB does not recompute these)
     _excl_nb = set()
