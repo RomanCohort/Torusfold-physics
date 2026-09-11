@@ -162,6 +162,43 @@ def test_both_paths_read_the_live_dihedral_target():
         "cg_forces_explicit_batched ignored a change to DIH_PPPP")
 
 
+def test_the_two_intra_bonds_are_separate_live_constants():
+    """P-C4' and C4'-N are not the same spring and must not share one number.
+
+    Their reference spreads over 126 gap-free chains are 0.010963 and 0.008278 nm, which under
+    k = kBT/sigma^2 is 20752.7 against 36399.2. The single K_INTRA of 400 they replaced was
+    52x and 91x too soft. Both coordinates are one-dimensional -- C4' appears only in these two
+    bonds and the clash term, and the clash repulsion does not fire at native geometry -- so
+    the criterion is exact here rather than an extrapolation.
+    """
+    assert not hasattr(C, "K_INTRA"), (
+        "K_INTRA is back; one value cannot serve two coordinates whose reference spreads differ "
+        "by 1.3x, which is a factor 1.75 in stiffness")
+    npz = Path(__file__).resolve().parent.parent / "results" / "boltzmann_tables_clean.npz"
+    if npz.exists():
+        z = np.load(npz)
+        for name, value in (("intra_pc", C.K_INTRA_PC), ("intra_cn", C.K_INTRA_CN)):
+            want = 2.494 / float(z[f"{name}__sigma"]) ** 2
+            assert abs(value / want - 1.0) < 0.01, (
+                f"{name}: the constant is {value} but kBT/sigma^2 is {want}")
+
+
+def test_both_paths_read_the_live_intra_constants():
+    """Either force path silently ignoring a change here is the frozen-copy bug again."""
+    pos, pairs = _chain()
+    for name in ("K_INTRA_PC", "K_INTRA_CN"):
+        try:
+            base_unified, base_batched = _energies(pos, pairs)
+            setattr(C, name, getattr(C, name) * 1.5)
+            alt_unified, alt_batched = _energies(pos, pairs)
+        finally:
+            setattr(C, name, getattr(C, name) / 1.5)
+        assert base_unified != alt_unified, f"cg_energy_forces ignored a change to {name}"
+        assert base_batched != alt_batched, (
+            f"cg_forces_explicit_batched ignored a change to {name} -- it is reading a frozen "
+            f"copy, so the two paths would use different intra-residue bonds")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

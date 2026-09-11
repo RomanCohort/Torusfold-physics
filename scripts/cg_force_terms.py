@@ -54,8 +54,8 @@ def term_energies_forces(pos_nm, pairs_ij, pair_w=None, cell_list=None):
 
     # 2/3. intra-bead
     r = torch.arange(L, device=dev)
-    e1, f1 = C._bond_f(pos_nm, P(r), C4(r), C.K_INTRA, C.BOND_P_C4)
-    e2, f2 = C._bond_f(pos_nm, C4(r), NN(r), C.K_INTRA, C.BOND_C4_N)
+    e1, f1 = C._bond_f(pos_nm, P(r), C4(r), C.K_INTRA_PC, C.BOND_P_C4)
+    e2, f2 = C._bond_f(pos_nm, C4(r), NN(r), C.K_INTRA_CN, C.BOND_C4_N)
     add("intra P-C4'", f1, e1)
     add("intra C4'-N", f2, e2)
 

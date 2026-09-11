@@ -100,7 +100,17 @@ except ImportError:
 # ── Force-field parameters (aligned with openmm_gpu_refiner.py, kJ/mol/nm) ──
 # Balanced version: all terms have similar magnitudes so none dominates
 K_BB = 500.0        # P-P backbone bond (baseline)
-K_INTRA = 400.0     # P-C4', C4'-N
+# Intra-residue bonds. Split, because they are not the same spring and were sharing one number.
+# Reference spreads over 126 gap-free chains, results/boltzmann_tables_clean.npz:
+#   P-C4'  sigma = 0.010963 nm  ->  kBT/sigma^2 = 20752.7 kJ/mol/nm^2
+#   C4'-N  sigma = 0.008278 nm  ->  kBT/sigma^2 = 36399.2 kJ/mol/nm^2
+# The single value these replace was 400, i.e. 52x and 91x too soft. This criterion is exact
+# here rather than an extrapolation: C4' appears only in these two bonds and the clash term,
+# N only in these two plus pairing, bpp and clash, and the clash repulsion does not fire at
+# native geometry (closest bead pair 0.309 nm against a 0.300 nm cutoff). So each is a
+# one-dimensional harmonic whose thermal width is sqrt(kBT/k), and nothing else competes.
+K_INTRA_PC = 20752.7   # P-C4'
+K_INTRA_CN = 36399.2   # C4'-N
 K_PAIR = 600.0      # WC base-pair N-N (λ-scalable) ← lowered from 1500 to 600
 # Base stacking. Set to zero, because the term does not model stacking and is exactly
 # redundant with two terms that do.
@@ -420,7 +430,7 @@ def cg_energy_3bead(
 
     Force-field terms:
       backbone bond P-P        K_BB
-      intra-bead bond P-C4'/C4'-N K_INTRA
+      intra-bead bond P-C4'/C4'-N K_INTRA_PC / K_INTRA_CN
       pairing  N_i-N_j        K_PAIR·λ
       stacking P_i-P_{i+2}    K_STACK·λ
       backbone angle P-P-P    K_ANGLE
@@ -457,8 +467,8 @@ def cg_energy_3bead(
     all_res = _arange_dev(L, dev)
     d_pc = dist[:, P(all_res), C4(all_res)]
     d_cn = dist[:, C4(all_res), NN(all_res)]
-    e_intra = (0.5 * K_INTRA * (d_pc - BOND_P_C4) ** 2).sum(dim=-1) \
-        + (0.5 * K_INTRA * (d_cn - BOND_C4_N) ** 2).sum(dim=-1)
+    e_intra = (0.5 * K_INTRA_PC * (d_pc - BOND_P_C4) ** 2).sum(dim=-1) \
+        + (0.5 * K_INTRA_CN * (d_cn - BOND_C4_N) ** 2).sum(dim=-1)
 
     # ── BSJ ──
     e_bsj = 0.5 * K_BSJ * (dist[:, P(0), P(L - 1)] - BOND_P_NEXT) ** 2
@@ -786,8 +796,8 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
 
     # ── 2. Intra-bead: O(N) analytic ──
     r = torch.arange(L, device=dev)
-    e1, f1 = _bond_f(pos_nm, P(r), C4(r), K_INTRA, BOND_P_C4)
-    e2, f2 = _bond_f(pos_nm, C4(r), NN(r), K_INTRA, BOND_C4_N)
+    e1, f1 = _bond_f(pos_nm, P(r), C4(r), K_INTRA_PC, BOND_P_C4)
+    e2, f2 = _bond_f(pos_nm, C4(r), NN(r), K_INTRA_CN, BOND_C4_N)
     total_E += e1+e2; total_F += f1+f2
 
     # ── 3. BSJ: O(1) analytic ──
@@ -1050,8 +1060,8 @@ def cg_forces_explicit_batched(
 
     # ── 2. Intra-bead: O(N) ──
     all_r = torch.arange(L, device=dev)
-    e1, f1 = _bond(pos_nm, P(all_r), C4(all_r), _K_BOND_INTRA, _R0_INTRA_PC)
-    e2, f2 = _bond(pos_nm, C4(all_r), NN(all_r), _K_BOND_INTRA, _R0_INTRA_CN)
+    e1, f1 = _bond(pos_nm, P(all_r), C4(all_r), K_INTRA_PC, _R0_INTRA_PC)
+    e2, f2 = _bond(pos_nm, C4(all_r), NN(all_r), K_INTRA_CN, _R0_INTRA_CN)
     total_E += e1+e2; total_F += f1+f2
 
     # ── 3. BSJ: O(1) ──
@@ -1465,9 +1475,9 @@ def cg_forces_explicit(
     # Intra-bead bonds
     all_res = torch.arange(L, device=dev)
     e_pc, f_pc = _explicit_forces_bonds(
-        pos_nm, torch.stack([P(all_res), C4(all_res)], dim=1), _K_BOND_INTRA, _R0_INTRA_PC)
+        pos_nm, torch.stack([P(all_res), C4(all_res)], dim=1), K_INTRA_PC, _R0_INTRA_PC)
     e_cn, f_cn = _explicit_forces_bonds(
-        pos_nm, torch.stack([C4(all_res), NN(all_res)], dim=1), _K_BOND_INTRA, _R0_INTRA_CN)
+        pos_nm, torch.stack([C4(all_res), NN(all_res)], dim=1), K_INTRA_CN, _R0_INTRA_CN)
     total_E += e_pc + e_cn; total_F += f_pc + f_cn
 
     # ── BSJ: O(1) ──
