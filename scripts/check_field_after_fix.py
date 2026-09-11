@@ -40,6 +40,8 @@ EQUIL = NSTEPS // 4          # discard the first quarter before reporting anythi
 ATOM = ("P", "C4'", "N9/N1")
 SHORT = {(0, 2, 0): "P(i)-N9(i)", (1, 0, 1): "C4'(i)-P(i+1)",
          (2, 0, 1): "N9(i)-P(i+1)", (2, 1, 1): "N9(i)-C4'(i+1)"}
+BONDED = {(0, 1, 0): "P(i)-C4'(i) bonded", (1, 2, 0): "C4'(i)-N9(i) bonded",
+          (0, 0, 1): "P(i)-P(i+1) bonded"}
 NATIVE_MIN = {"P(i)-N9(i)": 0.3801, "C4'(i)-P(i+1)": 0.2810,
               "N9(i)-P(i+1)": 0.4731, "N9(i)-C4'(i+1)": 0.3799}
 
@@ -57,6 +59,27 @@ def classify(i, j):
     ra, ai = divmod(a, 3)
     rb, aj = divmod(b, 3)
     return (ai, aj, rb - ra)
+
+
+def label_of(i, j):
+    """Name a bead pair, and never through a bare default.
+
+    The first version of this used SHORT.get(cl, "wall-applied pair"), which silently absorbed the
+    two BONDED classes: a P(i)-C4' contact at 0.3022 nm was reported as a wall-applied pair and
+    read as the excluded volume being penetrated, when the wall's own nearest approach was 0.3411.
+    Same shape as the hand-written audit table that missed the fourth unguarded pair.
+
+    The default now fires only when the pair really has |i-j| >= 3, which is the set the excluded
+    volume acts on; anything else is returned as UNCLASSIFIED so it is visible instead of absorbed.
+    """
+    cl = classify(i, j)
+    if cl in SHORT:
+        return SHORT[cl]
+    if cl in BONDED:
+        return BONDED[cl]
+    if abs(i - j) >= 3:
+        return "wall-applied pair"
+    return f"UNCLASSIFIED {cl}"
 
 
 def field(p, cap=None):
@@ -127,8 +150,7 @@ for step in range(NSTEPS):
                 for r in range(NREP):
                     i, j = divmod(int(d[r].argmin()), NB)
                     dm = float(d[r, i, j])
-                    cl = classify(i, j)
-                    lab = SHORT.get(cl, "wall-applied pair")
+                    lab = label_of(i, j)
                     if dm < deepest.get(lab, 1e9):
                         deepest[lab] = dm
                     if dm < 0.30:
