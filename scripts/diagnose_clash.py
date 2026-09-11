@@ -62,7 +62,7 @@ pairs = torch.zeros((0, 2), dtype=torch.long)
 def clash_energy(p):
     cl = C.GPUCellList(cell_size=1.5)
     cl.build(p)
-    e, _f = C._clash_f(p, cl, C.K_CLASH, C.CLASH_DIST)
+    e, _f = C._clash_f(p, cl, C.K_CLASH, C.CLASH_SIGMA)
     return e.detach().numpy()
 
 

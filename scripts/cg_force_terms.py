@@ -122,7 +122,7 @@ def term_energies_forces(pos_nm, pairs_ij, pair_w=None, cell_list=None):
 
     # 9. clash
     if cell_list is not None:
-        ec, fc = C._clash_f(pos_nm, cell_list, C.K_CLASH, C.CLASH_DIST)
+        ec, fc = C._clash_f(pos_nm, cell_list, C.K_CLASH, C.CLASH_SIGMA)
         add("clash", fc, ec)
 
     # 11. BSJ guide

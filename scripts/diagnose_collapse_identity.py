@@ -32,6 +32,11 @@ import torusfold.scheme2.torch_cgsim as C   # noqa: E402
 
 NREP = int(sys.argv[1]) if len(sys.argv) > 1 else 8
 NSTEPS = int(sys.argv[2]) if len(sys.argv) > 2 else 1500
+# third argument: the force cap, or "none". The cap is applied to the summed force per bead, so
+# it clips a diverging repulsion along with everything else; whether the new excluded volume can
+# do its job at all depends on this number.
+CAPARG = sys.argv[3] if len(sys.argv) > 3 else "200"
+CAP = None if CAPARG.lower() == "none" else float(CAPARG)
 STRIDE = 25
 NAME = ("P", "C4'", "N")
 KBT = 2.494
@@ -46,6 +51,7 @@ temps = torch.full((NREP,), 300.0, dtype=torch.float64)
 print(f"structure {s0['name']} L={L} pairs={len(ij)}, {NREP} replicas x {NSTEPS} steps")
 print("field: " + "  ".join(f"{n}={getattr(C, n)}" for n in
                             ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_PAIR", "K_CLASH")))
+print(f"force_cap = {CAP}")
 print(f"clash spring: k={C.K_CLASH}, d0={C.CLASH_DIST}. Force at full overlap = "
       f"{C.K_CLASH * C.CLASH_DIST:.0f} kJ/mol/nm")
 print(f"pair restraint: k_e={C.K_PAIR}*w. Force at r=0.3 is {C.K_PAIR * 0.7:.0f}, at r=0 is "
@@ -60,7 +66,7 @@ torch.manual_seed(20260219)
 def _forces_at(p):
     cl2 = C.GPUCellList(cell_size=1.5)
     cl2.build(p)
-    return C.cg_energy_forces(p, ij, pw, cell_list=cl2)[1]
+    return C.cg_energy_forces(p, ij, pw, cell_list=cl2, force_cap=CAP)[1]
 
 
 pair_type_count = Counter()
@@ -72,7 +78,7 @@ for step in range(NSTEPS):
     with torch.no_grad():
         cl = C.GPUCellList(cell_size=1.5)
         cl.build(pos)
-        e, f = C.cg_energy_forces(pos, ij, pw, cell_list=cl)
+        e, f = C.cg_energy_forces(pos, ij, pw, cell_list=cl, force_cap=CAP)
         pos, vel = C.batch_langevin_step(pos, vel, f, temps, dt_ps=0.002,
                                          mass_amu=110.0, friction=0.1, force_fn=_forces_at)
     if step >= burn and step % STRIDE == 0:

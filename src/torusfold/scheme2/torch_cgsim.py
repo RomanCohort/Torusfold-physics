@@ -7,7 +7,7 @@ re-implements the 3-bead CG force field in pure torch:
 
   - bond-length restraints (P-P backbone, BSJ): harmonic
   - WC base-pair restraints: harmonic + lambda scaling (REST2 solute term)
-  - clash repulsion: soft-sphere (not scaled with lambda)
+  - excluded volume: a diverging pair potential (not scaled with lambda)
 
 Killer feature - batched replicas: B replicas are a single (B, N, 3) tensor.
 Forces of all replicas are computed in one forward pass on the GPU; the forces
@@ -154,7 +154,10 @@ K_STACK = 0.0       # base stacking P_i-P_{i+2} -- redundant, see above (was 500
 # floppy and folding now rests on the pairing terms, which 3u shows do carry the signal.
 K_ANGLE = 28.1      # P-P-P backbone angle (kBT/sigma^2; was 600.0)
 K_DIH = 7.2         # P-P-P-P dihedral (kBT/sigma^2; was 500.0)
-K_CLASH = 500.0     # soft-sphere repulsion (not scaled) ← raised from 300 to 500
+# Stiffness of the excluded volume whose form, range and criterion are set out at
+# CLASH_SIGMA below (the constant is the same name, the same units and a different law:
+# the old one-sided linear spring saturated at K_CLASH*0.300 = 150 kJ/mol/nm).
+K_CLASH = 20000.0   # E = 0.5*k*(sigma-d)^2*(sigma/d)^2, sigma = CLASH_SIGMA
 K_BSJ = 600.0       # BSJ closure ← lowered from 800 to 600
 K_BSJ_GUIDE = 100.0 # BSJ closure guiding force (logistic sigmoid)
 K_PAIR_GUIDE = 100.0 # far/long-range pair guiding force (logistic sigmoid)
@@ -214,8 +217,62 @@ ANGLE_PPP = math.pi * 150.0 / 180.0   # 150 deg; cos -0.866 sits on the native m
 # better on held-out structures (native rank 1.12 vs 1.25). It is the value used here.
 # Note openmm_gpu_refiner.py restrains the SAME atom quad with a different target (33 deg).
 DIH_PPPP = math.acos(0.975)
-CLASH_DIST = 0.30     # nm
-CLASH_CUTOFF = 1.20   # nm
+
+# ── Excluded volume: one potential, one range, one stiffness ────────────────────────────
+# The law, defined once in _clash_pair_energy below:
+#
+#     E(d) = 0.5 * K_CLASH * (CLASH_SIGMA - d)^2 * (CLASH_SIGMA/d)^2   for d < CLASH_SIGMA
+#     E(d) = 0                                                         for d >= CLASH_SIGMA
+#
+# It replaces a one-sided LINEAR spring, E = 0.5*K_CLASH*max(0, 0.300 - d)^2, whose force was
+# bounded: |F| <= K_CLASH*0.300 = 150 kJ/mol/nm, reached only at full overlap and never
+# exceeded. A C4' bead is held by two intra-residue bonds (K_INTRA_PC = 20752.7, K_INTRA_CN =
+# 36399.2 kJ/mol/nm^2) and by this term, so the spring was being asked to hold back driving
+# forces up to 4718 kJ/mol/nm (scripts/measure_force_cap_headroom.py, cap off). A bounded
+# repulsion cannot exclude anything; the old one only looked like it worked because its range,
+# 0.300 nm, is below every distance native structures reach, and so it never fired at all.
+#
+# CLASH_SIGMA is measured. Over the database (191 PDB files, 126 gap-free chains, loader
+# scripts/boltzmann_bonded.py) the 213732 non-bonded P-P pairs -- residue index gap >= 3, the
+# set an excluded volume has to reproduce -- have minimum 0.3975 nm, with 0 pairs below 0.36 nm
+# and 1 below 0.40 nm (scripts/measure_pp_pair_distribution.py). The range is that minimum, so
+# the repulsion is exactly zero at and beyond every distance the database contains. It applies
+# to every bead type, not only P; that is a real cost of a single range and it is measured in
+# scripts/calibrate_excluded_volume.py (the database's closest pair of any type, residue gap
+# >= 3, is 0.3333 nm, so a range of 0.3975 does reach inside a handful of native contacts).
+#
+# K_CLASH is measured by Boltzmann inversion of the two lowest populated bins, which is the
+# only place the database has an opinion. Per unit shell volume 4*pi/3*(r2^3 - r1^3):
+#     [0.36, 0.40)   1 pair  / 0.072653 nm^3 = 13.76 nm^-3
+#     [0.40, 0.45)   6 pairs / 0.113619 nm^3 = 52.81 nm^-3
+# The upper bin lies outside CLASH_SIGMA, where the potential is identically zero, so the
+# deficit in the lower bin is the potential's own Boltzmann weight:
+#     U(0.38) = kBT * ln(52.81/13.76) = 2.494 * 1.3444 = 3.353 kJ/mol
+# with sigma = 0.3975, U(0.38) = 0.5*k*sigma^2*(sigma-0.38)^2/0.38^2 = 1.6755e-4 * k, so
+# k = 2.001e4 kJ/mol/nm^2 and the constant is set to 2.0e4, the criterion value to 0.06
+# percent.
+#
+# The sweep (scripts/calibrate_excluded_volume.py) is the check on that number, and it does not
+# pass. Measured on 1L2X, 8 replicas x 1500 steps at 300 K from the native structure:
+#   - with the shipped force_cap of 200 kJ/mol/nm -- a cap on the sum of the forces per bead,
+#     applied after this term -- the closest non-bonded pair is 0.045 to 0.071 nm at every k
+#     from 1e3 to 1e5. The cap clips the repulsion, so while it binds no value of this constant
+#     can set the floor: the deepest approach is set by the cap and the timestep instead.
+#   - with force_cap=None the same run holds the closest pair at 0.2931 nm at k = 2.0e4 against
+#     the database's 0.3975 nm, with 353 of 488 replica-frames still holding a pair below
+#     0.36 nm. At k = 1e5 it is 0.3396 nm and 41 of 488.
+# No value in the grid reproduces the database's lower edge. The constant keeps the criterion
+# value rather than the least bad grid point; the gap between the two is the finding.
+CLASH_SIGMA = 0.3975  # nm, the smallest non-bonded P-P distance in the database
+CLASH_CUTOFF = 1.20   # nm, the O(N^2) caller's candidate window (only has to be >= CLASH_SIGMA)
+
+# CLASH_DIST is RETIRED; nothing in this module reads it. It was the range of the old linear
+# spring: 0.300 nm, below the database's own lower edge, which is why the old term never fired
+# on a native structure and could not have held one if it had. The name is kept only because
+# tests/test_pair_clash_bsj_criterion.py pins it and that file is outside this change;
+# tests/test_clash_single_potential.py asserts that no code in this module loads it, so it
+# cannot come back as a second range.
+CLASH_DIST = 0.30     # nm -- retired, see the note above
 
 KB_KJ = 0.008314462618  # kJ/(mol·K)
 
@@ -288,6 +345,76 @@ def _safe_ones(shape, device, dtype=torch.float32) -> "torch.Tensor":
 def _bead_index(kind: str, i: int) -> int:
     """3-bead layout: residue i's particles are 3i + {P:0, C4':1, N:2}."""
     return {"P": 0, "C4": 1, "N": 2}[kind] + 3 * i
+
+
+# ── The excluded-volume pair potential: three functions, and no other copy of the law ───
+# These three are the only place in this module where a clash energy or a clash force is
+# evaluated. cg_energy_3bead and cg_energy call the energy alone (they have no force path);
+# _clash_f and _explicit_forces_clash call the energy and the force. The four used to carry
+# four independent copies of the linear spring, which is how retuning one of them would have
+# left the other three on the old law with nothing raising.
+# tests/test_clash_single_potential.py fails if a fifth copy appears, if any function outside
+# the four call sites names K_CLASH or CLASH_SIGMA, or if the four stop agreeing with the
+# closed form.
+#
+# Requirements the form satisfies, in the order they were asked for:
+#   (a) it DIVERGES as d -> 0: E ~ 0.5*k*sigma^4/d^2 and |dE/dd| ~ k*sigma^4/d^3, both
+#       unbounded, so no finite driving force can drive a pair through it. The linear spring it
+#       replaces had |F| <= 150 kJ/mol/nm and lost to anything stronger.
+#   (b) E(sigma) = 0 and dE/dd(sigma) = 0, so pairs beyond the range are untouched and there is
+#       no force step at the range. Near sigma, (sigma-d)/d ~ (sigma-d)/sigma, so E ~
+#       0.5*k*(sigma-d)^2: harmonic with the same k, switched off quadratically.
+#   (c) sigma and k are read off the database, see CLASH_SIGMA / K_CLASH above.
+#
+# The derivative is not hand-written. _clash_pair_dedr differentiates _clash_pair_energy with
+# autograd, the same way _dihedral_f derives its force, so the force cannot disagree with the
+# energy it belongs to -- three forces in this file did exactly that (see _angle_f).
+# Its closed form is -k*sigma^3*(sigma-r)/r^3 and tests/test_clash_single_potential.py pins
+# the autograd result to that form and to a finite difference of the energy.
+
+_CLASH_R_MIN = 1e-6   # nm; _safe_norm already floors distances here, this keeps 1/d^2 finite
+
+
+def _clash_pair_energy(r, k, sigma):
+    """Excluded-volume energy of one pair, kJ/mol. THE definition of the energy.
+
+    r, k and sigma broadcast against each other; r is a distance in nm. The clamp is the
+    switch: E is evaluated at min(r, sigma), which is the closed form for r < sigma, exactly 0
+    for r >= sigma, and has zero slope there, so there is no branch and no pair beyond the
+    range can feel the term.
+    """
+    d = r.clamp(min=_CLASH_R_MIN, max=sigma)
+    over = (sigma - d) * (sigma / d)
+    return 0.5 * k * over * over
+
+
+def _clash_pair_dedr(r, k, sigma):
+    """dE/dr for _clash_pair_energy, kJ/mol/nm. THE definition of the force.
+
+    Autograd of the energy above, on a detached copy so the caller's graph is untouched and
+    under enable_grad so the result does not depend on the caller's grad mode. Closed form,
+    for reference and for the test that pins it:
+
+        dE/dr = -k * sigma^3 * (sigma - r) / r^3     for r < sigma, else 0
+
+    which is 0 at r = sigma (no force step at the range) and grows like 1/r^3 as r -> 0.
+    """
+    with torch.enable_grad():
+        r_ref = r.detach().clone().requires_grad_(True)
+        grad, = torch.autograd.grad(_clash_pair_energy(r_ref, k, sigma).sum(), r_ref)
+    return grad
+
+
+def _clash_pair_energy_force(delta, dist, k, sigma):
+    """(E, F_on_i) for a list of pairs. THE only place a pair force becomes a vector.
+
+    delta = x_i - x_j (..., 3), dist = |delta| (...,). With dE/dr from _clash_pair_dedr and
+    u = delta/dist, F_i = -dE/dr * u, so the pair is pushed apart wherever E rises as r falls.
+    """
+    energy = _clash_pair_energy(dist, k, sigma)
+    dedr = _clash_pair_dedr(dist, k, sigma)
+    force = -(dedr / dist.clamp(min=_CLASH_R_MIN)).unsqueeze(-1) * delta
+    return energy, force
 
 
 class _ClashNeighborList:
@@ -384,12 +511,11 @@ def cg_energy(
     else:
         e_pair = _safe_zeros((B,), dev)
 
-    # soft-sphere: neighbor list O(P_nlist)
+    # Excluded volume: the one pair potential, on the neighbour list, O(P_nlist)
     pi_n, pj_n = _clash_nlist.get(pos_nm)
     if pi_n.numel() > 0:
         d_clash = _safe_norm(pos_nm[:, pi_n] - pos_nm[:, pj_n], dim=-1)
-        over = (CLASH_DIST - d_clash).clamp(min=0)
-        e_clash = (0.5 * K_CLASH * over ** 2).sum(dim=-1)
+        e_clash = _clash_pair_energy(d_clash, K_CLASH, CLASH_SIGMA).sum(dim=-1)
     else:
         e_clash = _safe_zeros((B,), dev)
 
@@ -437,7 +563,7 @@ def cg_energy_3bead(
       stacking P_i-P_{i+2}    K_STACK·λ
       backbone angle P-P-P    K_ANGLE
       dihedral P-P-P-P        K_DIH (A-form 180°)
-      repulsion soft-sphere   K_CLASH
+      excluded volume         K_CLASH, CLASH_SIGMA
       BSJ P_0-P_{L-1}         K_BSJ
       far-pair guide          K_PAIR_GUIDE
       BSJ guide               K_BSJ_GUIDE
@@ -565,18 +691,18 @@ def cg_energy_3bead(
         e_bpp = (-K_BPP * bpp_w[None] * _stable_softplus(
             -(PAIR_NN - d_bpp) / 0.3)).sum(dim=-1)
 
-    # ── Repulsion (soft-sphere, O(N²) distance matrix + selective mask) ──
+    # ── Excluded volume (the one pair potential; O(N²) matrix + candidate window) ──
     if seq_near_mask is None:
         nres = _arange_dev(L, dev)
         res_of = torch.repeat_interleave(nres, 3)
         seq_near_mask = ((res_of[None] - res_of[:, None]).abs() <= 1) | \
             _safe_eye(N_tot, dev, dtype=torch.bool)
     non_local = ~seq_near_mask
-    win = dist < CLASH_CUTOFF
-    cand = win & non_local[None]
-    d_c = torch.where(cand, dist, _safe_full(dist.shape, CLASH_DIST, dev))
-    over = (CLASH_DIST - d_c).clamp(min=0)
-    e_clash = (0.5 * K_CLASH * over ** 2).view(B, -1).sum(dim=-1)
+    cand = (dist < CLASH_CUTOFF) & non_local[None]
+    # Pairs outside the candidate window are evaluated at the range, where the potential is
+    # exactly zero: the window is an efficiency device, not part of the law.
+    d_c = torch.where(cand, dist, _safe_full(dist.shape, CLASH_SIGMA, dev))
+    e_clash = _clash_pair_energy(d_c, K_CLASH, CLASH_SIGMA).view(B, -1).sum(dim=-1)
 
     # ── GB/SA + Mg2+ ion model (Plan A, fully differentiable, optimized) ──
     p_idx = _arange_dev(L, dev)
@@ -728,20 +854,19 @@ def _dihedral_f(pos, k, target_cos):
     return e, F
 
 
-def _clash_f(pos, cell_list, k, r_cut):
-    """Clash force, evaluated for every replica.
+def _clash_f(pos, cell_list, k, sigma):
+    """Excluded-volume energy and force for every replica, from the shared pair potential.
 
     The mask used to be (dist[0] < r_cut), so replica 0 decided which pairs counted as
     clashing for all of them. A pair overlapping at 0.05 nm in replica 1 contributed exactly
-    zero if replica 0 had it 6 nm apart. It is now per batch, and over is zeroed where the
-    pair is outside the cutoff in that batch so the sum of squares is not polluted.
+    zero if replica 0 had it 6 nm apart. _clash_pair_energy_force returns exactly zero for a
+    pair beyond sigma in its own replica, so no mask is needed at all -- the per-batch
+    behaviour is the law now rather than a correction applied to it.
     """
     pi, pj, delta, dist = cell_list.get_pair_info(pos)
     if len(pi) == 0:
         return torch.zeros(pos.shape[0], device=pos.device), torch.zeros_like(pos)
-    r = dist.clamp(min=1e-6)
-    over = (r_cut - r).clamp(min=0.0)
-    f = (k * over / r).unsqueeze(-1) * delta           # F = k(rc-r)*delta/r
+    e, f = _clash_pair_energy_force(delta, dist, k, sigma)
     F = torch.zeros_like(pos)
 # index_add_, not F[:, pi] += f: a bead sits in many neighbour pairs, and an indexed in-place
 # add keeps only one write per duplicate index, dropping the rest of the sum. Every
@@ -750,8 +875,7 @@ def _clash_f(pos, cell_list, k, r_cut):
 # term's force at a residue in four pairs was 27.09 against the true 94.88 kJ/mol/nm.
     F.index_add_(1, pi, f)
     F.index_add_(1, pj, -f)
-    e = (0.5 * k * over ** 2).sum(dim=-1)
-    return e, F
+    return e.sum(dim=-1), F
 
 
 def _sigmoid_f(dist, r0, k, width):
@@ -887,7 +1011,7 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
 
     # ── 8. Clash: O(K) cell-list ──
     if cell_list is not None:
-        e_c, f_c = _clash_f(pos_nm, cell_list, _clash_k, CLASH_DIST)
+        e_c, f_c = _clash_f(pos_nm, cell_list, _clash_k, CLASH_SIGMA)
         total_E += e_c; total_F += f_c
 
     # ── 9. Pair guide: O(P) analytic ──
@@ -1165,7 +1289,7 @@ def cg_forces_explicit_batched(
 
     # ── 8. Clash (cell-list): O(K) ──
     if cell_list is not None:
-        e_cl, f_cl = _explicit_forces_clash(pos_nm, cell_list, K_CLASH, CLASH_DIST)
+        e_cl, f_cl = _explicit_forces_clash(pos_nm, cell_list, K_CLASH, CLASH_SIGMA)
         total_E += e_cl; total_F += f_cl
 
     # ── 9. BSJ guide: O(1) ──
@@ -1257,15 +1381,15 @@ class GPUCellList:
            0.30 nm clash cutoff that is a real fraction of contacts.
         3. _clash_f then thresholded on dist[0], repeating defect 1 at the mask.
 
-        1 and 2 are fixed here, 3 in _clash_f. The search cell is min(cell_size, CLASH_DIST)
-        so that the 27-cell neighbourhood spans 3*CLASH_DIST and therefore contains every
-        pair that can possibly be inside the clash cutoff, while keeping the pair count
-        small -- a 1.5 nm cell would make the neighbourhood span 4.5 nm and enumerate an
+        1 and 2 are fixed here, 3 in _clash_f. The search cell is min(cell_size, CLASH_SIGMA)
+        so that the 27-cell neighbourhood spans 3*CLASH_SIGMA and therefore contains every
+        pair that can possibly be inside the excluded-volume range, while keeping the pair
+        count small -- a 1.5 nm cell would make the neighbourhood span 4.5 nm and enumerate an
         order of magnitude more pairs for no benefit.
         """
         dev = pos_nm.device
         B = pos_nm.shape[0]
-        cs = min(self.cell_size, CLASH_DIST)
+        cs = min(self.cell_size, CLASH_SIGMA)
 
         offsets = [(0, 0, 0)]
         for dx in (-1, 0, 1):
@@ -1445,28 +1569,18 @@ def _explicit_forces_dihedrals(
 
 
 def _explicit_forces_clash(
-    pos: "torch.Tensor", cell_list: GPUCellList, k: float, r_cut: float
+    pos: "torch.Tensor", cell_list: GPUCellList, k: float, sigma: float
 ) -> "torch.Tensor":
-    """Explicit clash force (using the cell-list)."""
-    pi, pj, delta, dist = cell_list.get_pair_info(pos)
-    # dist: (B, M), mask: (M,)
-    mask = (dist[0] < r_cut)  # (M,) judge using only the first batch
-    if mask.sum() == 0:
-        return torch.zeros(pos.shape[0], device=pos.device), torch.zeros_like(pos)
+    """Excluded-volume energy and force -- one call through, not a second implementation.
 
-    pi_m = pi[mask]; pj_m = pj[mask]
-    delta_m = delta[:, mask, :]  # (B, M', 3)
-    dist_m = dist[:, mask].unsqueeze(-1).clamp(min=1e-6)  # (B, M', 1)
-
-    f_mag = k * (r_cut - dist_m).clamp(min=0) / dist_m
-    f_vec = f_mag * delta_m / dist_m
-
-    forces = torch.zeros_like(pos)
-    forces.index_add_(1, pi_m, f_vec.squeeze(-1))
-    forces.index_add_(1, pj_m, -f_vec.squeeze(-1))
-
-    energy = (0.5 * k * (r_cut - dist_m.squeeze(-1)).clamp(min=0) ** 2).sum(dim=-1)
-    return energy, forces
+    The name is kept because scripts call it, but the energy and the force come from
+    _clash_pair_energy_force via _clash_f. It used to hold its own copy of the linear spring
+    AND its own (dist[0] < r_cut) mask, so a pair 0.05 nm apart in replica 3 was dropped
+    entirely whenever replica 0 had it 5 nm away: the same defect GPUCellList.build's
+    docstring records for _clash_f, still live here. With the potential exactly zero beyond
+    sigma per pair and per replica, neither the copy nor the mask has anything left to do.
+    """
+    return _clash_f(pos, cell_list, k, sigma)
 
 
 def cg_forces_explicit(
@@ -1553,7 +1667,7 @@ def cg_forces_explicit(
         total_E += e_st; total_F += f_st
 
     # ── Clash (cell-list): O(K) ──
-    e_clash, f_clash = _explicit_forces_clash(pos_nm, cell_list, K_CLASH, CLASH_DIST)
+    e_clash, f_clash = _explicit_forces_clash(pos_nm, cell_list, K_CLASH, CLASH_SIGMA)
     total_E += e_clash; total_F += f_clash
 
     # ── BSJ guide (single pair) ──

@@ -39,7 +39,7 @@ def clash(p):
     pi, pj, _d, _r = cl.get_pair_info(p)
     has = any((int(a) == A and int(b) == Bi) or (int(a) == Bi and int(b) == A)
               for a, b in zip(pi, pj))
-    e, _f = C._clash_f(p, cl, C.K_CLASH, C.CLASH_DIST)
+    e, _f = C._clash_f(p, cl, C.K_CLASH, C.CLASH_SIGMA)
     return e.detach().numpy(), has
 
 

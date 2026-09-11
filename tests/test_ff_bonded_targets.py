@@ -68,7 +68,7 @@ def _folded_chain(L=8):
 
 
 def _clash_chain(L=8):
-    """_folded_chain with one N bead inside CLASH_DIST of a C4' more than two residues away
+    """_folded_chain with one N bead inside CLASH_SIGMA of a C4' more than two residues away
     (the neighbour list excludes |i - j| <= 2, so a nearer residue would not see it)."""
     pos, pairs = _folded_chain(L)
     near = pos[0, 3 * 0 + 1] + torch.tensor([0.0, 0.0, 0.25], dtype=torch.float64)
@@ -291,7 +291,7 @@ def test_every_live_constant_reaches_all_three_force_paths():
     paths, which is precisely how a retune could move one and not the others.
 
     The geometries are picked so each term is actually firing -- see _folded_chain for the BSJ
-    guide and the dihedral, _clash_chain for K_CLASH and CLASH_DIST, and the pair list for
+    guide and the dihedral, _clash_chain for K_CLASH and CLASH_SIGMA, and the pair list for
     K_PAIR and PAIR_NN. K_STACK ships at zero, so it is switched on for its case and off
     again, the same way test_both_paths_read_the_live_stacking_target does it.
     """
@@ -315,7 +315,7 @@ def test_every_live_constant_reaches_all_three_force_paths():
         ("BOND_C4_N", folded, paired_pairs, weight, {}),
         ("K_STACK", folded, paired_pairs, weight, {"K_STACK": 500.0}),
         ("K_CLASH", clash, no_pairs, None, {}),
-        ("CLASH_DIST", clash, no_pairs, None, {}),
+        ("CLASH_SIGMA", clash, no_pairs, None, {}),
     )
     paths = ("cg_energy_forces", "cg_forces_explicit_batched", "cg_forces_explicit")
     failures = []
