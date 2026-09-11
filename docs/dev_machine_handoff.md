@@ -37,6 +37,24 @@ git clone https://gitlab.igem.org/2026/software/jlu-fbh/torusfold-hybrid.git
 分支 main。GitHub 镜像 github.com/RomanCohort/Torusfold-physics，分支 master。
 **但 clone 拿不到 _cgdata/**（它在 gitignore 里），所以走网盘就整夹拷贝，走 clone 就得单独把数据放回去。
 
+**推 GitHub 时会撞上这台机器的 hosts 拦截表**（`127.0.0.1 github.com`，同一份名单里还有 steam /
+`googleapis / huggingface 那一堆）：`github.com` 被解析到本机，所以 `git push github` 报
+`fatal: unable to connect to server`。**那不是 GitHub 挂了，也不是网络断了。** 核对方式：
+
+```
+Resolve-DnsName github.com          # 127.0.0.1 -> hosts 拦的
+curl.exe -sS -m 15 --resolve github.com:443:140.82.112.4 -o NUL -w '%{http_code}' https://github.com   # 200 -> 真站可达
+```
+
+不碰 hosts 的一次性绕法（**必须带 `http.sslBackend=schannel`**：这个 Windows 构建只编了 schannel，
+单用 `http.curloptResolve` 会走 libcurl 后端并报 `fatal: Unsupported SSL backend 'openssl'`）：
+
+```
+git -c http.sslBackend=schannel -c http.curloptResolve=github.com:443:140.82.112.4 push github main:master
+```
+
+GitLab（origin）不走那张表，正常推送。
+
 ## 三、路径怎么解析
 
 scripts/_cgdata.py 是唯一一处解析，顺序：
