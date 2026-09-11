@@ -21,6 +21,14 @@ A -kBT ln P table is only defined on its support and interpolation flattens it o
 would leave the coordinate free to drift off the sampled range. Outside the fitted range a
 C1-continuous quadratic wall is added, anchored on the edge value and the edge slope.
 
+Stratification. fit() pools every observation of a coordinate into one histogram, so the
+six tables are sequence averaged: base identity reaches the loader only to pick the N9-vs-N1
+bead name and to decide which pairs count as Watson-Crick. Whether that averaging costs
+anything is a measurement rather than an assumption, so fit() also has an opt-in stratified
+form: fit_stratified() refits each coordinate once per base-identity group, on the pooled
+support, and reports which groups had enough observations to be worth a table and which fell
+back to the pooled one. The pooled path that every existing caller uses is not touched.
+
 Module only; fitting and checking live in test_boltzmann_bonded.py.
 """
 import collections
@@ -167,21 +175,144 @@ def _chain_residues(pdb, with_names=False):
     return out
 
 
-def load_structures(limit=None):
+def load_structures(limit=None, with_names=False):
+    """Chain records. with_names=True adds "names", the per-residue base letters.
+
+    The default record is byte-for-byte what every existing caller already gets; the
+    letters are opt-in because fit() ignores them and only the stratified fit needs them.
+    """
     structs = []
     for f in sorted(DATA.glob("*.pdb")):
         if limit is not None and len(structs) >= limit:
             break
-        for beads, pairs in _chain_residues(f):
-            structs.append({"name": f.stem, "pos": beads, "pairs": pairs})
+        for rec in _chain_residues(f, with_names=with_names):
+            if with_names:
+                beads, pairs, names = rec
+                s = {"name": f.stem, "pos": beads, "pairs": pairs, "names": names}
+            else:
+                beads, pairs = rec
+                s = {"name": f.stem, "pos": beads, "pairs": pairs}
+            structs.append(s)
             if limit is not None and len(structs) >= limit:
                 break
     return structs
 
 
 # --------------------------------------------------------------------- tables
-def fit(structs, nbins=120, pseudo=0.5):
-    """Per coordinate: (lo, hi, binw, U) with U = -kBT ln P over [lo, hi]."""
+def _table_from_values(v, nbins=120, pseudo=0.5, support=None):
+    """Bin one coordinate's observations and invert to U = -kBT ln P.
+
+    support=None fits the range to v, which is what the pooled fit has always done.
+    support=(lo, hi) bins on an existing range instead, so a subgroup table shares the
+    pooled bin edges and can be compared with, or substituted for, the pooled table
+    without a jump in either edge.
+    """
+    if support is None:
+        lo, hi = float(v.min()), float(v.max())
+        pad = 0.02 * (hi - lo)
+        lo, hi = lo - pad, hi + pad
+    else:
+        lo, hi = float(support[0]), float(support[1])
+    counts, edges = np.histogram(v, bins=nbins, range=(lo, hi))
+    # pseudo-count so empty bins are finite; without it -ln 0 is infinite and the
+    # interpolator has nothing to interpolate between
+    p = (counts + pseudo) / (counts.sum() + pseudo * nbins)
+    U = -KBT * np.log(p)
+    U = U - U.min()                                # shift, so only shape matters
+    return {"lo": lo, "hi": hi, "binw": (hi - lo) / nbins,
+            "U": U, "centre": 0.5 * (edges[:-1] + edges[1:]),
+            "n": int(counts.sum()),
+            "empty": int((counts == 0).sum())}
+
+
+# ---------------------------------------------------------------- stratification
+# How many residues each coordinate spans, endpoints included. coords_of() emits
+# (L - SPAN + 1) windows per chain, so a label built from SPAN consecutive residues lines
+# up one-for-one with that output. labels_for() checks the counts against coords_of()
+# rather than trusting this table, because an off-by-one here would mis-assign every
+# observation to the wrong base and nothing downstream would raise.
+SPAN = {"bb_bond": 2, "intra_pc": 1, "intra_cn": 1,
+        "angle": 3, "dihedral": 4, "stack": 3}
+
+# A scheme is the set of window-relative offsets whose base letters are concatenated into
+# the group label. 5-prime to 3-prime order is kept and never sorted: these coordinates
+# are directional, and a UA step is not an AU step.
+SCHEMES = {
+    "residue":      (0,),        # the one residue the coordinate sits in
+    "pair":         (0, 1),      # the two residues the coordinate joins
+    "skip":         (0, 2),      # the two residues two apart
+    "triplet":      (0, 1, 2),
+    "middle":       (1,),        # the residue between the endpoints
+    "central_pair": (1, 2),      # the two residues the central bond joins
+}
+
+# Which labelling each coordinate is stratified by, and why:
+#   intra_pc / intra_cn  P-C4' and C4'-N both live inside one residue, so the base at that
+#                        residue is the only candidate.
+#   bb_bond              spans two residues; the ordered pair across the bond is the
+#                        minimal complete label.
+#   stack                spans i and i+2; same argument, with a one-residue gap.
+#   dihedral             a P-P-P-P pseudo-torsion turns about the i+1/i+2 bond, so those
+#                        two bases are the ones whose orientation the coordinate reports.
+#   angle                spans three residues. The full triplet (64 groups) was measured
+#                        to be unsupportable at this database size -- its largest group is
+#                        smaller than the support floor -- so the middle residue, which is
+#                        the one the two P-P vectors share, is used.
+DEFAULT_SCHEME = {
+    "bb_bond":  "pair",
+    "intra_pc": "residue",
+    "intra_cn": "residue",
+    "angle":    "middle",
+    "dihedral": "central_pair",
+    "stack":    "skip",
+}
+
+# Support floor for a group table. At nbins=120 and pseudo=0.5 the pseudo-count carries
+# 0.5*120/(n + 0.5*120) of the probability mass: 23 percent at n=200, 11 percent at 500.
+# 200 is chosen to be permissive -- it is the smallest floor at which every pair-labelled
+# scheme stays fully supported on the whole 191-file database, so stratification is
+# actually exercised instead of silently collapsing to the pooled table. It is a judgement
+# call, not a derived constant; the per-group counts and pseudo fractions are returned so
+# a caller can re-gate without refitting, and refit_tables_stratified.py sweeps it.
+MIN_OBS = 200
+
+
+def labels_for(names, coord, scheme=None):
+    """Base-identity label for every observation coords_of(..., coord) emits, in order.
+
+    names is the per-residue letter list from _chain_residues(..., with_names=True). The
+    returned array is positional: element k labels window k of the coordinate array.
+    """
+    sch = DEFAULT_SCHEME[coord] if scheme is None else scheme
+    if sch not in SCHEMES:
+        raise KeyError(f"unknown stratification scheme {sch!r}; have {sorted(SCHEMES)}")
+    off = SCHEMES[sch]
+    if off[-1] >= SPAN[coord]:
+        raise ValueError(f"scheme {sch!r} reaches residue offset {off[-1]}, but {coord} "
+                         f"spans only {SPAN[coord]} residue(s)")
+    n = np.asarray(names)
+    if n.ndim != 1:
+        # a bare string would become a 0-d array here and every later len() would raise
+        raise ValueError(f"names must be a 1-d sequence of per-residue letters, got shape "
+                         f"{n.shape}; pass list(sequence) if it is a string")
+    win = len(n) - SPAN[coord] + 1
+    if win <= 0:
+        return np.array([], dtype="<U1")
+    parts = [n[o:o + win] for o in off]
+    return np.array(["".join(row) for row in zip(*parts)])
+
+
+def fit(structs, nbins=120, pseudo=0.5, stratify=False, min_obs=MIN_OBS, coords=None):
+    """Per coordinate: (lo, hi, binw, U) with U = -kBT ln P over [lo, hi].
+
+    stratify=False (the default, and what every existing caller gets) returns exactly the
+    pooled tables described above. stratify=True returns fit_stratified()'s nested
+    structure instead -- a deliberately different shape behind an explicit flag, so that no
+    call site can change meaning by accident.
+    """
+    if stratify:
+        return fit_stratified(structs, nbins=nbins, pseudo=pseudo,
+                              min_obs=min_obs, coords=coords)
     tables = {}
     for name in COORDS:
         vals = []
@@ -189,20 +320,83 @@ def fit(structs, nbins=120, pseudo=0.5):
             pos = torch.tensor(s["pos"].reshape(1, -1, 3), dtype=torch.float64)
             vals.append(coords_of(pos, name).reshape(-1).numpy())
         v = np.concatenate(vals)
-        lo, hi = float(v.min()), float(v.max())
-        pad = 0.02 * (hi - lo)
-        lo, hi = lo - pad, hi + pad
-        counts, edges = np.histogram(v, bins=nbins, range=(lo, hi))
-        # pseudo-count so empty bins are finite; without it -ln 0 is infinite and the
-        # interpolator has nothing to interpolate between
-        p = (counts + pseudo) / (counts.sum() + pseudo * nbins)
-        U = -KBT * np.log(p)
-        U = U - U.min()                                # shift, so only shape matters
-        tables[name] = {"lo": lo, "hi": hi, "binw": (hi - lo) / nbins,
-                        "U": U, "centre": 0.5 * (edges[:-1] + edges[1:]),
-                        "n": int(counts.sum()),
-                        "empty": int((counts == 0).sum())}
+        tables[name] = _table_from_values(v, nbins, pseudo)
     return tables
+
+
+def stratify_values(v, lab, pooled, nbins=120, pseudo=0.5, min_obs=MIN_OBS):
+    """Group tables for one coordinate's observations, on the pooled support.
+
+    Split out of fit_stratified() so the null control in refit_tables_stratified.py runs
+    the same code the builder runs -- a measurement that reimplements the thing it is
+    measuring is measuring the reimplementation.
+
+    Returns (groups, counts, fallback). Groups below min_obs are absent from groups and
+    named in fallback; their observed counts are still in counts, so a reader can see how
+    far short each one fell instead of having to guess.
+    """
+    groups, counts, fallback = {}, {}, []
+    for g in np.unique(lab):
+        m = lab == g
+        counts[str(g)] = int(m.sum())
+        if counts[str(g)] < min_obs:
+            fallback.append(str(g))
+            continue
+        vg = v[m]
+        t = _table_from_values(vg, nbins, pseudo, support=(pooled["lo"], pooled["hi"]))
+        # kBT/sigma^2 is the harmonic stiffness that would reproduce this group's spread,
+        # which is the number the local terms already use as their criterion.
+        t["sigma"] = float(vg.std())
+        t["k"] = KBT / t["sigma"] ** 2
+        t["pseudo_frac"] = pseudo * nbins / (counts[str(g)] + pseudo * nbins)
+        groups[str(g)] = t
+    return groups, counts, fallback
+
+
+def fit_stratified(structs, nbins=120, pseudo=0.5, min_obs=MIN_OBS, coords=None):
+    """One table per base-identity group, alongside the pooled table it would replace.
+
+    structs must come from load_structures(..., with_names=True).
+
+    Every group table is binned on the pooled support: same [lo, hi], same bin width. A
+    group table and the pooled table are therefore directly comparable, and a caller may
+    substitute one for the other without introducing a discontinuity at the edges.
+
+    Returns {coord: {"pooled", "groups", "n", "fallback", "min_obs", "labelling",
+    "n_obs", "n_groups", "pooled_sigma", "pooled_k"}} where "n" carries the observed
+    count of EVERY group, supported or not, and "fallback" names the ones priced by the
+    pooled table. The fallback is reported, never silent.
+    """
+    if any("names" not in s for s in structs):
+        raise ValueError(
+            "fit_stratified needs records from load_structures(..., with_names=True); "
+            "these carry no base letters, so there is nothing to stratify by")
+    coords = tuple(COORDS if coords is None else coords)
+    pooled = fit(structs, nbins=nbins, pseudo=pseudo)
+    vals = {c: [] for c in coords}
+    labs = {c: [] for c in coords}
+    for s in structs:
+        pos = torch.tensor(s["pos"].reshape(1, -1, 3), dtype=torch.float64)
+        for c in coords:
+            v = coords_of(pos, c).reshape(-1).numpy()
+            lab = labels_for(s["names"], c)
+            if len(lab) != len(v):
+                raise ValueError(f"{c}: {len(lab)} base labels for {len(v)} observations; "
+                                 f"the labelling does not line up with the coordinate")
+            vals[c].append(v)
+            labs[c].append(lab)
+    out = {}
+    for c in coords:
+        v = np.concatenate(vals[c])
+        lab = np.concatenate(labs[c])
+        groups, counts, fallback = stratify_values(
+            v, lab, pooled[c], nbins=nbins, pseudo=pseudo, min_obs=min_obs)
+        out[c] = {"pooled": pooled[c], "groups": groups, "n": counts,
+                  "fallback": sorted(fallback), "min_obs": min_obs,
+                  "labelling": DEFAULT_SCHEME[c], "n_obs": int(len(v)),
+                  "n_groups": int(len(counts)),
+                  "pooled_sigma": float(v.std()), "pooled_k": KBT / float(v.std()) ** 2}
+    return out
 
 
 def _sample(q, t):
