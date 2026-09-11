@@ -37,24 +37,29 @@ git clone https://gitlab.igem.org/2026/software/jlu-fbh/torusfold-hybrid.git
 分支 main。GitHub 镜像 github.com/RomanCohort/Torusfold-physics，分支 master。
 **但 clone 拿不到 _cgdata/**（它在 gitignore 里），所以走网盘就整夹拷贝，走 clone 就得单独把数据放回去。
 
-**推 GitHub 时会撞上这台机器的 hosts 拦截表**（`127.0.0.1 github.com`，同一份名单里还有 steam /
-`googleapis / huggingface 那一堆）：`github.com` 被解析到本机，所以 `git push github` 报
-`fatal: unable to connect to server`。**那不是 GitHub 挂了，也不是网络断了。** 核对方式：
+**GitHub 能不能推取决于加速器开没开，不是远程坏了。** `127.0.0.1 github.com` 是**加速器自己的机制**，
+不是广告拦截表：那台机器上 `127.0.0.1:443` 的监听进程就是 `Steam++.Accelerator`，
+旁边的 `www.github.com 140.82.112.4` 和那一堆 steam / googleapis 域名是同一套配置。
+
+**所以不要删 hosts 里那一行**——删了会把加速器弄坏。（我先前把它当成拦截表，说错了，已改。）
+
+| 加速器 | `Resolve-DnsName github.com` | `git push github` |
+| :-- | :-- | :-- |
+| **开** | 127.0.0.1（本机代理在听） | **通**，原生命令就行 |
+| **关** | 127.0.0.1（没人听） | `fatal: unable to connect to server` |
+
+关的时候，不碰 hosts 的一次性绕法：
 
 ```
-Resolve-DnsName github.com          # 127.0.0.1 -> hosts 拦的
-curl.exe -sS -m 15 --resolve github.com:443:20.205.243.166 -o NUL -w '%{http_code}' https://github.com  # 200 -> 真站可达
+git -c http.sslBackend=schannel -c http.curloptResolve=github.com:443:<IP> push github main:master
 ```
 
-不碰 hosts 的一次性绕法（**必须带 `http.sslBackend=schannel`**：这个 Windows 构建只编了 schannel，
-单用 `http.curloptResolve` 会走 libcurl 后端并报 `fatal: Unsupported SSL backend 'openssl'`）：
+**`http.sslBackend=schannel` 这一半不能省**，原因在本仓库自己的配置里：`.git/config` 有
+`http.sslBackend = openssl`，而系统级 `C:/Program Files/Git/etc/gitconfig` 是 `schannel`。
+仓库级覆盖系统级，而这个 Windows 构建**没有编 openssl**，所以走 libcurl 的那条路会报
+`fatal: Unsupported SSL backend 'openssl'`。**普通推送不受这行影响**，只有 `curloptResolve` 那条路撞它。
 
-```
-git -c http.sslBackend=schannel -c http.curloptResolve=github.com:443:20.205.243.166 push github main:master
-```
-
-**IP 要挑，不能抄。** GitHub 的接入点从这台机器看着很不稳——`140.82.112.4` 有时 200 有时超时，
-抄一个写死的进去就会白撞几次。先探一遍再推：
+**IP 要探，不能抄。** 关加速器时 GitHub 的接入点很不稳——`20.205.243.166` 上午 0.88 s、下午就超时。
 
 ```
 foreach ($ip in '20.205.243.166','140.82.116.3','140.82.113.4','140.82.112.3') {
@@ -63,9 +68,15 @@ foreach ($ip in '20.205.243.166','140.82.116.3','140.82.113.4','140.82.112.3') {
 }
 ```
 
-实测最快的是 **20.205.243.166**（亚洲接入点，0.88 s），`140.82.112.4` 在探针里已经超时。
+**GitLab（origin）是另一回事。** 它不需要加速器，但**凭据助手里的 token 是坏的**：原生的
+`git push origin main` 会报 `fatal: Authentication failed`，而且**没有 TTY 时会挂住等输入**
+（一次 600 s 超时就是这么来的）。用带 token 的 URL 推：
 
-GitLab（origin）不走那张表，正常推送。
+```
+git push https://oauth2:<token>@gitlab.igem.org/2026/software/jlu-fbh/torusfold-hybrid.git main
+```
+
+推完记得撤销 token。
 
 ## 三、路径怎么解析
 
