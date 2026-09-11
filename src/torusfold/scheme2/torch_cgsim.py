@@ -100,7 +100,34 @@ except ImportError:
 
 # ── Force-field parameters (aligned with openmm_gpu_refiner.py, kJ/mol/nm) ──
 # Balanced version: all terms have similar magnitudes so none dominates
-K_BB = 500.0        # P-P backbone bond (baseline)
+# ── K_BB: at the criterion now, and the reason it was not, measured ──
+# Every other bonded constant in this file is k = kBT/sigma^2 over the deposited database. K_BB
+# was the exception: it shipped at 500 against a criterion of 1122.4 (sigma = 0.0470 nm over 6638
+# P-P bonds, scripts/decompose_pair_spread.py), and the note that used to sit here gave the reason
+# -- stiffening it to kBT/sigma^2 "makes cap saturation worse, 0.58 percent to 1.61 percent".
+#
+# That was measured against the 200 kJ/mol/nm cap. The cap is 5000 now.
+# scripts/determine_k_bb.py measures the fraction of bead forces above the SHIPPED cap on the
+# current field, 1L2X in 8 batched replicas, 5 ps each:
+#
+#     K_BB      500     900    1300    1700    2100    2600
+#     sim/ref  1.928   1.712   1.519   1.363   1.266   1.116      (bb_bond spread)
+#     over-cap 0.000%  0.000%  0.000%  0.000%  0.000%  0.003%
+#
+# So the objection does not describe the current field: the cap never fires on this coordinate.
+#
+# The value is NOT the ~3020 at which the coupled spread would match, and that is deliberate. At
+# 1122 the coupled sim/ref for this coordinate is about 1.58 -- and intra_pc and intra_cn, which
+# ARE at their criterion, sit at 1.40 for exactly the same reason. Their residual is coupling, and
+# coupling is IBI's job (scripts/ibi_round0.py measures it). Setting K_BB by a COUPLED criterion
+# would make it the only constant fitted that way, and would then demand the same treatment for
+# the other five. Uniform criterion, coupling to IBI.
+#
+# The cost, measured, so it is not a surprise: raising it improves bb_bond (1.93 -> 1.58) and
+# stack (1.34 -> 1.19) and worsens angle (0.96 -> 0.94) and dihedral (0.88 -> 0.79). The dihedral
+# is already too NARROW and gets narrower. A single k cannot fix six coordinates at once; that is
+# the measured case for IBI, not an argument against this change.
+K_BB = 1122.4       # P-P backbone bond, kBT/sigma^2; was 500.0, see above
 # Intra-residue bonds. Split, because they are not the same spring and were sharing one number.
 # Reference spreads over 126 gap-free chains, results/boltzmann_tables_clean.npz:
 #   P-C4'  sigma = 0.010963 nm  ->  kBT/sigma^2 = 20752.7 kJ/mol/nm^2
@@ -170,9 +197,11 @@ K_PAIR = 600.0      # WC base-pair N-N (λ-scalable) ← lowered from 1500 to 60
 #
 # Ablating it leaves the funnel rank and gap untouched at 1.000 and 0.0 while taking the
 # bonded subset's cap saturation from 4.02 percent to 0.58 percent. stacking_vs_bond_
-# stiffness.py also rules out the one way it could still be load-bearing: stiffening the bond
-# to kBT/sigma^2 = 1076 does not let it go more cheaply, it makes cap saturation worse, so it
-# is not compensating for a soft bond. The bond constant stays at 500.
+# stiffness.py also ruled out the one way it could still be load-bearing: stiffening the bond
+# to kBT/sigma^2 = 1076 did not let it go more cheaply, it made cap saturation worse, so it was
+# not compensating for a soft bond. THAT MEASUREMENT IS SUPERSEDED -- see the note at K_BB. The
+# cap it was taken against was 200; the cap is 5000, and the over-cap fraction for this
+# coordinate is 0.000 percent at K_BB from 500 to 2100. K_BB is now 1122.4, the criterion.
 #
 # And the model cannot express stacking in any case: the beads are P, C4' and a point N9/N1,
 # with no plane, no normal, no rise and no twist. A term named for stacking that restrains a

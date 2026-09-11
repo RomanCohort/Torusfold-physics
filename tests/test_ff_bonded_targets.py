@@ -154,12 +154,36 @@ def test_stacking_term_is_disabled_as_redundant():
     assert abs(C.STACK_R0 - 1.125) < 1e-12
 
 
-def test_bond_stiffness_was_not_moved_to_the_variance_matching_value():
-    # kBT/sigma^2 would be 1076 for the P-P bond, but applying it raises cap saturation from
-    # 0.58 to 1.61 percent with stacking off. The variance-matching criterion that worked for
-    # the angle and dihedral does not transfer to a coordinate with a heavy-tailed spread.
-    assert C.K_BB < 800.0, (
-        f"K_BB is {C.K_BB}; the variance-matching value 1076 makes cap saturation worse")
+def test_bond_stiffness_is_at_the_same_criterion_as_every_other_bonded_constant():
+    """K_BB was the one bonded constant NOT set by kBT/sigma^2. It is now, and here is why.
+
+    It shipped at 500 against a criterion of 1122.4, and the test that used to live here locked
+    that decision: "kBT/sigma^2 would be 1076 for the P-P bond, but applying it raises cap
+    saturation from 0.58 to 1.61 percent with stacking off."
+
+    That was measured against the 200 kJ/mol/nm cap. The cap is 5000 now, and
+    scripts/determine_k_bb.py measures the fraction of bead forces above the SHIPPED cap on the
+    current field, 1L2X in 8 batched replicas, 5 ps each:
+
+        K_BB      500     900    1300    1700    2100    2600
+        sim/ref  1.928   1.712   1.519   1.363   1.266   1.116     (bb_bond spread)
+        over-cap 0.000%  0.000%  0.000%  0.000%  0.000%  0.003%
+
+    The cap never fires on this coordinate at any value tested, so the objection does not
+    describe the current field.
+
+    The value is the criterion and NOT the ~3020 at which the coupled spread would match:
+    intra_pc and intra_cn ARE at their criterion and sit at sim/ref 1.40 for exactly the same
+    reason, so that residual is coupling and belongs to IBI (scripts/ibi_round0.py). Setting
+    this one constant by a coupled criterion would demand the same treatment for the other five.
+    """
+    assert C.K_BB == pytest.approx(1122.4, rel=1e-3), (
+        f"K_BB is {C.K_BB}; the criterion is kBT/sigma^2 = 1122.4 for sigma = 0.0470 nm over "
+        f"6638 P-P bonds")
+    assert C.K_BB > 800.0, (
+        f"K_BB is {C.K_BB}, back below the value the cap-saturation objection was about. That "
+        f"objection was measured against the 200 kJ/mol/nm cap and the cap is 5000, so it is not "
+        f"a reason to lower this again")
 
 
 def test_bpp_stiffness_is_not_five_times_the_force_cap():
