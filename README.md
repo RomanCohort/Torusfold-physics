@@ -520,7 +520,9 @@ interpolant, so the pinned numbers are not pinning a bug.
 
 **Also in this round.** The straight Wiki Description version is in `docs/description.md`, carrying
 the real defect count and the three limits. `docs/attribution.md`'s Specific Tasks word count
-was six words off; it is 139, counted on the body. `### If you change a constant` above is new.
+was six words off; it is 139, counted on the body. `### If you change a constant` above is new. And
+`docs/dev_machine_handoff.md` carries the ordered task list for the dev machine, including the
+per-coordinate baseline to reproduce before anything else is believed.
 
 ## Data formats & synthetic-biology standards
 
