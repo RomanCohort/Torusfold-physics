@@ -255,6 +255,85 @@ def rcm_pair_weight(
     return base_weight * (1.0 + result['confidence'])
 
 
+def rcm_density_score(
+    seq_upstream: str,
+    seq_downstream: str,
+    kmer_lengths: Optional[List[int]] = None,
+    max_mismatch: int = 0,
+) -> dict:
+    """Length-normalised form of the composite RCM statistics.
+
+    compute_rcm_score()'s confidence is a ratio of kmer-match counts. Both the numerator
+    and the denominator grow with the length of the flanking window, and the pipeline picks
+    that window as min(200, len(sequence) // 4) -- 5 to 30 nt on the structures this was
+    measured on -- so two pairs scored at different window lengths are not compared on the
+    same scale. This function returns the same counts together with the number of kmer
+    pairs that were actually scanned, so the match rate can be read instead of the count.
+
+    The opportunity counts mirror the guards in rcm_crossing() and rcm_within() exactly:
+    crossing scans (L1-k+1)*(L2-k+1) pairs when both flanks are at least k long, and
+    within scans the upper triangle when one flank is at least 2k long and contributes
+    nothing at all below that. Counting opportunities the functions never look at would
+    make the density a different quantity than "matches per comparison made".
+
+    'confidence' is recomputed here with the same expression compute_rcm_score() uses, so a
+    caller can verify the two agree; the existing function is left untouched and no
+    existing caller changes behaviour.
+
+    Returns a dict with 'crossing_total', 'within_up_total', 'within_down_total',
+    'crossing_comparisons', 'within_comparisons', 'crossing_density' (crossing matches per
+    crossing comparison, 0.0 when there are none to make), 'flank_up', 'flank_down',
+    'per_k' (per kmer length: the four counts and the two opportunity counts) and
+    'confidence' (identical to compute_rcm_score(...)['confidence']).
+    """
+    if kmer_lengths is None:
+        kmer_lengths = [5, 7, 9, 11, 13]
+
+    l1, l2 = len(seq_upstream), len(seq_downstream)
+    crossing_total = 0
+    within_up_total = 0
+    within_down_total = 0
+    crossing_cmp = 0
+    within_cmp = 0
+    per_k = {}
+
+    for k in kmer_lengths:
+        n_cross, _ = rcm_crossing(seq_upstream, seq_downstream, k, max_mismatch)
+        n_up, _ = rcm_within(seq_upstream, k, max_mismatch)
+        n_down, _ = rcm_within(seq_downstream, k, max_mismatch)
+
+        c_cmp = max(0, l1 - k + 1) * max(0, l2 - k + 1)
+        # rcm_within() returns (0, zeros) below 2k, so no comparison is made there
+        up_cmp = max(0, l1 - k + 1) * max(0, l1 - k) // 2 if l1 >= 2 * k else 0
+        dn_cmp = max(0, l2 - k + 1) * max(0, l2 - k) // 2 if l2 >= 2 * k else 0
+
+        crossing_total += n_cross
+        within_up_total += n_up
+        within_down_total += n_down
+        crossing_cmp += c_cmp
+        within_cmp += up_cmp + dn_cmp
+        per_k[k] = {
+            'crossing': n_cross, 'crossing_comparisons': c_cmp,
+            'within_up': n_up, 'within_down': n_down,
+            'within_comparisons': up_cmp + dn_cmp,
+        }
+
+    total = crossing_total + within_up_total + within_down_total
+
+    return {
+        'crossing_total': crossing_total,
+        'within_up_total': within_up_total,
+        'within_down_total': within_down_total,
+        'crossing_comparisons': crossing_cmp,
+        'within_comparisons': within_cmp,
+        'crossing_density': crossing_total / crossing_cmp if crossing_cmp else 0.0,
+        'flank_up': l1,
+        'flank_down': l2,
+        'per_k': per_k,
+        'confidence': crossing_total / max(1, total),
+    }
+
+
 # ── Self-test ──
 if __name__ == "__main__":
     import time
