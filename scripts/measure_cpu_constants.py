@@ -54,7 +54,8 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
 KBT = 2.494  # kJ/mol at 300 K
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 NPZ = REPO / "results" / "boltzmann_tables_clean.npz"
 
 # The CPU's own geometric targets, read from openmm_gpu_refiner.py (Angstrom / deg).

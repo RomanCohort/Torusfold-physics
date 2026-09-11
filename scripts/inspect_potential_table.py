@@ -9,7 +9,8 @@ from pathlib import Path
 
 import numpy as np
 
-D = Path(r"D:\torusfold-cgdata\cgRNASP\cgRNASP\data")
+import _cgdata
+D = _cgdata.cgrnasp()
 FILES = {
     "0-1 (sep 1)": ("0-1_short-ranged.potential", 17),
     "1-2 (sep 2)": ("1-2_short-ranged.potential", 30),

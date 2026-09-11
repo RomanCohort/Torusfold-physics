@@ -17,7 +17,8 @@ per-pair Python loop made the relaxation comparison 1000x too slow.
 from pathlib import Path
 import numpy as np
 
-DATA = Path(r"D:\torusfold-cgdata\cgRNASP\cgRNASP\data")
+import _cgdata
+DATA = _cgdata.cgrnasp()
 SPEC = [("0-1_short-ranged.potential", 17, 1.0),
         ("1-2_short-ranged.potential", 30, 1.5),
         ("2-4_short-ranged.potential", 43, 2.4),

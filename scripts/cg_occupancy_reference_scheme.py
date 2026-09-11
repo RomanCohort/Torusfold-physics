@@ -16,7 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 K = (0, 1, 2, 4)
 INTERVALS = (17, 30, 43, 80)
 TYPES = [("A", "P"), ("A", "C4'"), ("A", "N9"),

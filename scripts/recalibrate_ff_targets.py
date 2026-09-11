@@ -34,7 +34,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 import torusfold.scheme2.torch_cgsim as C
 from truth_1ehz import WCP
 
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 N_STRUCT = int(sys.argv[1]) if len(sys.argv) > 1 else 16
 MIN_L, MAX_L = 20, 120
 SIGMAS = (0.3, 0.6, 1.0)          # Angstrom, bead-position perturbation

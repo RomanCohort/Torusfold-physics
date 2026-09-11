@@ -13,7 +13,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 
 
 def p_chains(pdb):

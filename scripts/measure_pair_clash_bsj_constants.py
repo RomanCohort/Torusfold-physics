@@ -67,7 +67,8 @@ sys.path.insert(0, str(REPO / "src"))
 KBT = 2.494                    # kJ/mol, the value torch_cgsim.py uses at 300 K
 T = 300.0
 R_GAS = 8.314462618e-3         # kJ/mol/K; R*T = 2.4943, so the shipped 2.494 is not a typo
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 NPZ = REPO / "results" / "boltzmann_tables_clean.npz"
 PAIR_NN = 1.00                 # nm, the GPU pairing target
 CLASH_DIST = 0.30              # nm, the GPU clash cutoff

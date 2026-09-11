@@ -49,8 +49,8 @@ COORDS = ("bb_bond", "intra_pc", "intra_cn", "angle", "dihedral", "stack")
 # sample_bonded_chain.py all reach the database through boltzmann_bonded. Seventeen other scripts
 # carry their own copy of the same literal and need editing individually if they are to run
 # elsewhere; see docs/dev_machine_handoff.md.
-DATA = Path(os.environ.get(
-    "TORUSFOLD_RSRNASP", r"D:\torusfold-cgdata\rsRNASP\Training_set"))
+import _cgdata
+DATA = _cgdata.rsrnasp()
 MIN_L, MAX_L = 20, 120
 
 

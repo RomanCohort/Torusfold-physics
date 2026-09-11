@@ -32,7 +32,8 @@ N = int(sys.argv[1]) if len(sys.argv) > 1 else 24
 MIN_PAIRS = 6
 SEED = 20260221
 CACHE = Path(__file__).resolve().parent.parent / "results" / "rcm_weights.npz"
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 FLANK = 200
 
 

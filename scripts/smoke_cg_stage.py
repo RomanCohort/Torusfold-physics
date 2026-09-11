@@ -22,7 +22,8 @@ import boltzmann_bonded as B
 from torusfold.scheme2.torch_cgsim import BatchedREMD2D
 
 N_STEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 400
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 
 s = next(x for x in B.load_structures(limit=200) if len(x["pairs"]) >= 8)
 

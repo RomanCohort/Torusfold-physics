@@ -27,7 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from torusfold.scheme2.rcm import compute_rcm_score
 
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 N_SEQ = int(sys.argv[1]) if len(sys.argv) > 1 else 40
 FLANK = 200
 SEED = 20260220

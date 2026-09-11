@@ -30,7 +30,8 @@ sys.path.insert(0, str(REPO / "src"))
 import boltzmann_bonded as B          # noqa: E402
 
 NF = int(sys.argv[1]) if len(sys.argv) > 1 else 400
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 files = sorted(glob.glob(str(DATA / "*.pdb")))[:NF]
 
 per_struct = {c: [] for c in B.COORDS}       # per structure: (mean, var, n)

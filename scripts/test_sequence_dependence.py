@@ -30,7 +30,8 @@ import cg_force_terms as T            # noqa: E402
 import torusfold.scheme2.torch_cgsim as C   # noqa: E402
 
 NF = int(sys.argv[1]) if len(sys.argv) > 1 else 400
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 WCP = B.WCP
 
 

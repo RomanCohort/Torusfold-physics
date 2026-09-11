@@ -36,6 +36,13 @@ pretrained/
 *.h5
 *.hdf5
 
+# ── Bundled data (ships in the folder, never in git) ─────
+# The deposited-structure database and the cgRNASP reference data travel with the working folder
+# so that a copied directory is self-contained, and are listed here so that no future `git add -A`
+# can stage them. This is the rule that exists because 4.9 GB once reached history and took three
+# rounds of git filter-repo to remove.
+_cgdata/
+
 # ── External predictors (installed separately) ──────────
 RNAbpFlow/
 external/

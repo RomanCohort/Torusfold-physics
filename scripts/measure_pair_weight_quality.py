@@ -90,7 +90,8 @@ sys.path.insert(0, str(REPO / "src"))
 import boltzmann_bonded as B                                        # noqa: E402
 from torusfold.scheme2.rcm import compute_rcm_score, rcm_density_score   # noqa: E402
 
-DATA = Path(r"D:\torusfold-cgdata\rsRNASP\Training_set")
+import _cgdata
+DATA = _cgdata.rsrnasp()
 WCP = B.WCP
 BAND = (9.0, 11.5)
 BAND_CENTRE = 0.5 * (BAND[0] + BAND[1])
