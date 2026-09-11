@@ -102,7 +102,29 @@ except ImportError:
 K_BB = 500.0        # P-P backbone bond (baseline)
 K_INTRA = 400.0     # P-C4', C4'-N
 K_PAIR = 600.0      # WC base-pair N-N (λ-scalable) ← lowered from 1500 to 600
-K_STACK = 500.0     # base stacking P_i-P_{i+2} (λ-scalable)
+# Base stacking. Set to zero, because the term does not model stacking and is exactly
+# redundant with two terms that do.
+#
+# The redundancy is exact, not approximate. With b_i = P(i+1)-P(i), b_{i+1} = P(i+2)-P(i+1)
+# and cos_a the P-P-P cosine as this file defines it,
+#
+#     |P(i) - P(i+2)|^2 = |b_i|^2 + |b_{i+1}|^2 - 2 |b_i| |b_{i+1}| cos_a
+#
+# and assess_stacking_redundancy.py verifies it over 1278 windows: the two sides agree to
+# 6.7e-16 nm^2, a relative 8.5e-16, with R^2 of 1.000000. Both bond lengths are restrained by
+# K_BB and cos_a by K_ANGLE, so this is a third spring on a derived quantity.
+#
+# Ablating it leaves the funnel rank and gap untouched at 1.000 and 0.0 while taking the
+# bonded subset's cap saturation from 4.02 percent to 0.58 percent. stacking_vs_bond_
+# stiffness.py also rules out the one way it could still be load-bearing: stiffening the bond
+# to kBT/sigma^2 = 1076 does not let it go more cheaply, it makes cap saturation worse, so it
+# is not compensating for a soft bond. The bond constant stays at 500.
+#
+# And the model cannot express stacking in any case: the beads are P, C4' and a point N9/N1,
+# with no plane, no normal, no rise and no twist. A term named for stacking that restrains a
+# backbone-derived distance was not doing that job. STACK_R0 is kept below because it records
+# what the coordinate's mode is, which the identity says the bond and angle terms now supply.
+K_STACK = 0.0       # base stacking P_i-P_{i+2} -- redundant, see above (was 500.0)
 # The angle and dihedral are set from k = kBT/sigma^2, where sigma is the observed spread of
 # the coordinate (refit_tables_clean.py, 96 gap-free chains): sigma = 0.2978 for the angle
 # cosine and 0.5880 for the dihedral cosine, giving 28.1 and 7.2 at 300 K.
@@ -1224,7 +1246,7 @@ class GPUCellList:
 _K_BOND_BB = 500.0
 _K_BOND_INTRA = 400.0
 _K_PAIR = 600.0       # lowered from 1500 to 600
-_K_STACK = 500.0
+_K_STACK = 0.0        # kept in step with K_STACK
 _K_ANGLE = 28.1       # kept in step with K_ANGLE
 _K_DIH = 7.2          # kept in step with K_DIH
 _K_CLASH = 500.0      # raised from 300 to 500

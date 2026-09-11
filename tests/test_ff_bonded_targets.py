@@ -86,6 +86,25 @@ def test_maxwell_boltzmann_check_is_not_thirty_times_off():
     assert C.K_DIH < 100.0, f"K_DIH {C.K_DIH} is back in the tuned range"
 
 
+def test_stacking_term_is_disabled_as_redundant():
+    # |P(i)-P(i+2)|^2 = |b_i|^2 + |b_{i+1}|^2 - 2|b_i||b_{i+1}|cos_a, exactly, with R^2 of
+    # 1.000000 over 1278 windows. Both bonds are restrained by K_BB and cos_a by K_ANGLE, so
+    # this term was a third spring on a derived quantity: ablating it left the funnel rank
+    # and gap untouched at 1.000 and 0.0 and took cap saturation from 4.02 to 0.58 percent.
+    assert C.K_STACK == 0.0, (
+        f"K_STACK is {C.K_STACK}; it is redundant with K_BB and K_ANGLE and was set to zero")
+    # the target is kept only as a record of the coordinate's mode
+    assert abs(C.STACK_R0 - 1.125) < 1e-12
+
+
+def test_bond_stiffness_was_not_moved_to_the_variance_matching_value():
+    # kBT/sigma^2 would be 1076 for the P-P bond, but applying it raises cap saturation from
+    # 0.58 to 1.61 percent with stacking off. The variance-matching criterion that worked for
+    # the angle and dihedral does not transfer to a coordinate with a heavy-tailed spread.
+    assert C.K_BB < 800.0, (
+        f"K_BB is {C.K_BB}; the variance-matching value 1076 makes cap saturation worse")
+
+
 def test_bpp_stiffness_is_not_five_times_the_force_cap():
     # At the target distance the softplus derivative is sigmoid(0) = 0.5, so this term
     # applies K_BPP / 0.6 to every pair regardless of geometry. The cap in cg_energy_forces
@@ -106,14 +125,24 @@ def test_no_frozen_snapshot_of_the_stacking_target():
 
 
 def test_both_paths_read_the_live_stacking_target():
-    """The anti-regression test. Fails if any path goes back to a frozen copy."""
+    """The anti-regression test. Fails if any path goes back to a frozen copy.
+
+    K_STACK ships at zero because the term is redundant with K_BB and K_ANGLE, so the term
+    has to be switched back on for this test to have anything to respond to. That is the
+    point: the property under test is that neither path reads a copy of STACK_R0 taken at
+    import, and with the term disabled the test would pass vacuously.
+    """
     pos, pairs = _chain()
     try:
+        C.K_STACK = 500.0
+        C._K_STACK = 500.0
         base_unified, base_batched = _energies(pos, pairs)
         C.STACK_R0 = 1.0
         alt_unified, alt_batched = _energies(pos, pairs)
     finally:
         C.STACK_R0 = 1.125
+        C.K_STACK = 0.0
+        C._K_STACK = 0.0
     assert base_unified != alt_unified, "cg_energy_forces ignored a change to STACK_R0"
     assert base_batched != alt_batched, (
         "cg_forces_explicit_batched ignored a change to STACK_R0 -- it is reading a frozen "
