@@ -149,6 +149,66 @@ the rest: `scripts/cg_force_terms.py` decomposes the field into 17 terms, the fu
 structures, and `ibi_round0.py` measures the joint residual. The open experiment is an ablation:
 **for each term, how much does removing it cost in the joint residual, and how much does it save?**
 
+## Open-source alternatives, checked
+
+The question was asked directly: is there an open-source force field better suited to a 2,013 nt
+circular RNA at 0.66 ns of simulation per replica? **The answer is no for a field, and one candidate
+is worth having as an engine.**
+
+### The resolution gap is the whole problem
+
+Our own literature map already recorded the bead definitions; rechecked against the primary sources:
+
+| model | beads per nucleotide | open source | has bonded terms? |
+| :-- | :-- | :-- | :-- |
+| **ours** | **3** (P / C4' / N9-N1) | this repository, Apache-2.0 | yes |
+| cgRNASP | **3** (P / C4' / N9-N1) | data on GitHub, `Tan-group/cgRNASP` | **no -- it is a scoring function** |
+| NAST | 1 per residue (at C3') | yes | yes, Monte Carlo |
+| oxDNA / oxRNA | **1 rigid body**, multiple interaction sites | **yes, GPL-3, since 2012** | yes |
+| ANNaMo | **1/3** (three nucleotides per patchy particle) | runs on the oxDNA engine | yes |
+| IsRNA2 / isRNAcirc | 5 | binaries only | yes |
+| Martini 3 RNA | **7 to 9** (3 backbone + 4/5/6 base) | Martini ecosystem | yes |
+
+**The only model that shares our three-bead convention is cgRNASP, and it has no bonded terms.**
+Everything else is either coarser in a way that loses the atom-to-bead correspondence (oxDNA,
+ANNaMo) or finer than ours (IsRNA2, Martini 3 RNA). There is nothing to drop in.
+
+### The one worth having: oxDNA / oxRNA
+
+Not as a replacement field. As an **engine for the search stage**, which our design currently
+outsources to the external predictors.
+
+- **One rigid body per nucleotide**, carrying separate backbone, hydrogen-bonding and stacking
+  interaction sites.
+- Parameterised to reproduce **SantaLucia and Turner nearest-neighbour melting**.
+- **Open source since 2012 under GPL-3**, with a LAMMPS implementation as well.
+- Demonstrated on systems **up to one million nucleotides**.
+- ANNaMo, which is a third of a bead per nucleotide, runs on the same engine and reports **10^9
+  steps in a few hours on a single CPU core**, and 5 x 10^9 steps in about 30 h.
+
+That last number is why it is worth looking at. Our field does **61 steps/s** on the machine we
+measured, so 10^9 steps would take it about **4.6 years**. The oxDNA engine is not 10^4 times faster
+by magic: a rigid body has no internal bonds, so the timestep is not capped by the stiffest harmonic
+in the model, and the model carries no solvent.
+
+**What it does not do**, in its authors' own words: it lacks atomistic-level resolution and cannot
+represent interactions with other biomolecules. Its design target is base-pair thermodynamics --
+single strand to duplex, hairpins, pseudoknots -- rather than the tertiary fold of a long chain. A
+circular topology, however, is trivial in it: bond the last backbone site to the first. **No closure
+force is needed at all**, which is the opposite of our situation.
+
+**Licence.** GPL-3 is not Apache-2.0. Running it as an external process is what this repository
+already does for RhoFold+, trRosettaRNA2 and RNAbpFlow; linking it into this codebase would not be.
+
+### The experiment that would settle whether it helps
+
+Take **2OIU**, the only experimentally resolved circular RNA. Build the same secondary structure in
+oxRNA, run it, and compare the resulting geometry against the crystal. That is the same test the
+Level-2 relaxation already passes at **RMSD 1.83 Angstrom in 17 minutes**. If oxRNA lands in the same
+neighbourhood for a small fraction of the cost, then our field's job is local refinement and the
+architecture's claim is confirmed rather than assumed. If it does not, the search stage genuinely
+needs the resolution we have, and the architecture is wrong.
+
 ## What this means for us
 
 1. **The iteration is the method.** If we want what IsRNA2 has, the IBI loop is not polish -- it is

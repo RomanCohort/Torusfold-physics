@@ -568,7 +568,7 @@ n = 16 下 1.44 与 1.12 分不开。只有"A 是灾难性的"这一条在噪声
    标准产物，RNA 版我们可以自己从训练集统计。
 4. **但不能整体照搬任何模型** —— 珠子定义不匹配。据同一篇综述：NAST 是**每残基一个珠子，放在 C3'**；
    oxRNA 是刚体多作用位点；SimRNA / RNAJP 是五珠；IsRNA2 是**五珠/核苷酸**（PMC9731381 摘要原话
-   "five-bead per nucleotide coarse-grained representation"）；Martini 3 RNA 是 4–7 珠。
+   "five-bead per nucleotide coarse-grained representation"）；Martini 3 RNA 是 **7–9 珠**（骨架 3：BB1 磷酸 / BB2 糖 3' 端 / BB3 核糖羟基；碱基嘧啶 4、腺嘌呤 5、鸟嘌呤 6）——这一条 2026-09-11 对着原文 Figure 1 的图注核过，之前记的 4–7 是错的。
    和我们同为三珠 P/C4'/N 的只有 cgRNASP，而它是**打分函数，没有键合项**。
    **结论：方法可以照搬，参数不能。**
 
