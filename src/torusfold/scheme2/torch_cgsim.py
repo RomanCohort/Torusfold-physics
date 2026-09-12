@@ -1223,11 +1223,35 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
                      cell_list=None, c_mg=C_MG_DEFAULT, c_na=C_NA_DEFAULT,
                      lams=None,
                      relax_bond_k=None, relax_angle_k=None,
-                     relax_pair_k=None, restraint_k=None, force_cap=5000.0):
+                     relax_pair_k=None, restraint_k=None, force_cap=5000.0,
+                     *, angle_potential=None, dihedral_potential=None):
     """Unified energy+forces: all 15 terms computed in one function, removing REMD inconsistency.
 
     lams: (B,) per-replica λ, overriding the scalar lam (for the merged forward).
     relax_*_k: relaxation parameters (None=use default constants), aligned with OpenMM rest2_remd_2d.
+
+    angle_potential / dihedral_potential: optional replacements for the two backbone angular
+    terms, keyword-only so that the positional interface the ~20 existing callers use cannot
+    shift under them. Each is a callable
+
+        pot(pos_nm: (B, N, 3)) -> (E: (B,), F: (B, N, 3))
+
+    with F = -dE/dx, carrying force on the P atoms of its own windows and zeros elsewhere,
+    returning pos_nm.dtype and pos_nm.device. It is called in place of _angle_f / _dihedral_f
+    and its energy is accumulated into the same running total, so nothing downstream can tell
+    the two apart. None -- the default -- selects the shipped harmonic expression and is
+    bit-identical to the behaviour before these parameters existed.
+
+    This is the production entry point with two terms replaced, NOT an alternate field: it is
+    deliberately not routed through _alternate_field, whose guard exists for the five functions
+    that share this module's constant NAMES while computing a different potential. What changes
+    here is the shape of two terms under the same constants, which is the case that guard
+    defends rather than the case it forbids.
+
+    Callers that inject a potential are responsible for the force cap: the cap below rescales
+    the summed force vector, so a term whose honest force exceeds force_cap stops being -dE/dx
+    wherever the cap fires -- and that is a property of the cap, not of the term. Pass
+    force_cap=None to disable it when the injected potential is the reason.
 
     Returns (energy, forces), guaranteeing F = -dE/dx (analytic or autograd).
     """
@@ -1275,12 +1299,18 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
     f_b = (-K_BSJ*(r_bsj-BOND_P_NEXT)*d/r_bsj).squeeze(-1)
     total_F[:,P(0)] += f_b; total_F[:,P(L-1)] -= f_b
 
-    # ── 4. Angles: O(N) analytic ──
-    e_a, f_a = _angle_f(pos_nm, _ang_k, math.cos(ANGLE_PPP))
+    # ── 4. Angles: O(N) analytic, or the injected potential ──
+    if angle_potential is None:
+        e_a, f_a = _angle_f(pos_nm, _ang_k, math.cos(ANGLE_PPP))
+    else:
+        e_a, f_a = angle_potential(pos_nm)
     total_E += e_a; total_F += f_a
 
-    # ── 5. Dihedrals: O(N) analytic ──
-    e_d, f_d = _dihedral_f(pos_nm, K_DIH, math.cos(DIH_PPPP))
+    # ── 5. Dihedrals: O(N) analytic, or the injected potential ──
+    if dihedral_potential is None:
+        e_d, f_d = _dihedral_f(pos_nm, K_DIH, math.cos(DIH_PPPP))
+    else:
+        e_d, f_d = dihedral_potential(pos_nm)
     total_E += e_d; total_F += f_d
 
     # ── 6. WC pairing: O(P) analytic ──
