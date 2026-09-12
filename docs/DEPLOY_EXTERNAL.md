@@ -131,11 +131,17 @@ export ISRNACIRC_BIN_DIR="C:/path/to/IsRNAcirc/standalone/bin"   # contains CG_t
 export CG_TO_ALLATOM_COEFF="C:/path/to/IsRNA2/coeff"             # coefficient dir
 ```
 
-> **Upstream:** Xiao M, Sun Y, Li Y, et al. *IsRNAcirc: prediction of circular
-> RNA 3D structures via coarse-grained molecular dynamics simulations.*
-> J. Chem. Theory Comput. 2023. Standalone binaries for several versions are in
-> circulation — use the release described in the paper (Windows-only exe + DLLs,
-> ASCII path required).
+> **Upstream:** Jiang H, Xu Y, Tong Y, Zhang D, Zhou R. *IsRNAcirc: 3D structure
+> prediction of circular RNAs based on coarse-grained molecular dynamics simulation.*
+> PLoS Comput. Biol. 2024;20(11):e1012293. doi:10.1371/journal.pcbi.1012293.
+> PMC11542809, PMID 39466881. Code: `github.com/DongZhangRNA/IsRNAcirc`.
+>
+> The same DOI is cited in `constraint_solver.py:260` as "Jiang et al., PLOS Comp
+> Biol 2024". An earlier version of this file attributed IsRNAcirc to Xiao M, Sun Y,
+> Li Y, et al., J. Chem. Theory Comput. 2023; a search finds no such paper, and the
+> DOI above is the method paper the authors link their own code from.
+> Standalone binaries for several versions are in circulation — use the release
+> described in the paper (Windows-only exe + DLLs, ASCII path required).
 
 ### PyRosetta — conditional full-atom refinement (Linux/WSL)
 
