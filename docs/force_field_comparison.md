@@ -78,16 +78,31 @@ iteration *added to* a fixed field -- the iteration is how the field exists.
 
 ## Sampling
 
-| | IsRNA2 / IsRNAcirc | ours (the calibration run) |
-| :-- | :-- | :-- |
-| integrator | LAMMPS Langevin, NVT, dt = 1 fs | torch Langevin, dt = 0.002 ps |
-| replicas | **REMD, 10 replicas, 200 to 425 K** | 8 replicas, all at 300 K |
-| length | 50 ns per replica, three duplicate runs -- **1.5 microseconds total** | 16 to 200 ps per replica |
-| analysis | last 25 ns at 50 ps intervals, 5,000 snapshots, top 10 percent by energy, clustered by pairwise RMSD | window-averaged histograms |
+**This has to be like for like, and an earlier version of this file got it wrong.** Our
+*calibration harness* (`ibi_round0.py`) runs eight copies at 300 K with no exchange, because it is
+measuring one window rather than folding. Our *production* pipeline is a different thing, and its
+exchange scheme is more elaborate than theirs:
 
-Three orders of magnitude, and it is not incidental. Their parameterisation draws 35,000 snapshots
-*per iteration*; the production run then samples 1.5 microseconds. Our current uncertainty is
-exactly here: the field is not stationary at 200 ps, on one chain, with no replica exchange.
+| | IsRNA2 / IsRNAcirc | ours, production (Level 2) | ours, calibration |
+| :-- | :-- | :-- | :-- |
+| exchange | 1D REMD, 10 replicas, 200 to 425 K | **2D REST2 x REMD: 6 temperature rungs x 4 lambda values**, swap every 500 steps | none, 8 copies at 300 K |
+| integrator | LAMMPS Langevin NVT, dt = 1 fs | torch Langevin, dt = 0.002 ps | same |
+| length | 50 ns per replica, 3 duplicate runs | 8 rounds x 5,000 steps = **80 ps** | 16 to 200 ps |
+| total | 10 x 50 ns x 3 = **1,500 ns** | 24 replicas x 0.08 ns = **1.92 ns** | 8 x 0.16 ns = 1.28 ns |
+
+So: **625 times longer per replica, about 780 times more sampling in total** -- while our exchange
+is two-dimensional where theirs is one. The length is the gap. The scheme is not.
+
+**The snapshot count per parameterisation round, though, is the same order.** Their iterative
+procedure draws 35,000 snapshots per round; our 40-200 ps window at stride 25 over 8 replicas draws
+**25,600 frames per coordinate**. What differs is not how many frames we keep -- it is that ours come
+from a 160 ps trajectory instead of a 50 ns one, so consecutive frames are far more correlated.
+That is a quantifiable defect, and it is why the window is not stationary at 200 ps.
+
+**Their method cannot simply be copied, and the arithmetic says so plainly.** One 50 ns x
+10-replica run of a **27-residue** system costs about **5.9 days** on the machine that measured
+61 steps/s. Their training set is **26 to 188 nucleotides**. The database-driven route we are on is
+not a shortcut around their method -- it is the route the sampling budget allows.
 
 ## What is the same
 
@@ -106,8 +121,9 @@ exactly here: the field is not stationary at 200 ps, on one chain, with no repli
    is exactly redundant) and has no replacement.
 3. **Eight restraints per base pair against our one** is measurable, not philosophical -- and it is
    the kind of thing a funnel test would see.
-4. **Sampling.** Any claim from a 200 ps single-chain window should be labelled as such, and the
-   plan to run four more structures is the minimum, not a luxury.
+4. **Sampling is a budget, not a verdict.** Our per-round frame count already matches theirs; what
+   is short is trajectory length, so the fix is longer windows and more chains, not a different
+   method. Any claim from a 200 ps single-chain window gets labelled as such.
 5. **The bead objection is smaller than it was, and what is left is a different one.** `70daa97`
    made the production path take C4' and N9/N1 from the 1EHZ reconstruction instead of growing them
    from P (measured: the old offsets put |C4'-N| at 4.900 Angstrom against the field's own 3.35
