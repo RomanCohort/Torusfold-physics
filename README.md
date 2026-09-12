@@ -487,7 +487,9 @@ another constant.
 
 ## Update log
 
-Newest first. Every entry is a measurement from a script in `scripts/`, not a plan.
+Newest first. Every entry is a measurement from a script in `scripts/`, not a plan. The full
+arc -- 134 commits over six days, phase by phase, with the commit that carried each one -- is in
+`docs/timeline.md`.
 
 ### Dev-machine round (findings reported back, not run here)
 
