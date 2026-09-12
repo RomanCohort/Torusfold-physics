@@ -34,7 +34,7 @@ and the ion and solvation terms.
 | bead types | **11** | 3 |
 | definition | P + S (sugar) + three base beads | P + C4' + N9/N1 |
 | base beads | typed by base identity and by edge (Watson-Crick / sugar / Hoogsteen) | three beads, no base identity |
-| how positions are obtained | mapped from the all-atom structure | **C4' and N are grown from P** by fixed offsets |
+| how positions are obtained | mapped from the all-atom structure | from the 1EHZ template reconstruction since `70daa97`; **before that, grown from P** |
 | per-bead diameter | yes, 2.5 to 3.7 Angstrom (Table 1) | one `CLASH_SIGMA = 0.3975 nm` for every pair |
 
 The last row of that table is the one that limits us most. Their excluded volume is per bead type;
@@ -108,10 +108,15 @@ exactly here: the field is not stationary at 200 ps, on one chain, with no repli
    the kind of thing a funnel test would see.
 4. **Sampling.** Any claim from a 200 ps single-chain window should be labelled as such, and the
    plan to run four more structures is the minimum, not a luxury.
-5. **The bead problem blocks the reuse of their statistics.** `docs/statistical_potentials_as_forces.md`
-   section 4c records that our C4' and N beads are grown from P, not measured. Their beads -- and
-   cgRNASP's -- are real atoms grouped together. Until ours are too, their statistics cannot be
-   transferred, and that is a prerequisite rather than an optimisation.
+5. **The bead objection is smaller than it was, and what is left is a different one.** `70daa97`
+   made the production path take C4' and N9/N1 from the 1EHZ reconstruction instead of growing them
+   from P (measured: the old offsets put |C4'-N| at 4.900 Angstrom against the field's own 3.35
+   target, and put both beads collinear with the backbone; the real ones land at 3.885 and 3.359 with
+   P-to-C4' 48.9 degrees off axis). So "same name, different object" is gone for the production path.
+   What remains is a **resolution** difference -- 3 untyped beads against their 11 typed ones -- and
+   that is a separate question from whether our beads are real. The `openmm_gpu_refiner.py` path
+   still random-perturbs them, and the reconstructed base bead still sits 2.010 +/- 2.328 Angstrom
+   from the crystal N9/N1, which affects scoring our models rather than counting a potential.
 
 ## A note on scope
 
