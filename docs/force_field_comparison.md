@@ -112,6 +112,43 @@ not a shortcut around their method -- it is the route the sampling budget allows
 - Both use replica-exchange MD in the production pipeline, and both reconstruct to all-atom and
   refine at the end.
 
+## Cost, which the first version of this file left out
+
+The tables above compare **scope**. They say nothing about the thing the field exists for here, which
+is why they read as a deficit list when they are meant to be a map. The numbers, from
+`docs/REPRODUCTION_RESOURCES.md`:
+
+| | IsRNA2 / IsRNAcirc | ours |
+| :-- | --: | --: |
+| physical MD per replica, whole pipeline | 50 ns | **0.66 ns** low config, **0.94 ns** at the checked-in defaults |
+| particles per nucleotide | 5 | 3 |
+| exchange | 1D REMD, 10 replicas | 2D REST2 x REMD, 6 temperatures x 4 lambdas |
+| end-to-end, 2,013 nt, all-atom | -- | about 7 h on CPU, measured on an earlier build |
+
+**Between 50 and 76 times less simulation per replica, and that is the design rather than a
+shortfall.** The same document states it plainly: the physics stages here are local repair and
+constraint enforcement -- clash relief, BSJ closure, pairing restraints, A-form torsions -- not
+conformational search. The search is carried by the coarse-grained fold and the segmented ensemble,
+and the reference it cites is that 10 to 50 ns is where short MD refinement has been reported to
+help a *good* starting model, while beyond 50 ns refinement drifts (CASP15 refinement benchmark,
+PMC12513224).
+
+**What that buys and what it costs: we gave up conformational search, not accuracy.** Which makes the
+field's accuracy *more* load-bearing here than in their design, not less. They can out-sample a
+mediocre field; with 0.66 ns per replica we cannot. That is the reason the sixteen silent defects had
+to be found, and the reason a converged-window residual is worth measuring at all.
+
+The one measured result that speaks to this directly: **2OIU**, the only experimentally resolved
+circular RNA, through the Level-2 relaxation, gives **RMSD 1.83 Angstrom against the crystal in 17
+minutes on CPU**.
+
+**And the simplification is not finished, which is the interesting part.** A simplified field's
+honest deliverable is a **cost-accuracy curve**, not one field. We have one point on it -- `K_STACK
+= 0`, a term removed after being proved exactly redundant with two others -- and the machinery to get
+the rest: `scripts/cg_force_terms.py` decomposes the field into 17 terms, the funnel test ranks
+structures, and `ibi_round0.py` measures the joint residual. The open experiment is an ablation:
+**for each term, how much does removing it cost in the joint residual, and how much does it save?**
+
 ## What this means for us
 
 1. **The iteration is the method.** If we want what IsRNA2 has, the IBI loop is not polish -- it is
