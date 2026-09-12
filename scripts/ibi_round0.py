@@ -103,13 +103,21 @@ print(f"force_cap={_cap}  mass=110.0 Da  dt=0.002 ps  friction={FRICTION}/ps")
 # The SHAPE of the guide is not a constant, so the fingerprint above cannot see it: a run under
 # the short-range-reward form and a run under the long-range form print the SAME fingerprint.
 # That is the same provenance hole this script's own paragraph says invalidated three earlier
-# runs, so probe the shape directly instead of trusting a list of numbers. With r0 = 1.0,
-# w = 0.2, k = 1: the long-range form gives ~0 at 0.5 nm and ~10 at 3.0 nm, the short-range
-# reward gives ~10 then ~0.
+# runs, so probe the shape directly instead of trusting a list of numbers.
+#
+# The discriminator is the SIGN of E, and it has to be. The first version of this probe tested
+# `E(0.5) < E(3.0)` on the reasoning that the long-range form rises with distance. It does --
+# but so does the short-range reward, because -softplus((r0-d)/w) also rises with d, from -k to
+# 0. So that test was true for BOTH shapes and the probe could never print its warning. Measured
+# with scripts/e3_old_field.py, which patches _sigmoid_f back to the pre-6e7a44b form: the old
+# shape gives E(0.5) = -2.579, E(3.0) = -0.000, and the old probe called that "long-range".
+# What actually separates them is the overall sign, which is k-independent:
+#     long-range form:  E = +k*softplus((dist-r0)/width)  ->  E > 0 everywhere
+#     short-range form: E = -k*softplus((r0-dist)/width)  ->  E < 0 everywhere
 _gs = C._sigmoid_f(torch.tensor([0.5, 3.0]), 1.0, 1.0, 0.2)[0]
 _gnear, _gfar = float(_gs[0]), float(_gs[1])
 print(f"guide shape: E(0.5 nm)={_gnear:.3f}  E(3.0 nm)={_gfar:.3f}  ("
-      + ("long-range: zero below r0, bounded pull above" if _gnear < _gfar
+      + ("long-range: zero below r0, bounded pull above" if _gnear > 0
          else "SHORT-RANGE REWARD -- the pre-6e7a44b form") + ")")
 # The second B half-kick takes force_fn, so this run is symplectic. It has to be: the
 # non-symplectic fallback pumps energy at dt*omega^2/(4*gamma) of the drag per step, and after
