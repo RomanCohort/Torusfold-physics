@@ -37,6 +37,7 @@ everything seen so far, so a good early stretch hides a bad later one. The final
 the sampling window into --blocks=N disjoint equal-TIME blocks and gives each its own J. Read
 the spread of those, not the movement of the cumulative line.
 """
+import inspect
 import sys
 from pathlib import Path
 
@@ -63,15 +64,71 @@ def _opt_int(name, default):
         if a.startswith(pre):
             return int(a[len(pre):])
     return default
+
+
+def _opt(name, default=""):
+    """--name=VALUE out of argv as a string, leaving the positional arguments untouched."""
+    pre = f"--{name}="
+    for a in sys.argv[1:]:
+        if a.startswith(pre):
+            return a[len(pre):]
+    return default
+
+
+# ── optional substitutes for the two backbone angular terms ──
+# With neither flag this script is bit-identical to what it was before they existed: both
+# potentials stay None and cg_energy_forces takes its own default branch. That is checked two
+# ways -- tests/test_table_potential_injection.py for the plumbing, and the whole-run regression
+# against results/newfield_8x8000.log for the trajectory.
+#
+# With one passed, the sampled distribution is a DIFFERENT one, and nothing in the constant
+# fingerprint below can show it: _FINGERPRINT names constants, while a potential replaces the
+# SHAPE of a term and leaves every constant alone. That is the same hole this script's docstring
+# records as having invalidated three earlier runs, so the resolved spec is echoed into the log
+# rather than left to be inferred from the numbers it produces.
+import cg_potentials as P          # noqa: E402
+import ibi_core as IC              # noqa: E402
+
 NPZ = REPO / "results" / "boltzmann_tables_clean.npz"
 SEED = 20260218
 
-z = np.load(NPZ)
-TAB = {}
-for name in B.COORDS:
-    TAB[name] = {"centre": z[f"{name}__centre"], "U": z[f"{name}__U"],
-                 "binw": float(z[f"{name}__binw"]), "sigma": float(z[f"{name}__sigma"]),
-                 "lo": float(z[f"{name}__lo"]), "hi": float(z[f"{name}__hi"])}
+# --table=FILE is the table this round SIMULATES: round 0 uses the shipped/reference tables, and
+# round N passes what ibi_update.py wrote for round N-1. It is NOT the reference the update is
+# checked against -- that one is fixed, and changing it would make every update a no-op by
+# construction.
+#
+# Resolved BEFORE the potentials are built, and pushed into them. The table specs in
+# force_reference read a file once and cache the result, so building a potential first would
+# freeze round 0's table inside it: the round would then SAMPLE under the old potential while
+# BINNING against the new table, and report a converged update for the wrong reason.
+_TABLE_PATH = Path(_opt("table", str(NPZ)))
+P.use_table_file(_TABLE_PATH)
+TAB = IC.load_tables(_TABLE_PATH)
+
+_POTS = []          # [(coord, spec, potential)]
+for _coord in ("angle", "dihedral"):
+    _text = _opt(_coord, "")
+    if _text:
+        _spec = P.resolve_spec(_text, _coord)
+        _POTS.append((_coord, _spec, P.make_potential(_coord, _spec)))
+_POT_KW = {f"{_c}_potential": _pot for _c, _s, _pot in _POTS}
+
+# --cap=auto|none|NUMBER. "auto" reads force_cap's own default off the signature, which is the
+# shipped behaviour and the default here. force_cap rescales the SUMMED force vector, so a term
+# whose honest force exceeds it stops being -dE/dx wherever the cap fires -- which is a property
+# of the cap, not of the term, and is why "none" exists.
+_cap_text = _opt("cap", "auto")
+if _cap_text == "auto":
+    CAP = inspect.signature(C.cg_energy_forces).parameters["force_cap"].default
+elif _cap_text == "none":
+    CAP = None
+else:
+    CAP = float(_cap_text)
+
+# --write=DIR dumps one npz per coordinate in the form ibi_bonded.plan_update consumes, so a
+# round can be updated without a human reading the numbers back out of the log. Without it this
+# script prints and writes nothing, exactly as before.
+_WRITE = _opt("write", "")
 
 pool = [s for s in B.load_structures(limit=400) if len(s["pairs"]) >= 8 and 24 <= len(s["pos"]) <= 34]
 s0 = pool[IDX]
@@ -134,10 +191,37 @@ print()
 pos = torch.tensor(s0["pos"].reshape(1, 3 * L, 3), dtype=torch.float64).repeat(NREP, 1, 1)
 vel = torch.zeros_like(pos)
 ij = torch.tensor(s0["pairs"], dtype=torch.long).reshape(-1, 2)
+
+# The potentials actually in force, and their honest force on the STARTING geometry. Printed
+# here rather than beside the constant fingerprint because it needs pos, and the point is to see
+# BEFORE the run whether force_cap will clip what is being injected: the cap rescales the summed
+# force, so a clipped term is not -dE/dx wherever it fires. docs/dihedral_table_decision.md
+# records the numbers this is guarding -- the table's honest max is 15736 against a cap of 5000.
+if _POTS:
+    print("potentials: " + "  ".join(f"{_c}={P.describe(_s)}" for _c, _s, _ in _POTS)
+          + f"  cap={'none' if CAP is None else f'{CAP:g}'}")
+    print("            NOTE: the constant fingerprint above does NOT reflect this -- it names "
+          "constants,")
+    print("            and a potential replaces the SHAPE of a term while leaving every "
+          "constant alone.")
+    with torch.no_grad():
+        for _c, _s, _pot in _POTS:
+            _e, _f = _pot(pos)
+            _fm = float(_f.abs().max())
+            if CAP is None:
+                _verdict = "no cap in force"
+            elif _fm <= CAP:
+                _verdict = f"under cap {CAP:g}"
+            else:
+                _verdict = (f"OVER cap {CAP:g} by {_fm / CAP:.2f}x -- the cap will clip it, and "
+                            f"the clipped term is not -dE/dx; --cap=none shows the true one")
+            print(f"  injected {_c:8s} |F|max {_fm:9.1f} on the start geometry   ({_verdict})")
+    print()
 pw = torch.ones(len(ij), dtype=torch.float32)
 temps = torch.full((NREP,), 300.0, dtype=torch.float64)
 
-torch.manual_seed(SEED)
+# The noise sequence is seeded inside run_round, which is called after pos is built -- the seed
+# and the starting coordinates have to stay paired exactly as they were, or the trajectory moves.
 # The sampling window, decoupled from the run length. See the docstring.
 _burn_arg = int(sys.argv[6]) if len(sys.argv) > 6 else 0
 burn = _burn_arg if _burn_arg > 0 else max(NSTEPS // 5, 1)
@@ -154,97 +238,44 @@ K_SHIPPED = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_
 # cumulative average hid it behind the first. So the accumulators are per block and every
 # whole-window number below is the sum over blocks.
 NB = max(_opt_int("blocks", 4), 1)
-b_counts = {b: {c: np.zeros(len(TAB[c]["U"]), dtype=np.int64) for c in B.COORDS}
-            for b in range(NB)}
-b_acc = {b: {c: [0.0, 0.0, 0] for c in B.COORDS} for b in range(NB)}
-b_frames = [0] * NB
+# The loop itself lives in ibi_core. It is not duplicated here: docs/statistical_potentials_as_
+# forces.md:2754 records that this repository has already drifted three times from duplicated
+# logic and requires the sampler loop not to exist in two copies. Everything the report below
+# needs is on the returned object.
+_res = IC.run_round(pos=pos, vel=vel, ij=ij, pw=pw, temps=temps, tab=TAB,
+                    nsteps=NSTEPS, burn=burn, stride=STRIDE, blocks=NB,
+                    friction=FRICTION, force_cap=CAP, pot_kw=_POT_KW, seed=SEED, nrep=NREP)
+# Bound to the names the report below already uses, so the report is untouched by the extraction.
+# That is the whole discipline of this change: it may MOVE code, it may not restate it -- and the
+# gate is that this script reproduces its own historical stdout bit for bit.
+counts, acc = _res.counts, _res.acc
+b_acc, b_frames = _res.b_acc, _res.b_frames
+clash_min = _res.clash_min
+clash_below, clash_below_live = _res.clash_below, _res.clash_below_live
 
 
-def _summed():
-    """Whole-window counts and moments, as the sum over the blocks."""
-    ct = {c: np.zeros(len(TAB[c]["U"]), dtype=np.int64) for c in B.COORDS}
-    ac = {c: [0.0, 0.0, 0] for c in B.COORDS}
-    for b in range(NB):
-        for c in B.COORDS:
-            ct[c] += b_counts[b][c]
-            a = b_acc[b][c]
-            ac[c][0] += a[0]
-            ac[c][1] += a[1]
-            ac[c][2] += a[2]
-    return ct, ac
-# Clash watch. The analytical claim about the intra-bead bonds assumes the repulsion never
-# fires, and C4'-N sits at 0.335 nm against a 0.300 nm cutoff, so that is not free.
-clash_min = []
-# The live range is CLASH_SIGMA. This used to count against CLASH_DIST, which is retired: it is
-# 0.30 and nothing reads it, so the watch was blind to every pair between 0.30 and 0.3975 that the
-# shipped wall does act on. Both are counted now, so a comparison against the old number stays
-# possible without mistaking it for the live one.
-clash_below = 0
-clash_below_live = 0
-import time
-t0 = time.time()
-def _forces_at(p):
-    """Fresh forces at the post-update coordinates, for the symplectic tail kick.
-
-    The cell list has to be rebuilt here rather than reused: it is built from positions.
-    """
-    cl2 = C.GPUCellList(cell_size=1.5)
-    cl2.build(p)
-    return C.cg_energy_forces(p, ij, pw, cell_list=cl2)[1]
-
-
-for step in range(NSTEPS):
-    with torch.no_grad():
-        cl = C.GPUCellList(cell_size=1.5)
-        cl.build(pos)
-        e, f = C.cg_energy_forces(pos, ij, pw, cell_list=cl)
-        pos, vel = C.batch_langevin_step(pos, vel, f, temps,
-                                         dt_ps=0.002, mass_amu=110.0,
-                                         friction=FRICTION, force_fn=_forces_at)
-    if step == 0:
-        print(f"first step {time.time() - t0:.3f} s")
-    if step >= burn and step % STRIDE == 0:
-        # which disjoint block this sample falls in; blocks are equal in TIME, not in count
-        blk = min(((step - burn) * NB) // max(NSTEPS - burn, 1), NB - 1)
-        b_frames[blk] += 1
-        with torch.no_grad():
-            for c in B.COORDS:
-                q = B.coords_of(pos, c).reshape(-1).numpy().astype(np.float64)
-                a = b_acc[blk][c]
-                a[0] += q.sum()
-                a[1] += (q ** 2).sum()
-                a[2] += q.size
-                t = TAB[c]
-                k = np.round((q - t["centre"][0]) / t["binw"]).astype(np.int64)
-                ok = (k >= 0) & (k < len(t["U"]))
-                b_counts[blk][c] += np.bincount(k[ok], minlength=len(t["U"]))
-            beads = pos.reshape(NREP, -1, 3)
-            dd = torch.cdist(beads, beads)
-            dd = dd + torch.eye(dd.shape[-1], device=dd.device) * 10.0
-            clash_min.append(float(dd.min()))
-            clash_below += int((dd < C.CLASH_DIST).sum())
-            clash_below_live += int((dd < C.CLASH_SIGMA).sum())
-    if (step + 1) % max(NSTEPS // 10, 1) == 0:
-        el = time.time() - t0
-        parts, _joint = [], []
-        _ct, _ac = _summed()
-        for c in B.COORDS:
-            s1, s2, n = _ac[c]
-            if n:
-                mm = s1 / n
-                ss = float(np.sqrt(max(s2 / n - mm * mm, 0.0)))
-                rs = TAB[c]["sigma"]
-                r = ss / rs if rs > 0 else float("nan")
-                parts.append(f"{c[:5]} {r:5.3f}")
-                if r == r and r > 0:
-                    _joint.append(abs(float(np.log(r))))
-            else:
-                parts.append(f"{c[:5]}   --")
-        _j = float(np.mean(_joint)) if _joint else float("nan")
-        print(f"  {step+1:>7d} {el:6.0f}s  " + "  ".join(parts) + f"   J {_j:.4f}")
-
-el = time.time() - t0
-print(f"done in {el:.0f} s, {NSTEPS / el:.1f} steps/s")
+print(f"done in {_res.seconds:.0f} s, {_res.steps_per_s:.1f} steps/s")
+if _WRITE:
+    _bJ = []
+    for _b in range(NB):
+        _bv, _bj = IC.simref(_res.b_acc[_b], TAB)
+        _bJ.append(None if _bj != _bj else round(float(_bj), 6))
+    _wv, _wj = IC.simref(_res.acc, TAB)
+    IC.write_round(_WRITE, _res, TAB, meta={
+        "cmdline": " ".join(sys.argv),
+        "table_file": str(_TABLE_PATH),
+        "structure": s0["name"], "L": L,
+        "nrep": NREP, "nsteps": NSTEPS, "burn": burn, "stride": STRIDE, "blocks": NB,
+        "friction": FRICTION, "seed": SEED, "force_cap": CAP, "dt_ps": 0.002, "mass_amu": 110.0,
+        "potentials": {_c: P.describe(_s) for _c, _s, _ in _POTS},
+        "fingerprint": {n: getattr(C, n) for n in _FINGERPRINT},
+        "joint_J": None if _wj != _wj else round(float(_wj), 6),
+        "block_J": _bJ,
+        "per_coordinate": {c: {"n": int(_res.n_total[c]), "n_outside": int(_res.n_outside[c]),
+                               "sim_ref": (None if v != v else round(float(v), 6))}
+                           for c, v in zip(B.COORDS, _wv)},
+    })
+    print(f"wrote per-coordinate histograms to {_WRITE}/")
 print()
 print(f"clash watch: live range {C.CLASH_SIGMA:.4f} nm, retired cutoff {C.CLASH_DIST:.3f} nm; "
       f"closest bead pair ever {min(clash_min):.4f} nm")
@@ -267,7 +298,7 @@ print(f"{'coordinate':10s} {'ref sig':>8s} {'1-D sig':>8s} {'sim sig':>8s} "
       f"{'sim/ref':>8s} {'sim/1D':>7s} {'dU min':>8s} {'dU max':>8s} {'|dU|>1kBT':>10s}")
 print("-" * 86)
 rows = {}
-counts, acc = _summed()
+# counts/acc are bound from the run_round result above; the report does not recompute them.
 for c in B.COORDS:
     t = TAB[c]
     s1, s2, n = acc[c]
