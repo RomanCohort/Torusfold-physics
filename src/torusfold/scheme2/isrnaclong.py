@@ -2443,6 +2443,29 @@ def isrnaclong_pipeline(
         if verbose:
             print(f"  [lociPARSE] skipped: {_e}")
 
+    # ── self-consistency panel for the finished structure ──
+    # The five things a run has to satisfy at 2013 nt cannot be checked against a native, so
+    # they are checked against the structure itself. The "chain intact" entry was previously
+    # absent from the final report entirely: _validate_structure computes bond_quality, but it
+    # is called per Level, printed, and discarded, so no run ever reported whether its final
+    # chain was intact. Radius of gyration had no instrument at all.
+    _final_val = None
+    try:
+        _final_val = _final_validation(best_coords, pairs, bpp, sequence)
+        if verbose:
+            _bv = _final_val.get("bond_quality")
+            _rv = _final_val.get("radius_of_gyration")
+            _pv = _final_val.get("pair_rate")
+            print(f"  [final] bond_q={_bv if _bv is None else round(_bv,3)}  "
+                  f"Rg={_rv if _rv is None else round(_rv,1)} A  "
+                  f"clash={_final_val.get('clash_count')}  "
+                  f"pair_rate={_pv if _pv is None else round(_pv,3)}"
+                  + (f"  monotone={_final_val.get('pair_rate_monotone')}"
+                     if 'pair_rate_monotone' in _final_val else ""))
+    except Exception as _e:
+        if verbose:
+            print(f"  [final] validation skipped: {_e}")
+
     # ── full pipeline summary ──
     try:
         total_time = time.time() - t0
@@ -2482,6 +2505,10 @@ def isrnaclong_pipeline(
                 "hbond_rate": float(_hbond_rate),
                 "clash_count": int(metrics.clash_count) if 'metrics' in dir() else None,
                 "pair_rate": float(state.pair_rate),
+                # The five self-consistency criteria, measured on the final structure:
+                # chain intact, not collapsed, secondary structure, and the per-tier pairing
+                # response to Level 0. Tertiary is lociparse_pMoL above.
+                "final_validation": _final_val,
             },
             "total_time": float(total_time),
         }
@@ -2698,6 +2725,118 @@ def _validate_structure(coords, pairs, bpp_matrix, sequence, level_name=""):
         result["warnings"].append(f"bond_q={result['bond_quality']:.2f}")
 
     return result
+
+
+def _final_validation(coords: np.ndarray, pairs, bpp, sequence: str) -> dict:
+    """Self-consistency panel for the finished structure.
+
+    None of the five things a run has to satisfy at 2013 nt can be checked against a native
+    structure -- there is none at that length -- so each is checked against the structure
+    itself:
+
+      1. chain intact      -- adjacent P-P distances (mean AND spread)
+      2. not collapsed     -- radius of gyration, plus the clash count
+      3. secondary structure satisfied          -- pair_rate
+      4. tertiary structure largely satisfied   -- lociPARSE pMoL, recorded separately
+      5. responds to Level 0 -- pair satisfaction split by the bpp tier of each pair
+
+    (5) is the informative one. A single pair_rate cannot distinguish "the structure listens to
+    the confident pairs" from "it happens to satisfy many easy pairs", so the satisfaction is
+    reported per tier: a structure that is responding should show a monotone rate across tiers.
+
+    Vectorised. Measured at 2013 nt: 0.084 s here against 0.4 s for _validate_structure, which
+    counts clashes with a Python double loop over L^2. An earlier note in this file called that
+    loop "unusable" at this length; it is not, it is five times slower -- the correction is
+    recorded because the claim was made without measuring it.
+
+    The bond statistic also adds the spread: the mean alone is satisfied by a chain that has all
+    its strain in a few links.
+
+    Units are Angstrom, matching the rest of the pipeline (P-P 5.9, clash 3.0, pair 15.0).
+    """
+    coords = np.asarray(coords, dtype=float)
+    L = len(coords)
+    out = {"n_residues": L}
+
+    if L < 2:
+        return out
+
+    # 1. chain intact -- adjacent P-P
+    bond = np.linalg.norm(np.diff(coords, axis=0), axis=1)
+    out["bond_mean"] = float(bond.mean())
+    out["bond_std"] = float(bond.std())
+    out["bond_worst_dev"] = float(np.abs(bond - 5.9).max())
+    out["bond_quality"] = max(0.0, 1.0 - abs(float(bond.mean()) - 5.9) / 5.9)
+
+    # 2. not collapsed -- Rg and clashes, both vectorised
+    #
+    # The Rg criterion is fitted from this project's own structure database, not taken from a
+    # literature scaling law. Measured on the 191 deposited structures in _cgdata/rsRNASP over
+    # the window the pipeline actually uses (N in [20, 120], 172 structures):
+    #
+    #     Rg(N) = 3.642 * N**0.4265 A          R2 = 0.8355, log-residual sd = 0.0982
+    #
+    # which gives Rg = 93.4 A for N = 2013, and a +-2 sd band of 76.8 - 113.7 A.
+    #
+    # Two caveats, both real. First, the exponent 0.4265 is higher than the 0.33-0.40 usually
+    # quoted for folded RNA, and the fit is anchored on 20-120 nt -- short structures are
+    # over-represented in that database (median 46 nt), so the exponent is not well constrained
+    # at the top end. Second, applying it to 2013 nt extrapolates 17x beyond the largest
+    # structure measured (397 nt). The band is therefore a coarse screen, not a criterion of
+    # correctness: a misfolded-but-not-collapsed structure sits inside it too.
+    rg = np.linalg.norm(coords - coords.mean(axis=0), axis=1)
+    out["radius_of_gyration"] = float(np.sqrt((rg ** 2).mean()))
+    _rg_nu, _rg_r0, _rg_sd = 0.4265, 3.642, 0.0982
+    _rg_exp = _rg_r0 * (max(L, 1) ** _rg_nu)
+    out["rg_expected"] = float(_rg_exp)
+    out["rg_ratio"] = float(out["radius_of_gyration"] / max(_rg_exp, 1e-9))
+    out["rg_band"] = [round(_rg_exp * float(np.exp(-2 * _rg_sd)), 1),
+                      round(_rg_exp * float(np.exp(2 * _rg_sd)), 1)]
+    # Both flags are always present. They were set only inside the branch that fired, so a
+    # structure flagged "extended" had no "collapsed" key at all -- which is a bad contract for
+    # a report and produced a KeyError when this was first exercised.
+    out["collapsed"] = bool(out["rg_ratio"] < float(np.exp(-2 * _rg_sd)))
+    out["extended"] = bool(out["rg_ratio"] > float(np.exp(2 * _rg_sd)))
+    iu = np.triu_indices(L, k=3)          # skip i+1, i+2 as _validate_structure does
+    d = np.linalg.norm(coords[iu[0]] - coords[iu[1]], axis=1)
+    out["clash_count"] = int((d < 3.0).sum())
+
+    # 3 + 5. pairing, overall and by bpp tier
+    if pairs:
+        ij = np.array([(p[0], p[1]) for p in pairs if p[0] < L and p[1] < L], dtype=int)
+        if len(ij):
+            pd = np.linalg.norm(coords[ij[:, 0]] - coords[ij[:, 1]], axis=1)
+            ok = pd < 15.0
+            out["pair_rate"] = float(ok.mean())
+            out["pair_dist_mean"] = float(pd.mean())
+            tiers = {"high (p>0.9)": [], "mid (0.5-0.9)": [], "low (<=0.5)": []}
+            if bpp is not None:
+                b = np.asarray(bpp)
+                for k, (i, j) in enumerate(ij):
+                    p = float(b[i, j]) if i < b.shape[0] and j < b.shape[1] else 0.0
+                    key = ("high (p>0.9)" if p > 0.9 else
+                           "mid (0.5-0.9)" if p > 0.5 else "low (<=0.5)")
+                    tiers[key].append(bool(ok[k]))
+            else:
+                tiers["high (p>0.9)"] = [bool(v) for v in ok]
+            out["pair_rate_by_tier"] = {
+                k: (round(sum(v) / len(v), 4), len(v)) for k, v in tiers.items() if v
+            }
+            # A structure that is listening satisfies the confident tiers more often.
+            # The gradient must be strictly positive somewhere: an all-zero structure is
+            # "monotone non-increasing" in the degenerate sense, and reporting that as a pass
+            # is a false green light. Measured on a synthetic 2013 nt helix, which satisfies
+            # nothing, the first version of this flag returned True.
+            rates = [out["pair_rate_by_tier"][k][0] for k in
+                     ("high (p>0.9)", "mid (0.5-0.9)", "low (<=0.5)")
+                     if k in out["pair_rate_by_tier"]]
+            out["pair_rate_monotone"] = bool(
+                len(rates) >= 2
+                and all(rates[i] >= rates[i + 1] for i in range(len(rates) - 1))
+                and rates[0] > rates[-1])
+            if rates:
+                out["pair_rate_gradient"] = round(rates[0] - rates[-1], 4)
+    return out
 
 
 def _compute_clash_count(coords, threshold: float = 3.0) -> int:
