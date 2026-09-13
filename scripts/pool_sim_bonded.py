@@ -102,7 +102,8 @@ P.use_table_file(_TABLE_PATH)
 TAB = IC.load_tables(_TABLE_PATH)
 
 _POTS = []          # [(coord, spec, potential)]
-for _coord in ("angle", "dihedral"):
+# "bb_bond" is the npz key as well as the CLI name, so the flag is --bb_bond=...
+for _coord in ("angle", "dihedral", "bb_bond"):
     _text = _opt(_coord, "")
     if _text:
         _spec = P.resolve_spec(_text, _coord)
@@ -118,7 +119,7 @@ else:
     CAP = float(_cap_text)
 
 if _POTS:
-    print("potentials: " + "  ".join(f"{_c}={P.describe(_s)}" for _c, _s, _ in _POTS)
+    print("potentials: " + "  ".join(f"{_c}={P.describe(_s, _c)}" for _c, _s, _ in _POTS)
           + f"  cap={'none' if CAP is None else f'{CAP:g}'}")
     print("            NOTE: the constant fingerprint below does NOT reflect this -- it names "
           "constants,")

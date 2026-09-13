@@ -47,9 +47,14 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "src"))
 
 import force_reference as FR                  # noqa: E402
+import torusfold.scheme2.torch_cgsim as C     # noqa: E402
 
-COORDS = ("angle", "dihedral")
-_FORCE_FN = {"angle": FR.angle_force, "dihedral": FR.dihedral_force}
+COORDS = ("angle", "dihedral", "bb_bond")
+_FORCE_FN = {"angle": FR.angle_force, "dihedral": FR.dihedral_force, "bb_bond": FR.bond_force}
+
+# Specs that exist for the cosine coordinates but are meaningless for a distance, refused by
+# name in resolve_spec. Kept here so the refusal text and the capability live together.
+_BOND_ONLY = ("table_wall",)
 
 
 def _kv(s):
@@ -74,6 +79,39 @@ def _kv(s):
 def resolve_spec(text, coord=None):
     """Parse a CLI spec string into what force_reference._v_fn expects."""
     text = (text or "").strip()
+
+    if coord == "bb_bond":
+        # A distance, not a cosine. q is unbounded and the measure term differs, so the specs
+        # built for a bounded coordinate are refused rather than approximated.
+        if text == "shipped_harmonic":
+            raise SystemExit(
+                "shipped_harmonic is not defined for the P-P bond: K_BB=1122.4 and the table's "
+                "own kBT/sigma^2 are apart, and that constant is the thing this spec retires. "
+                "Use harmonic:K=<k>,r0=<r0> and say which.")
+        if text in ("table_jac",) or text.startswith("table_jac:"):
+            raise SystemExit(
+                "table_jac is the torsion Jacobian -0.5*kBT*ln(1-q^2); a distance is unbounded "
+                "and its measure term is -2*kBT*ln r. Same name, different object.")
+        if text.startswith("fourier:"):
+            raise SystemExit(
+                "fourier expands in Chebyshev polynomials on q in [-1,1]; the bond coordinate is "
+                "an unbounded distance.")
+        if text == "table":
+            return text
+        if text == "table_wall":
+            return ("table_wall", 200.0)
+        if text.startswith("table_wall:"):
+            return ("table_wall", float(text.split(":", 1)[1]))
+        if text.startswith("harmonic:"):
+            kv = _kv(text.split(":", 1)[1])
+            for need in ("K", "r0"):
+                if need not in kv:
+                    raise SystemExit(f"harmonic: for bb_bond needs {need}= (got {text!r})")
+            return ("harmonic", kv["K"], kv["r0"])
+        raise SystemExit(
+            f"unknown bb_bond spec {text!r}; expected table | table_wall[:k] | "
+            f"harmonic:K=..,r0=..")
+
     if text == "shipped_harmonic":
         if coord == "angle":
             raise SystemExit(
@@ -110,7 +148,7 @@ def resolve_spec(text, coord=None):
         f"harmonic:K=..,q0=.. | fourier:K1=..,K2=.. | shipped_harmonic")
 
 
-def describe(spec):
+def describe(spec, coord=None):
     """One provenance line for a resolved spec. The sampler prints this.
 
     It exists because the constant fingerprint cannot see a shape change: _FINGERPRINT names
@@ -123,8 +161,14 @@ def describe(spec):
         return "table"
     if isinstance(spec, tuple) and spec[0] == "table_jac":
         return "table_jac(exact)" if spec[1] is None else f"table_jac(eps={spec[1]:g})"
+    if isinstance(spec, tuple) and spec[0] == "table_wall":
+        return f"table_wall(k={spec[1]:g})"
     if isinstance(spec, tuple) and spec[0] == "harmonic":
-        return f"harmonic(K={spec[1]:g},q0={spec[2]:g})"
+        # The equilibrium label differs by coordinate -- a bond targets a distance r0, an angle a
+        # cosine q0 -- and a provenance line that called both q0 would be unreadable for the
+        # coordinate whose whole point is that it is not a cosine.
+        x0 = "r0" if coord == "bb_bond" else "q0"
+        return f"harmonic(K={spec[1]:g},{x0}={spec[2]:g})"
     if isinstance(spec, tuple) and spec[0] == "fourier":
         K = spec[1]
         body = ", ".join(f"K{n}={K[n]:g}" for n in range(len(K)) if K[n] != 0)
@@ -145,14 +189,23 @@ def use_table_file(path, coord=None):
     coord=None sets both; the file only needs the keys for the coordinates actually asked about.
     """
     z = np.load(path)
-    for c, attr in (("angle", "_ANGLE_TABLE"), ("dihedral", "_TABLE")):
+    for c, attr in (("angle", "_ANGLE_TABLE"), ("dihedral", "_TABLE"), ("bb_bond", "_BOND_TABLE")):
         if coord is not None and c != coord:
             continue
         if f"{c}__U" not in z.files:
             continue
-        setattr(FR, attr, {"lo": float(z[f"{c}__lo"]),
-                           "binw": float(z[f"{c}__binw"]),
-                           "U": torch.tensor(z[f"{c}__U"], dtype=torch.float64)})
+        rec = {"lo": float(z[f"{c}__lo"]),
+               "binw": float(z[f"{c}__binw"]),
+               "U": torch.tensor(z[f"{c}__U"], dtype=torch.float64)}
+        if c == "bb_bond":
+            # bond_table() also carries hi and the two edge slopes, which the wall spec needs.
+            # Installing a bare lo/binw/U here would leave ("table_wall", k) raising KeyError on
+            # a round-N file -- the failure use_table_file exists to prevent, one level down.
+            U, binw = rec["U"], rec["binw"]
+            rec["hi"] = rec["lo"] + binw * len(U)
+            rec["slope_lo"] = float(max((U[1] - U[0]) / binw, 0.0))
+            rec["slope_hi"] = float(max((U[-1] - U[-2]) / binw, 0.0))
+        setattr(FR, attr, rec)
 
 
 def make_potential(coord, spec):
@@ -212,6 +265,10 @@ def check(verbose=True):
                   ("harmonic", 28.1, -0.866)],
         "dihedral": ["shipped_harmonic", "table", ("table_jac", None), ("table_jac", 0.05),
                      ("fourier", [0.0, -2.78, -1.33])],
+        # The harmonic case is the one that matters here: it must reproduce the field's own
+        # analytic _bond_f, which is the bit-identity gate that makes the injection landable.
+        "bb_bond": ["table", ("table_wall", 200.0),
+                    ("harmonic", C.K_BB, C.BOND_P_NEXT)],
     }
     worst = 0.0
     for coord, spec_list in specs.items():
@@ -230,7 +287,7 @@ def check(verbose=True):
                 scale = max(float(f_r.abs().max()), 1.0)
                 worst = max(worst, de, df / scale)
                 if verbose:
-                    print(f"  {coord:8s} {describe(spec):28s} {str(dt):16s} "
+                    print(f"  {coord:8s} {describe(spec, coord):28s} {str(dt):16s} "
                           f"dE/|E|max {de:.3e}  dF/|F|max {df / scale:.3e}  "
                           f"|F|max {float(f_r.abs().max()):.2f}")
 

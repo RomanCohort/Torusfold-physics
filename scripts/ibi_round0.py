@@ -106,7 +106,8 @@ P.use_table_file(_TABLE_PATH)
 TAB = IC.load_tables(_TABLE_PATH)
 
 _POTS = []          # [(coord, spec, potential)]
-for _coord in ("angle", "dihedral"):
+# "bb_bond" is the npz key as well as the CLI name, so the flag is --bb_bond=...
+for _coord in ("angle", "dihedral", "bb_bond"):
     _text = _opt(_coord, "")
     if _text:
         _spec = P.resolve_spec(_text, _coord)
@@ -205,7 +206,7 @@ ij = torch.tensor(s0["pairs"], dtype=torch.long).reshape(-1, 2)
 # force, so a clipped term is not -dE/dx wherever it fires. docs/dihedral_table_decision.md
 # records the numbers this is guarding -- the table's honest max is 15736 against a cap of 5000.
 if _POTS:
-    print("potentials: " + "  ".join(f"{_c}={P.describe(_s)}" for _c, _s, _ in _POTS)
+    print("potentials: " + "  ".join(f"{_c}={P.describe(_s, _c)}" for _c, _s, _ in _POTS)
           + f"  cap={'none' if CAP is None else f'{CAP:g}'}")
     print("            NOTE: the constant fingerprint above does NOT reflect this -- it names "
           "constants,")
@@ -274,7 +275,7 @@ if _WRITE:
         "structure": s0["name"], "L": L,
         "nrep": NREP, "nsteps": NSTEPS, "burn": burn, "stride": STRIDE, "blocks": NB,
         "friction": FRICTION, "seed": SEED, "force_cap": CAP, "dt_ps": 0.002, "mass_amu": 110.0,
-        "potentials": {_c: P.describe(_s) for _c, _s, _ in _POTS},
+        "potentials": {_c: P.describe(_s, _c) for _c, _s, _ in _POTS},
         "fingerprint": {n: getattr(C, n) for n in _FINGERPRINT},
         "joint_J": None if _wj != _wj else round(float(_wj), 6),
         "block_J": _bJ,

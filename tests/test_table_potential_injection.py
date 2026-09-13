@@ -25,9 +25,11 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "scripts"))
 
 import torch                                  # noqa: E402
 import torusfold.scheme2.torch_cgsim as C     # noqa: E402
+import cg_potentials as P                     # noqa: E402
 
 # Deliberately no `import pytest`: this machine has no pytest installed, and the cases are loops
 # inside the test functions rather than @parametrize so that `python tests/test_<name>.py` works
@@ -74,6 +76,19 @@ SHIPPED_ANGLE = lambda p: C._angle_f(p, C.K_ANGLE, math.cos(C.ANGLE_PPP))
 SHIPPED_DIHEDRAL = lambda p: C._dihedral_f(p, C.K_DIH, math.cos(C.DIH_PPPP))
 
 
+def SHIPPED_BOND(p):
+    """The field's own P(i)-P(i+1) term, on the same L-1 windows the bond section builds.
+
+    _bond_f takes explicit bead indices rather than deriving them, so the window set has to be
+    spelled out here. No closure window: the circular P(0)-P(L-1) link is K_BSJ's term, and
+    including it would make this differ from the shipped path for a reason that is not the
+    injection's fault.
+    """
+    L = p.shape[1] // 3
+    idx = torch.arange(L - 1, device=p.device)
+    return C._bond_f(p, 3 * idx, 3 * (idx + 1), C.K_BB, C.BOND_P_NEXT)
+
+
 def test_injected_shipped_harmonic_is_bit_identical():
     """Handing the injection the shipped expression must reproduce the shipped path exactly.
 
@@ -86,15 +101,17 @@ def test_injected_shipped_harmonic_is_bit_identical():
     """
     for dtype in (torch.float64, torch.float32):
         for B in (1, 8):
-            for which in ("angle", "dihedral", "both"):
+            for which in ("angle", "dihedral", "bond", "both", "all"):
                 pos = _chain(B=B, dtype=dtype)
                 pairs, w = _pairs()
 
                 kw = {}
-                if which in ("angle", "both"):
+                if which in ("angle", "both", "all"):
                     kw["angle_potential"] = SHIPPED_ANGLE
-                if which in ("dihedral", "both"):
+                if which in ("dihedral", "both", "all"):
                     kw["dihedral_potential"] = SHIPPED_DIHEDRAL
+                if which in ("bond", "all"):
+                    kw["bond_potential"] = SHIPPED_BOND
 
                 e_ref, f_ref = C.cg_energy_forces(pos, pairs, w, cell_list=_cell(pos),
                                                   force_cap=None)
@@ -135,12 +152,94 @@ def test_the_two_parameters_are_keyword_only():
     into a potential slot -- which would not raise, it would sample a different field.
     """
     sig = inspect.signature(C.cg_energy_forces)
-    for name in ("angle_potential", "dihedral_potential"):
+    for name in ("angle_potential", "dihedral_potential", "bond_potential"):
         assert name in sig.parameters, f"{name} is missing from cg_energy_forces"
         assert sig.parameters[name].kind is inspect.Parameter.KEYWORD_ONLY, (
             f"{name} must be keyword-only; a positional slot can be filled by accident")
         assert sig.parameters[name].default is None, (
             f"{name} must default to None -- a non-None default would change every existing call")
+
+
+def test_the_wrapped_bond_harmonic_reproduces_the_field_exactly():
+    """The gate that makes the bond injection landable, stated end to end.
+
+    resolve_spec -> make_potential -> cg_energy_forces must reproduce the field's own analytic
+    bond term with NO difference at all. Not "close": the analytic _bond_f and an autograd
+    potential computing the same expression can part company in the last bit, and if they do
+    then every before/after comparison across this change carries an offset that is an artefact
+    of the plumbing rather than of the physics.
+
+    This is also the one test that would catch the spec resolving to the WRONG coordinate's
+    force function -- an angle table interpolated at a distance still returns finite numbers.
+
+    Why the force is not asserted bit-identical here, unlike the angle/dihedral case:
+    SHIPPED_ANGLE is literally C._angle_f, the same function the default branch calls, so
+    equality is structural. force_reference's bond harmonic is a SECOND implementation of the
+    same expression, differentiated by autograd, and `a*(b/c)` and `(a*b)/c` round differently.
+    Measured on this geometry the difference is exactly one ULP, on 6 of 648 components at
+    float64 and 8 of 648 at float32, with the energy identical everywhere. So the energy gets
+    torch.equal and the force gets a one-ULP tolerance.
+
+    Use test_injected_shipped_harmonic_is_bit_identical's "bond" case for the structural check:
+    that one injects _bond_f itself and does require exact equality.
+    """
+    spec = P.resolve_spec(f"harmonic:K={C.K_BB},r0={C.BOND_P_NEXT}", "bb_bond")
+    tol = {torch.float64: 1e-14, torch.float32: 1e-6}
+    for dtype in (torch.float64, torch.float32):
+        for B in (1, 8):
+            pos = _chain(B=B, dtype=dtype)
+            pairs, w = _pairs()
+            e_ref, f_ref = C.cg_energy_forces(pos, pairs, w, cell_list=_cell(pos), force_cap=None)
+            e_inj, f_inj = C.cg_energy_forces(pos, pairs, w, cell_list=_cell(pos), force_cap=None,
+                                              bond_potential=P.make_potential("bb_bond", spec))
+            tag = f"{dtype} B={B}"
+            assert torch.equal(e_ref, e_inj), f"energy differs from the shipped bond term [{tag}]"
+            scale = max(float(f_ref.abs().max()), 1.0)
+            worst = float((f_ref.double() - f_inj.double()).abs().max()) / scale
+            assert worst < tol[dtype], (
+                f"force differs from the shipped bond term by {worst:.3e} [{tag}], more than the "
+                f"one ULP that autograd-vs-analytic ordering accounts for")
+
+
+def test_an_injected_bond_wins_over_relax_bond_k():
+    """relax_bond_k must not be able to override an injected bond potential.
+
+    isrnaclong.py passes relax_bond_k into BatchedREMD2D and no call site there forwards it, so
+    the plumbing is currently dead. The day someone fixes that, an injected U(r) -- which has no
+    single spring constant to scale -- would be silently rescaled by a harmonic that nothing
+    else in the run uses. Pin the precedence now rather than discover it then.
+    """
+    pos = _chain(B=2)
+    pairs, w = _pairs()
+    spec = P.resolve_spec(f"harmonic:K={C.K_BB},r0={C.BOND_P_NEXT}", "bb_bond")
+    pot = P.make_potential("bb_bond", spec)
+    e_a, f_a = C.cg_energy_forces(pos, pairs, w, cell_list=_cell(pos), force_cap=None,
+                                  bond_potential=pot, relax_bond_k=500.0)
+    e_b, f_b = C.cg_energy_forces(pos, pairs, w, cell_list=_cell(pos), force_cap=None,
+                                  bond_potential=pot, relax_bond_k=5000.0)
+    assert torch.equal(e_a, e_b), (
+        "relax_bond_k changed the energy while a bond_potential was injected -- the harmonic is "
+        "still live underneath the injected term")
+    assert torch.equal(f_a, f_b), "relax_bond_k changed the force under an injected bond"
+
+
+def test_the_bond_specs_that_do_not_transfer_are_refused():
+    """A distance is unbounded; three of the four cosine specs are meaningless for it.
+
+    Each is refused by name. Silently evaluating them would return plausible finite numbers --
+    table_jac would take ln(1-q^2) of a quantity that can exceed 1 and clamp to a constant.
+    """
+    for bad in ("shipped_harmonic", "table_jac", "table_jac:0.05", "fourier:K1=1.0"):
+        try:
+            P.resolve_spec(bad, "bb_bond")
+        except SystemExit:
+            continue
+        raise AssertionError(f"{bad!r} was accepted for bb_bond, where it is not defined")
+    # and the ones that do transfer
+    for good, want in (("table", "table"),
+                       ("table_wall", ("table_wall", 200.0)),
+                       ("table_wall:500", ("table_wall", 500.0))):
+        assert P.resolve_spec(good, "bb_bond") == want, good
 
 
 if __name__ == "__main__":

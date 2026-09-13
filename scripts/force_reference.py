@@ -62,6 +62,7 @@ FORCE_CAP = 5000.0
 # ------------------------------------------------------------------ table (loaded once)
 _TABLE = None
 _ANGLE_TABLE = None
+_BOND_TABLE = None
 
 
 def dihedral_table():
@@ -94,6 +95,35 @@ def angle_table():
             "U": torch.tensor(z["angle__U"], dtype=torch.float64),
         }
     return _ANGLE_TABLE
+
+
+def bond_table():
+    """The stored P(i)-P(i+1) distance table, same record shape as dihedral_table().
+
+    THE SUPPORT EDGES ARE NOT DECORATION. U[0] = U[1] = U[-1] = U[-2] = 11.607, the pseudo-count
+    floor at both ends, so both edge slopes are exactly 0 and _interp CLAMPS beyond lo/hi. A bare
+    "table" spec therefore has no restoring force at all outside [0.3837, 0.7958] nm: the bond can
+    wander out of the fitted range and nothing pulls it back. Use ("table_wall", k) for anything
+    that will actually be sampled.
+
+    slope_lo/slope_hi are computed here exactly as boltzmann_bonded.prepare does, not hard-coded
+    to 0, so a refit table with populated edges gets the right wall.
+    """
+    global _BOND_TABLE
+    if _BOND_TABLE is None:
+        z = np.load(REPO / "results" / "boltzmann_tables_clean.npz")
+        U = torch.tensor(z["bb_bond__U"], dtype=torch.float64)
+        binw = float(z["bb_bond__binw"])
+        lo = float(z["bb_bond__lo"])
+        _BOND_TABLE = {
+            "lo": lo,
+            "binw": binw,
+            "U": U,
+            "hi": lo + binw * len(U),
+            "slope_lo": float(max((U[1] - U[0]) / binw, 0.0)),
+            "slope_hi": float(max((U[-1] - U[-2]) / binw, 0.0)),
+        }
+    return _BOND_TABLE
 
 
 def _interp(q, t):
@@ -131,7 +161,57 @@ def _v_fn(spec, coord="dihedral"):
     -- so callers that know which coordinate they mean should name their spec rather than rely
     on a default in here.
     """
-    tbl = dihedral_table if coord == "dihedral" else angle_table
+    # Explicit mapping, not `dihedral_table if coord == "dihedral" else angle_table`. That
+    # conditional silently resolved every other coordinate to the ANGLE table -- adding a third
+    # coordinate without fixing it would have made `--bb_bond=table` interpolate the angle table
+    # at a distance, with no error anywhere. This is the same shape of silent drift the file
+    # exists to catch.
+    _TABLES = {"dihedral": dihedral_table, "angle": angle_table, "bond": bond_table}
+    if coord not in _TABLES:
+        raise ValueError(f"unknown coordinate {coord!r}; expected one of {sorted(_TABLES)}")
+    tbl = _TABLES[coord]
+
+    if coord == "bond":
+        # The bond is a DISTANCE: q ranges over (0, inf), not [-1, 1]. Three of the four specs
+        # below were written for a bounded cosine, so the ones that do not transfer are refused
+        # by name rather than silently evaluating to something plausible.
+        if spec == "shipped_harmonic":
+            raise ValueError(
+                f"shipped_harmonic is not defined for the P-P bond: K_BB=1122.4 and the table's "
+                f"own kBT/sigma^2=877.8 are 1.28x apart, and that constant is exactly what this "
+                f"spec exists to retire. Use ('harmonic', K, r0) and say which.")
+        if isinstance(spec, tuple) and spec[0] == "table_jac":
+            raise ValueError(
+                "table_jac is the TORSION Jacobian, -0.5*kBT*ln(1-q^2). A distance is unbounded "
+                "so the expression is undefined for it, and the measure a distance actually needs "
+                "is -2*kBT*ln r. Same name, different object.")
+        if isinstance(spec, tuple) and spec[0] == "fourier":
+            raise ValueError(
+                "fourier expands in Chebyshev polynomials, which are orthogonal on q in [-1, 1]; "
+                "the bond coordinate is an unbounded distance.")
+        if spec == "table":
+            t = bond_table()
+            return lambda q: _interp(q, t)
+        if isinstance(spec, tuple) and spec[0] == "table_wall":
+            t = bond_table()
+            k_wall = float(spec[1])
+
+            def _table_wall(q, t=t, k_wall=k_wall):
+                """The table plus the wall, identical to boltzmann_bonded.energy's expression.
+                Load-bearing here, not optional: the stored table is flat at both edges, so
+                without this the potential has no restoring force outside its support."""
+                e = _interp(q, t)
+                d_lo = (t["lo"] - q).clamp(min=0.0)
+                d_hi = (q - t["hi"]).clamp(min=0.0)
+                return (e + t["slope_lo"] * d_lo + 0.5 * k_wall * d_lo ** 2
+                        + t["slope_hi"] * d_hi + 0.5 * k_wall * d_hi ** 2)
+
+            return _table_wall
+        if isinstance(spec, tuple) and spec[0] == "harmonic":
+            k, r0 = float(spec[1]), float(spec[2])
+            return lambda q: 0.5 * k * (q - r0) ** 2
+        raise ValueError(f"unknown bond spec {spec!r}")
+
     if spec == "shipped_harmonic":
         if coord != "dihedral":
             raise ValueError(
@@ -183,6 +263,17 @@ def _q_angle(p):
     n1 = torch.clamp(torch.linalg.norm(v1, dim=-1, keepdim=True), min=1e-6)
     n2 = torch.clamp(torch.linalg.norm(v2, dim=-1, keepdim=True), min=1e-6)
     return ((v1 * v2).sum(-1, keepdim=True) / (n1 * n2)).squeeze(-1).clamp(-1 + 1e-6, 1 - 1e-6)
+
+
+def _q_bond(p):
+    """q = |p0 - p1| in nm for a (B, M, 2, 3) stack of 2-atom windows.
+
+    Output range is (0, inf), NOT [-1, 1] -- the three cosine specs in _v_fn do not transfer, and
+    _v_fn refuses them rather than clamping. The norm is floored exactly as _q_angle and
+    _q_dihedral floor theirs, so a coincident pair gives a large finite gradient rather than NaN.
+    """
+    d = p[..., 0, :] - p[..., 1, :]
+    return torch.clamp(torch.linalg.norm(d, dim=-1), min=1e-6)
 
 
 def dihedral_force(spec, pos, ij_like=None):
@@ -252,6 +343,44 @@ def angle_force(spec, pos, ij_like=None):
         p = pos_g[:, ij]                                 # (B, M, 3, 3)
         q = _q_angle(p)                                  # (B, M)
         V = _v_fn(spec, "angle")(q)                      # (B, M)
+        E = V.sum(dim=-1)                                # (B,)
+        E.sum().backward()
+    F = -pos_g.grad                                     # (B, N, 3)
+    return E.detach(), F
+
+
+def bond_force(spec, pos, ij_like=None):
+    """Reference P(i)-P(i+1) distance energy and force. Same contract as angle_force.
+
+    A sibling rather than a shared body, for the same reason angle_force is one: the printed
+    numbers in docs/dihedral_table_decision.md are cited, and a body parameterised by coordinate
+    would let a change made for the bond move them.
+
+    ij_like: None -> consecutive P atoms (3i, 3i+3 for i = 0..L-2), which is the L-1 window set
+    cg_energy_forces' own bond section builds. Note there is NO closure window: the circular
+    P(0)-P(L-1) link is K_BSJ's, not this term's, exactly as in the field.
+    """
+    B_, N, _ = pos.shape
+    dev = pos.device
+    if ij_like is None:
+        L = N // 3
+        if L < 2:
+            return torch.zeros(B_, device=dev), torch.zeros_like(pos)
+        a = torch.arange(L - 1, device=dev)
+        ij = torch.stack([3 * a, 3 * a + 3], dim=-1)   # (M, 2)
+    else:
+        ij = ij_like
+    if ij.shape[0] == 0:
+        return torch.zeros(B_, device=dev), torch.zeros_like(pos)
+
+    # enable_grad for the same reason dihedral_force carries it: the sampler runs inside
+    # torch.no_grad(), where requires_grad_(True) does not re-enable tracking and backward()
+    # raises. See the longer note in dihedral_force.
+    with torch.enable_grad():
+        pos_g = pos.detach().clone().requires_grad_(True)
+        p = pos_g[:, ij]                                 # (B, M, 2, 3)
+        q = _q_bond(p)                                   # (B, M)
+        V = _v_fn(spec, "bond")(q)                       # (B, M)
         E = V.sum(dim=-1)                                # (B,)
         E.sum().backward()
     F = -pos_g.grad                                     # (B, N, 3)

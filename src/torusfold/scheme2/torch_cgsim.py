@@ -1224,28 +1224,34 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
                      lams=None,
                      relax_bond_k=None, relax_angle_k=None,
                      relax_pair_k=None, restraint_k=None, force_cap=5000.0,
-                     *, angle_potential=None, dihedral_potential=None):
+                     *, angle_potential=None, dihedral_potential=None, bond_potential=None):
     """Unified energy+forces: all 15 terms computed in one function, removing REMD inconsistency.
 
     lams: (B,) per-replica λ, overriding the scalar lam (for the merged forward).
     relax_*_k: relaxation parameters (None=use default constants), aligned with OpenMM rest2_remd_2d.
 
-    angle_potential / dihedral_potential: optional replacements for the two backbone angular
-    terms, keyword-only so that the positional interface the ~20 existing callers use cannot
-    shift under them. Each is a callable
+    angle_potential / dihedral_potential / bond_potential: optional replacements for the two
+    backbone angular terms and the P(i)-P(i+1) distance, keyword-only so that the positional
+    interface the ~20 existing callers use cannot shift under them. Each is a callable
 
         pot(pos_nm: (B, N, 3)) -> (E: (B,), F: (B, N, 3))
 
     with F = -dE/dx, carrying force on the P atoms of its own windows and zeros elsewhere,
-    returning pos_nm.dtype and pos_nm.device. It is called in place of _angle_f / _dihedral_f
-    and its energy is accumulated into the same running total, so nothing downstream can tell
-    the two apart. None -- the default -- selects the shipped harmonic expression and is
-    bit-identical to the behaviour before these parameters existed.
+    returning pos_nm.dtype and pos_nm.device. It is called in place of _angle_f / _dihedral_f /
+    the bond's _bond_f and its energy is accumulated into the same running total, so nothing
+    downstream can tell the two apart. None -- the default -- selects the shipped harmonic
+    expression and is bit-identical to the behaviour before these parameters existed.
 
-    This is the production entry point with two terms replaced, NOT an alternate field: it is
+    bond_potential wins over relax_bond_k: with an injected bond the harmonic's k is computed
+    and discarded, because the injected U(r) does not have a single spring constant to scale.
+    That matters because isrnaclong.py passes relax_bond_k into BatchedREMD2D and no call site
+    there currently forwards it -- so the dead plumbing must not silently win the day it is
+    fixed. tests/test_table_potential_injection.py pins the precedence.
+
+    This is the production entry point with terms replaced, NOT an alternate field: it is
     deliberately not routed through _alternate_field, whose guard exists for the five functions
     that share this module's constant NAMES while computing a different potential. What changes
-    here is the shape of two terms under the same constants, which is the case that guard
+    here is the shape of terms under the same constants, which is the case that guard
     defends rather than the case it forbids.
 
     Callers that inject a potential are responsible for the force cap: the cap below rescales
@@ -1271,9 +1277,15 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
     total_E = torch.zeros(B, device=dev)
     total_F = torch.zeros_like(pos_nm)
 
-    # ── 1. BB bonds: O(N) analytic ──
-    idx = torch.arange(L-1, device=dev)
-    e, f = _bond_f(pos_nm, P(idx), P(idx+1), _bb_k, BOND_P_NEXT)
+    # ── 1. BB bonds: O(N) analytic, or the injected potential ──
+    # Replaced in place, not moved: total_E += e; total_F += f stays on one line in this order
+    # because the running total is float32 and float addition is not associative, and
+    # tests/test_table_potential_injection.py pins that.
+    if bond_potential is None:
+        idx = torch.arange(L-1, device=dev)
+        e, f = _bond_f(pos_nm, P(idx), P(idx+1), _bb_k, BOND_P_NEXT)
+    else:
+        e, f = bond_potential(pos_nm)
     total_E += e; total_F += f
 
     # ── 2. Intra-bead: O(N) analytic ──
