@@ -2155,6 +2155,33 @@ def cg_forces_explicit(
     return total_E, total_F
 
 
+def kinetic_temperature(
+    vel: "torch.Tensor",                   # (B, N, 3), nm/ps
+    mass_amu: float = 110.0,
+    n_constraints: int = 0,
+) -> "torch.Tensor":
+    """Per-bead kinetic temperature, using the constraint-corrected degree-of-freedom count.
+
+        T = m * sum(v^2) / (kB * (3N - C))
+
+    The 3N in the denominator is the count of independent velocity components. A distance
+    constraint removes one, so a system with C of them has 3N - C. Evaluating the 3N form
+    anyway does not fail loudly -- it reports a temperature that is low by the factor
+    (3N - C)/3N, which for this model's 2L constraints on 3L residues is 7/9 = 0.778. A run
+    whose thermostat is overshooting at 440 K would then "improve" to 342 K for no physical
+    reason, and the improvement would be entirely bookkeeping.
+
+    n_constraints=0 must be bit-identical to the bare 3N expression, so the correction is a
+    multiply by dof/dof, which IEEE 754 evaluates to exactly 1.0.
+
+    Returns (B, N) rather than a scalar: callers have always reduced it themselves, and the
+    reduction they choose is part of what they measured.
+    """
+    dof = 3 * vel.shape[-2]
+    v2 = (vel ** 2).sum(dim=-1)                                     # (B, N)
+    return mass_amu * v2 / (3.0 * KB_KJ) * (dof / (dof - n_constraints))
+
+
 def batch_langevin_step(
     pos: "torch.Tensor", vel: "torch.Tensor", forces: "torch.Tensor",
     temperatures: "torch.Tensor",           # (B,) K

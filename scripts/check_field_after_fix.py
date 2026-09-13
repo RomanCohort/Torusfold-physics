@@ -32,7 +32,6 @@ PS = float(sys.argv[1]) if len(sys.argv) > 1 else 15.0
 NREP = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 MAXIT = int(sys.argv[3]) if len(sys.argv) > 3 else 1500
 MASS = 110.0
-KB_INT = 0.008314462618
 TARGET = 300.0
 DT = 0.002
 NSTEPS = int(round(PS / DT))
@@ -141,7 +140,7 @@ for step in range(NSTEPS):
         xr, v = C.batch_langevin_step(xr, v, f, temps, dt_ps=DT, mass_amu=MASS,
                                       friction=1.0, force_fn=ff)
         if step % 10 == 0:
-            Ts.append(float((MASS * (v ** 2).sum(dim=-1) / (3.0 * KB_INT)).mean()))
+            Ts.append(float(C.kinetic_temperature(v, MASS).mean()))
             if step % (NSTEPS // 10) == 0:
                 Es.append(float(field(xr)[0].mean()))
             if step >= EQUIL:

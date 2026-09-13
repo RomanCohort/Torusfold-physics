@@ -32,7 +32,6 @@ PS = float(sys.argv[1]) if len(sys.argv) > 1 else 10.0
 NREP = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 MAXIT = int(sys.argv[3]) if len(sys.argv) > 3 else 6000
 MASS = 110.0
-KB_INT = 0.008314462618
 TARGET = 300.0
 DT = 0.002
 NSTEPS = int(round(PS / DT))

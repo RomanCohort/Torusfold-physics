@@ -26,7 +26,6 @@ import torusfold.scheme2.torch_cgsim as C   # noqa: E402
 MAXIT = int(sys.argv[1]) if len(sys.argv) > 1 else 4000
 PS = float(sys.argv[2]) if len(sys.argv) > 2 else 3.0
 MASS = 110.0
-KB_INT = 0.008314462618
 TARGET = 300.0
 DT = 0.002
 NSTEPS = int(round(PS / DT))
@@ -118,7 +117,7 @@ for label, base in (("unminimised", x_start), ("minimised", x_min)):
                                           friction=1.0, force_fn=ff)
         if step % max(1, NSTEPS // 30) == 0 and step >= NSTEPS // 4:
             with torch.no_grad():
-                Ts.append(float((MASS * (v ** 2).sum(dim=-1) / (3.0 * KB_INT)).mean()))
+                Ts.append(float(C.kinetic_temperature(v, MASS).mean()))
                 b = xr.reshape(NREP, -1, 3)
                 m = b.shape[1]
                 d = torch.cdist(b, b) + torch.eye(m, device=b.device) * 10.0

@@ -31,7 +31,6 @@ import torusfold.scheme2.torch_cgsim as C   # noqa: E402
 NSTEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 4000
 FRICTION = float(sys.argv[2]) if len(sys.argv) > 2 else 1.0
 MASS = 110.0
-KB_INT = 0.008314462618          # amu nm^2 / (ps^2 K), numerically the same as kJ/(mol K)
 TARGET = 300.0
 
 pool = [s for s in B.load_structures(limit=400) if len(s["pairs"]) >= 8 and 24 <= len(s["pos"]) <= 34]
@@ -67,8 +66,7 @@ for cap in (200.0, 5000.0):
                                          friction=FRICTION, force_fn=lambda p: ff(p, cap))
         if step % 20 == 0 and step > 0:
             with torch.no_grad():
-                v2 = (v ** 2).sum(dim=-1)                      # (B, N)
-                Tkin = MASS * v2 / (3.0 * KB_INT)
+                Tkin = C.kinetic_temperature(v, MASS)          # (B, N), DOF-aware
                 ts.append(float(Tkin.mean()))
                 b = x.reshape(NREP, -1, 3)
                 n = b.shape[1]

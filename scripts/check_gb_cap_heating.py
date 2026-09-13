@@ -25,7 +25,6 @@ import torusfold.scheme2.torch_cgsim as C   # noqa: E402
 
 PS = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
 MASS = 110.0
-KB_INT = 0.008314462618
 TARGET = 300.0
 NREP = 2
 DT = 0.002
@@ -70,7 +69,7 @@ for gbcap in (50.0, 500.0, 1.0e9):
             break
         if step % max(1, N // 40) == 0 and step >= N // 4:
             with torch.no_grad():
-                Ts.append(float((MASS * (v ** 2).sum(dim=-1) / (3.0 * KB_INT)).mean()))
+                Ts.append(float(C.kinetic_temperature(v, MASS).mean()))
                 b = x.reshape(NREP, -1, 3)
                 m = b.shape[1]
                 d = torch.cdist(b, b) + torch.eye(m, device=b.device) * 10.0

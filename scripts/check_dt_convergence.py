@@ -61,7 +61,6 @@ import torusfold.scheme2.torch_cgsim as C   # noqa: E402
 
 PS = float(sys.argv[1]) if len(sys.argv) > 1 else 3.0
 MASS = 110.0
-KB_INT = 0.008314462618
 TARGET = 300.0
 NREP = 2
 
@@ -99,7 +98,9 @@ for dt in (0.002, 0.001, 0.0005):
                                          friction=1.0, force_fn=ff)
         if step % max(1, n // 40) == 0 and step >= n // 4:
             with torch.no_grad():
-                Tk = MASS * (v ** 2).sum(dim=-1) / (3.0 * KB_INT)
+                # DOF-aware: 3N - C, with C=0 (no constraints yet) bit-identical to the 3N
+                # form this script used before. See C.kinetic_temperature.
+                Tk = C.kinetic_temperature(v, MASS)
                 Ts.append(float(Tk.mean()))
                 vmax = max(vmax, float(torch.linalg.norm(v.reshape(-1, 3), dim=-1).max()))
                 b = x.reshape(NREP, -1, 3)
