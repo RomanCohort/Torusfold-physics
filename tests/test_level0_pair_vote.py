@@ -36,11 +36,27 @@ def test_a_lone_input_ss_pair_does_not_become_hard():
     assert stats["n_input_ss_single"] == 1
 
 
-def test_input_ss_pairs_with_a_second_source_become_hard():
-    """Two votes make it hard, and the diagnostics report that the input supplied the second."""
+def test_the_drop_rule_is_about_the_whole_set_not_per_pair():
+    """The rule was a per-pair subtraction at first, chosen when the input WAS mfe_set and the
+    two were therefore equivalent. Fixing multisource_ss made the input a genuinely different
+    (linear) model, and a per-pair subtraction would then discard real agreement between two
+    independent models -- exactly what the >=2 threshold is for. This pins the boundary.
+
+    (This replaces a test that asserted "input + one other source is hard" using an input equal
+    to mfe_set. That case now falls under the drop rule, so the old test contradicted the new
+    semantics; its intent survives in the second half below.)
+    """
+    # input is a subset of mfe_set -> dropped whole, so the shared pair stays at one vote
     _, hard_set, _, stats = fuse(set(), {(5, 40)}, set(), {(5, 40)})
-    assert (5, 40) in hard_set
-    assert stats["n_input_ss_hard"] == 1
+    assert (5, 40) not in hard_set
+    assert stats["n_input_ss"] == 0
+
+    # input carries anything mfe_set lacks -> the whole input votes, agreement included
+    _, hard_set, _, stats = fuse(set(), {(5, 40)}, set(), {(5, 40), (60, 90)})
+    assert (5, 40) in hard_set, (
+        "per-pair subtraction would have discarded agreement between the linear and circular "
+        "models, which is the evidence the vote exists to collect")
+    assert stats["n_input_ss"] == 2 and stats["n_input_ss_raw"] == 2
 
 
 def test_pf_high_pairs_are_hard_regardless_of_the_vote():

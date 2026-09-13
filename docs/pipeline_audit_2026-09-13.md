@@ -40,11 +40,12 @@ audit rather than a finding.)
 | **C3** | fixed — cell list unioned over replicas; verified the union is a strict superset that the old list under-covered by half in a toy case |
 | **C4** | fixed — clip removed per the in-source analysis; `GB_FORCE_CAP` kept but now has no consumer |
 | **C5** | fixed — ladder built after the clamps; verified by position in the source |
-| **C6** | fixed — `rng_seed` threaded to the builder; **static verification only** (OpenMM unavailable) |
+| **C6** | fixed — `rng_seed` threaded to the builder; static verification only at the time, and OpenMM **is** available in `C:\ana\envs\circrna3d`, so this can be run for real |
 | **C7** | fixed — three sites, including a third one in `torch_cgsim.py:2335` that neither audit found |
 | **C8** | fixed — the `minimal` branch now binds `_sf/_bjf/_bjg` to None; the NameError was being swallowed as "anneal skipped" |
 | **C9** | fixed — `set_pair_k` scales the build-time per-bond k instead of overwriting it with `scale*K_PAIR` |
-| **C11** | **partial** — the 34 calls inside `torch_cgsim.py` are replaced and verified numerically equivalent (including the strided `arange(0,3L,3)` → `3*_arange_dev(L,dev)` form). **25 more remain in six other files.** Not extended: the premise is unverifiable here and `cg_energy_forces` demonstrably runs on the target GPU with bare `arange` today. See the entry |
+| **C11** | **reverted.** The 34 `arange` replacements were undone; `torch_cgsim.py` is back to the 12 `_arange_dev` sites the project itself chose. The premise does not reproduce — see the entry |
+| **A3** | **fixed.** All 9 `cg_energy_forces` calls in `BatchedREMD2D` now pass the cell list. Measured effect of the omission: 753.7 kJ/mol/nm, **21.2 % of the maximum force** |
 | **D2** | fixed and verified end to end — re-running `ibi_update.py` on `results/ibi_chainA_r1` now emits `_source` with the seed, the original cmdline and the 17-constant fingerprint. The run also reproduced the recorded `max|dU| 1.8272 kJ/mol = 0.7326 kBT` exactly, so the change is purely additive |
 | **C10** | **BLOCKED — do not "fix" without a decision.** See the entry |
 | **C12** | **BLOCKED** — a modelling choice with no recorded answer. See the entry |
@@ -172,6 +173,25 @@ geometry, so this is not a constant offset that cancels.
 
 **Still open:** which already-produced artifacts came out of `BatchedREMD2D`. The REMD runs in
 `results/remd_*.log` did not — see the note under C7.
+
+**Magnitude, measured — and this is the largest of the audit's findings.** On the real 24-replica
+configuration in `results/remd_ckpt_idx0.npz`, the same function with and without the cell list
+differs by:
+
+| | with − without |
+| --- | ---: |
+| max \|dE\| per replica | 19.430 kJ/mol |
+| max \|dF\| | 753.690 kJ/mol/nm |
+| relative to the maximum force | **21.12 %** |
+
+For comparison the C3 + C4 changes, measured identically, move the force by 0.28 %. The
+excluded volume is an entire term, not a neighbour-list correction.
+
+**Fixed** by building the cell list before `_energy_split` is defined (it used to be created
+further down, in the MD loop, so the exchange criterion and the relaxation ran before it
+existed) and passing it at all nine call sites in the class. `GPUCellList` rebuilds itself
+lazily in `get_pair_info`, so one instance serves every call site. Verified: the class
+constructs on `cuda` in `C:\ana\envs\comfyui`, and the full suite still passes 145 tests.
 
 Reproduction: read `:1343` for the gate, then confirm `cell_list` is absent from the five call
 sites above.
@@ -491,6 +511,31 @@ it. Every worker therefore produces the same C4'/N perturbation, contradicting t
 **Correction to the auditor:** it reported that trajectory diversity is lost entirely. It is
 not — `:819` varies `bsj_k_scale=0.1 + 0.05 * worker_idx` per worker. Only the initial
 perturbation is identical.
+
+### C11 outcome — reverted, and why
+
+The premise was testable after all, and it did not hold up. `_arange_dev`'s docstring names
+torch 2.12a0+rocm7.13 on Radeon 8060S / gfx1151 — and that environment exists on this machine:
+`C:\ana\envs\comfyui` has `torch 2.12.0a0+rocm7.13.0a20260313`, hip 7.2.0, an
+**AMD Radeon(TM) 8060S Graphics** at **gfx1151**. Version, device and arch all match.
+
+Bare `torch.arange(..., device='cuda')` was then run **in that environment**, in the usage pattern
+`cg_energy_forces` actually has (as an index into a batched tensor), at L = 27 / 200 / 2013,
+inside `no_grad`, over 200 iterations. **It never aborted.** One branch remains untested:
+`torch.compile`, because that environment has no working Triton.
+
+The 34 replacements were therefore reverted. `torch_cgsim.py` is back to the 12 `_arange_dev`
+sites the project chose. The reason to revert is not that the docstring is certainly wrong — it
+is that the cost is certain (a host→device copy per call in the hottest function) and the
+benefit could not be demonstrated. **If the abort ever reappears, the fix is one line at the
+site where it happens.**
+
+Method note, recorded because it caused two wrong answers in this session: the pipeline's
+environments are the conda envs. `C:\ana\envs\circrna3d` is the CPU one (torch 2.13.0+cpu,
+pytest 9.1.1, OpenMM 8.5.2) and `C:\ana\envs\comfyui` is the GPU one. Checking only the
+interpreters listed by `py -0p` (3.14 / 3.13 / 3.12) produced both the false claim that pytest
+was unavailable and the false claim that OpenMM was. **Use `circrna3d` for tests and `comfyui`
+for anything touching the GPU.**
 
 ### C7. The temperature-axis exchange criterion has an inverted sign — **[已验] verified**
 
@@ -977,10 +1022,87 @@ Verification status: `_fuse_pair_sources` was driven directly through 12 asserti
 **The full Level 0 path was not executed end to end** — `sequence.txt`, `test_2013nt_ss.txt`
 and `output_2013nt/` are not in the repository.
 
+`tests/` runs in the pipeline's own environment, not on the interpreters named above.
+`C:\ana\envs\circrna3d` (Python 3.11, torch 2.13.0+cpu, OpenMM 8.5.2, ViennaRNA 2.7.2) has
+pytest 9.1.1: **the full suite passes, 145 tests in 24 s**, including the new
+`test_level0_pair_vote.py`. An earlier draft of this document said pytest was absent on "all
+three interpreters" without ever looking in the conda environments; that was wrong. Note that
+`torusfold` is *also* installed in that environment, from a different checkout
+(`C:\Users\...\TorusFold-scheme2-rl\src\torusfold`), so a script that imports it without putting
+this repository's `src/` first will silently test the other tree. The test files do insert it;
+anything else should be checked.
+
+The obsolete claim, kept only so it is not repeated:
 `tests/` cannot currently be run: pytest is not installed on any of the three interpreters
 present (3.14 / 3.13 / 3.12).
 
 ---
+
+## Group G — external quality scoring (lociPARSE)
+
+Not an audit finding; added after the audit, at the maintainer's request, following the
+statistical-potential discussion. Recorded here because it changes what the pipeline reports.
+
+### G1. `loci_quality.py` — lociPARSE as a superposition-free quality score
+
+`src/torusfold/scheme2/loci_quality.py` (new) wraps lociPARSE (Bhattacharya Lab, J. Chem.
+Inf. Model. 2024, 64(22):8655-8664), which predicts per-nucleotide lDDT (`pNuL`) and its mean
+(`pMoL`) **without a reference structure** — the property that makes it usable on the 2013-nt
+construct, where no experimental structure exists.
+
+Measured here, not assumed:
+
+| | result |
+| --- | --- |
+| atoms it uses | P, C4', and the glycosidic N (N9 purines / N1 pyrimidines) — `feature_generation.py:119-123` |
+| 2OIU, all 3054 atoms | pMoL **0.80** |
+| 2OIU reduced to those 3 atoms/residue (426 atoms) | pMoL **0.80** — unchanged |
+| cost, one CPU core | 142 nt in 0.09 s; 568 nt in 0.26 s (linear) |
+| 1L2X crystal (27 nt) | 0.64 |
+| this pipeline's CG output for the same 27-nt sequence | 0.52 |
+
+The atom result is the important one: deleting every non-P/C4'/N atom leaves the score
+untouched, so a **CG structure is in-distribution for this model**, not a degraded input. The
+27-nt comparison is a direction, not a validation — n = 1, and the paper's 30-target benchmark
+is where the discrimination claim comes from.
+
+**Caveat that decides how it may be used: pMoL drifts with length.** Three crystals score 0.64
+(27 nt), 0.75 (69 nt), 0.80 (142 nt). Compare candidates of the same length, or one structure
+before and after a change. A cross-chunk ranking compares different lengths and is not
+supported.
+
+### G2. Wired at the end, not per chunk — and the reason is a hard blocker
+
+`isrnaclong.py` scores the finished structure and writes the result to the summary key
+`final.lociparse_pMoL` (next to the `rsrnasp1` placeholder that was already reserved for
+exactly this kind of score), plus `_plots/lociparse_pNuL.json` for the per-residue array. It
+degrades to `None` when lociPARSE is not importable, so the pipeline is unaffected by its
+absence.
+
+**It does not run per chunk, and cannot without a change elsewhere.** Every coordinate that
+reaches the assembly is P-only: `rhofold_wrapper._write_pdb` (`:157-168`) writes one P atom per
+residue, and `coords_rh` / `coords_tr_p` at the fusion point (`ensemble_predictor.py:323-379`)
+are both `(L, 3)` P arrays. C4' and N are discarded inside the wrappers — exactly the two atoms
+lociPARSE needs.
+
+So the intended Level-1 use (ranking candidates within a chunk, where the length caveat cancels)
+requires the predictor wrappers to retain C4'/N first. Related: **`n_candidates` is a dead
+parameter** — `segmented_vfold3d.py:1429` declares it and `:1467` documents ">1 picks the best",
+but the function body never reads it, so there are no candidates to rank either. Same class as
+C10.
+
+### G3. Not verified end to end
+
+The wiring is verified statically (definition order, compilation) and the scoring logic is
+verified functionally (both entry points, plus graceful degradation with the dependency absent).
+**The full pipeline was not executed**: `sequence.txt` and the upstream predictors are not
+available here, so the score has never been observed appearing in a real `pipeline_summary.json`.
+
+lociPARSE is GPL-3.0. `loci_quality.py` imports it, it does not vendor it. Settle that before
+shipping anything that bundles it. It is not installable on this machine's interpreters — its
+`setup.py` pins `numpy==1.22.3` / `torch==1.12.0`, which predate Python 3.11, but the package
+imports only torch, numpy and tqdm, so it is loaded from a source checkout via
+`TORUSFOLD_LOCIPARSE`.
 
 ## Open questions
 

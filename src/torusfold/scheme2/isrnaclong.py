@@ -2407,6 +2407,42 @@ def isrnaclong_pipeline(
     except Exception as _err:
         raise
 
+    # ── lociPARSE quality score ──
+    # An external, superposition-free score for the finished structure: per-nucleotide lDDT
+    # (pNuL) and its mean (pMoL). It needs no reference structure, which is what makes it
+    # usable on the 2013-nt construct where no experimental structure exists.
+    #
+    # It reads the all-atom file and uses only P, C4' and the glycosidic N from it -- verified
+    # on 2OIU, which scores 0.80 both with all 3054 atoms and with just those three per
+    # residue. So it works despite this pipeline keeping only P coordinates at every other
+    # stage. See loci_quality's module docstring for the length caveat: pMoL drifts with
+    # length (0.64 / 0.75 / 0.80 for the 27 / 69 / 142 nt crystals), so read it against the
+    # same length, or the same structure before and after a change -- never across chunks.
+    #
+    # Degrades to None when lociPARSE is not importable, so the pipeline is unaffected by its
+    # absence. Scoring costs ~0.1 s per 200 nt.
+    _loci_pmol = None
+    try:
+        from torusfold.scheme2 import loci_quality as _lq
+        _loci_res = _lq.score_pdb(_faa_check) if os.path.exists(_faa_check) else None
+        if _loci_res is not None:
+            _loci_pmol = _loci_res["pMoL"]
+            if verbose:
+                print(f"  [lociPARSE] pMoL={_loci_pmol:.2f} "
+                      f"({len(_loci_res['pNuL'])} nt)")
+            try:
+                _lp = output_path / "_plots" / "lociparse_pNuL.json"
+                _lp.parent.mkdir(parents=True, exist_ok=True)
+                _lp.write_text(json.dumps(
+                    {"pMoL": _loci_pmol, "pNuL": _loci_res["pNuL"],
+                     "caveat": "pMoL drifts with length; compare within a length only"},
+                    indent=2))
+            except Exception:
+                pass
+    except Exception as _e:
+        if verbose:
+            print(f"  [lociPARSE] skipped: {_e}")
+
     # ── full pipeline summary ──
     try:
         total_time = time.time() - t0
@@ -2441,6 +2477,8 @@ def isrnaclong_pipeline(
             "level5_5": {"applied": use_ppr},
             "final": {
                 "rsrnasp1": None,
+                # External superposition-free quality score; None when lociPARSE is absent.
+                "lociparse_pMoL": _loci_pmol,
                 "hbond_rate": float(_hbond_rate),
                 "clash_count": int(metrics.clash_count) if 'metrics' in dir() else None,
                 "pair_rate": float(state.pair_rate),
