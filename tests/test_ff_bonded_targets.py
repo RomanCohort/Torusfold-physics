@@ -372,15 +372,23 @@ def test_no_module_level_alias_in_the_force_field_source():
     It is evaluated once, at import, so a later retune of Y is invisible to every use of X and
     nothing raises. ANGLE_K and DIH_K were exactly that. The AST check below cannot be fooled
     by a name this test file does not know about.
+
+    rigid_bonds.py is swept too, and for a sharper reason than tidiness: make_intra_constraints
+    reads BOND_P_C4 / BOND_C4_N, and "target = BOND_P_C4" at module level would freeze the two
+    constraint targets at import. A frozen target is worse than a frozen spring constant -- the
+    run would hold the wrong bond length exactly, with no width for any statistic to notice.
     """
-    tree = ast.parse(Path(C.__file__).read_text(encoding="utf-8"))
-    aliases = [f"line {node.lineno}: {target.id} = {node.value.id}"
-               for node in tree.body if isinstance(node, ast.Assign)
-               for target in node.targets
-               if isinstance(target, ast.Name) and isinstance(node.value, ast.Name)]
-    assert not aliases, (
-        f"module-level aliases in {Path(C.__file__).name}: {aliases}. Each one binds at import "
-        f"and silently stops tracking the constant it copies")
+    import torusfold.scheme2.rigid_bonds as R
+    for module in (C, R):
+        path = Path(module.__file__)
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = [f"line {node.lineno}: {target.id} = {node.value.id}"
+                   for node in tree.body if isinstance(node, ast.Assign)
+                   for target in node.targets
+                   if isinstance(target, ast.Name) and isinstance(node.value, ast.Name)]
+        assert not aliases, (
+            f"module-level aliases in {path.name}: {aliases}. Each one binds at import and "
+            f"silently stops tracking the constant it copies")
 
 
 def test_every_live_constant_reaches_all_three_force_paths():

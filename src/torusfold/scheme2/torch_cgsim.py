@@ -26,6 +26,11 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
+# The dependency runs ONE WAY: rigid_bonds knows nothing about the force field, and this module
+# imports it. That is what lets the SHAKE/RATTLE solver be tested on hand-built geometries with
+# no field, and what stops a retune here from silently changing the constraint metric.
+from . import rigid_bonds
+
 try:
     import torch
     TORCH_OK = True
@@ -2194,12 +2199,52 @@ def kinetic_temperature(
     return mass_amu * v2 / (3.0 * KB_KJ) * (dof / (dof - n_constraints))
 
 
+def make_intra_constraints(
+    L: int,
+    mass_amu: float = 110.0,
+    **kwargs,
+) -> "rigid_bonds.DistanceConstraints":
+    """The two intra-residue rigid distances of an L-residue 3-bead chain: P-C4' and C4'-N.
+
+    They are the two springs this model cannot calibrate. K_INTRA_PC = 20752.7 and
+    K_INTRA_CN = 36399.2 come from sigma = 0.13 A and 0.08 A, which is BELOW the 0.1-0.3 A
+    coordinate-error floor of the PDB data they were fitted on: the "width" being matched is
+    refinement noise, not thermal motion. A constraint has no width and therefore no constant
+    to get wrong.
+
+    The targets are read from BOND_P_C4 / BOND_C4_N AT CALL TIME, not captured at import. A
+    module-level alias would bind once and then hold a stale target forever while every print of
+    the constant showed the new value -- the exact frozen-copy failure that has already been
+    found three times in this file (see tests/test_ff_bonded_targets.py). Targets stay at the
+    current 0.390 / 0.335 nm for now: the clean-table means are 0.3921 / 0.3387, both inside
+    that same error floor, so moving them in the same change would confound the first
+    before/after comparison with a second, unrelated one.
+
+    The constraint set is disjoint per residue -- constraints only ever share a bead WITHIN
+    residue i -- so no cross-residue coupling is created here.
+    """
+    if L < 1:
+        raise ValueError(f"L must be >= 1, got {L}")
+    r = torch.arange(L, dtype=torch.long)
+    pairs = torch.stack([
+        torch.stack([3 * r + 0, 3 * r + 1], dim=-1),        # P(r)    - C4'(r)
+        torch.stack([3 * r + 1, 3 * r + 2], dim=-1),        # C4'(r)  - N9/N1(r)
+    ], dim=1).reshape(-1, 2)
+    targets = torch.stack([
+        torch.full((L,), float(BOND_P_C4), dtype=torch.float64),
+        torch.full((L,), float(BOND_C4_N), dtype=torch.float64),
+    ], dim=1).reshape(-1)
+    return rigid_bonds.DistanceConstraints(
+        pairs, targets, mass_amu=mass_amu, name="intra_residue", **kwargs)
+
+
 def batch_langevin_step(
     pos: "torch.Tensor", vel: "torch.Tensor", forces: "torch.Tensor",
     temperatures: "torch.Tensor",           # (B,) K
     dt_ps: float = 0.002, friction: float = 1.0,
     mass_amu: float = 110.0,
     force_fn: Optional[Callable[["torch.Tensor"], "torch.Tensor"]] = None,
+    constraints: "Optional[rigid_bonds.DistanceConstraints]" = None,
 ) -> Tuple["torch.Tensor", "torch.Tensor"]:
     """Langevin BAOAB integrator (per-replica temperature).
 
@@ -2237,6 +2282,22 @@ def batch_langevin_step(
         dt = 0.002 ps): the amplitude grew from 0.010 nm to 0.0143 nm, an energy factor
         of 2.04 against the predicted (1 + 1.8e-5)^40000 = 2.05. Do not use this path for
         production dynamics.
+
+    constraints: optional DistanceConstraints. SHAKE is applied after the second A step --
+        BEFORE force_fn, so the potential and any exchange criterion are evaluated at
+        coordinates that satisfy the constraints -- and RATTLE after the final B kick, so the
+        returned velocity is orthogonal to the constraint gradients at the returned positions.
+        That is the standard placement for a constrained Langevin-middle integrator.
+
+        Note what this does NOT do: RATTLE is not re-applied after the FIRST half-kick of the
+        following step, so the velocity constraint is momentarily broken by that kick. The
+        positions, however, are projected every step at the last A step, which is what actually
+        holds the bond; RATTLE's job is only to stop the thermostat depositing kinetic energy
+        into directions the potential cannot take it back out of.
+
+        constraints=None IS BIT-IDENTICAL to the pre-constraint integrator, and that is a
+        requirement rather than a nicety: every number in the record was produced by this
+        function, and the None branch performs no extra tensor operation at all.
     """
     def _integrator_finite_guard():
         _require_finite(pos, "input coordinates")
@@ -2283,6 +2344,11 @@ def batch_langevin_step(
     vel.add_(_safe_randn(vel.shape, vel.device) * noise_scale * c2)
     # A step: half-step position update
     pos.add_(vel * half_dt)
+    # SHAKE. Here, after the last position update and before force_fn, so everything downstream
+    # -- the tail kick and any caller-supplied exchange criterion -- sees constrained
+    # coordinates. The None branch is the whole bit-identity guarantee: no op, no clone.
+    if constraints is not None:
+        pos = constraints.shake(pos)
     # B step: half-step velocity update at the post-update coordinates.
     # With force_fn the kick is f(x') and the step is symplectic; without it this reuses
     # f(x) from the incoming tensor, the documented non-symplectic fallback.
@@ -2298,6 +2364,9 @@ def batch_langevin_step(
                 f"expected {tuple(forces.shape)} (same as forces)")
         _require_finite(tail_forces, "recomputed forces")
     vel.add_(tail_forces * half_dt / mass_amu)
+    # RATTLE. After the final B kick, so the returned (pos, vel) pair satisfies d|r_c|/dt = 0.
+    if constraints is not None:
+        vel = constraints.rattle(pos, vel)
     _require_finite(pos, "integrated coordinates")
     _require_finite(vel, "integrated velocities")
     return pos, vel
