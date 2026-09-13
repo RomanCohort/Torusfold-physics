@@ -23,18 +23,44 @@ def _vienna_fold_consensus(sequence: str) -> Tuple[str, np.ndarray]:
         import RNA
         fc = RNA.fold_compound(sequence)
         ss, mfe = fc.mfe()
-        # ViennaRNA bpp: bp[i] = probability that i pairs with any j>i
-        # convert to an LxL symmetric matrix
         L = len(sequence)
         bpp_0 = np.zeros((L, L), dtype=np.float32)
-        bp = fc.bpp()
-        for i in range(1, L + 1):
-            if bp[i] > 0 and int(bp[i]) > i:
-                j = int(bp[i])
-                bpp_0[i-1, j-1] = 1.0
-                bpp_0[j-1, i-1] = 1.0
+
+        # ViennaRNA 2.x returns the base-pair probability matrix as an (L+1, L+1) array, 1-based,
+        # with row/column 0 unused. The loop here used to index that array as if it were a
+        # per-position partner vector (`bp[i] > 0`, `int(bp[i]) > i`), which raises
+        #
+        #     TypeError: '>' not supported between instances of 'tuple' and 'int'
+        #
+        # and the `except` below turned that into (None, None) on every single call. So this
+        # source never contributed anything. With the Nussinov source also gated behind L <= 500
+        # at :161, multisource_consensus_ss returned an all-dots structure for every sequence
+        # longer than 500 nt -- and run_2013nt.py:67, seeing no pairs, silently fell through to
+        # its own ViennaRNA fold. Measured on ViennaRNA 2.7.2.
+        # bpp() needs the partition function to have been computed; called on a fresh
+        # fold_compound it returns an empty tuple rather than raising, which is why the shape
+        # check below is a check and not an assumption.
+        fc.pf()
+        bp = np.asarray(fc.bpp(), dtype=np.float64)
+        if bp.ndim != 2 or bp.shape[0] < L + 1 or bp.shape[1] < L + 1:
+            return None, None
+        bp = bp[1:L + 1, 1:L + 1]
+
+        # Give each base its most likely partner above the diagonal, which is what the original
+        # loop was reaching for. The result stays a binary contact map, as before.
+        for i in range(L):
+            row = bp[i].copy()
+            row[:i + 1] = 0.0
+            j = int(np.argmax(row))
+            if row[j] > 0.0:
+                bpp_0[i, j] = 1.0
+                bpp_0[j, i] = 1.0
         return ss, bpp_0
-    except (ImportError, Exception):
+    except ImportError:
+        # Deliberately narrow. This used to be `except (ImportError, Exception)`, which is what
+        # kept the TypeError above invisible for as long as it existed: a broken source looked
+        # exactly like an absent one. Anything other than a missing ViennaRNA now propagates,
+        # and run_2013nt.py:65 already catches it and reports "MUSES unavailable".
         return None, None
 
 
@@ -78,12 +104,18 @@ def _confidence_weighted_consensus(ss_list: List[str],
     - higher-confidence predictors get larger weights
     """
     L = len(ss_list[0])
-    # per-predictor confidence: average of the diagonal elements
+    # Per-predictor confidence: mean of the pairing probabilities above 5 percent.
+    #
+    # This used to read np.diag(bpp), the diagonal of the base-pair matrix. That diagonal is
+    # identically zero -- a base does not pair with itself -- so the `np.any(diag > 0.05)` branch
+    # could never fire, every predictor came out at the 0.01 floor, and the "confidence-weighted"
+    # consensus below was equal weighting. Use the off-diagonal (upper triangle) instead.
     confidences = []
+    _iu = np.triu_indices(L, k=1)
     for bpp in bpp_list:
         if bpp is not None:
-            diag = np.diag(bpp[:L, :L])
-            conf = float(np.mean(diag[diag > 0.05])) if np.any(diag > 0.05) else 0.0
+            vals = np.asarray(bpp[:L, :L])[_iu]
+            conf = float(np.mean(vals[vals > 0.05])) if np.any(vals > 0.05) else 0.0
             confidences.append(max(conf, 0.01))
         else:
             confidences.append(0.01)

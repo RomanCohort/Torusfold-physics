@@ -173,6 +173,7 @@ def split_sequence(
     segments = []
     pos = 0
     seg_idx = 0
+    seg_start_prev = 0      # first residue of the segment just emitted, to bound the overlap
 
     while pos < L:
         next_end = min(pos + max_seg_len, L)
@@ -193,10 +194,24 @@ def split_sequence(
             if near_bsj_start or near_bsj_end:
                 effective_overlap = overlap + BSJ_MARGIN
 
+        # A segment shares `effective_overlap` residues with the one before it, and that overlap
+        # has to be the HEAD of this segment covering the predecessor's TAIL. The assembly reads
+        # full_coords[overlap_start:overlap_end] expecting the predecessor's coordinates there
+        # (:802) and blends the two copies (:818).
+        #
+        # This used to be defined as the segment's own tail -- overlap_start = best_boundary - ov
+        # while the segment still began at `pos` -- so the target region had not been placed when
+        # the alignment ran, np.any(target) at :806 was always False, and the Kabsch alignment
+        # never executed. Segments were concatenated unrotated.
+        #
+        # Starting the segment `effective_overlap` earlier makes it that much longer than
+        # max_seg_len. That is accepted here: the MSA-anchored path already produces chunks up to
+        # 1.5x max_seg_len, and nothing in _predict_chunk enforces the bound.
         if seg_idx > 0:
-            overlap_start = max(pos, best_boundary - effective_overlap)
+            overlap_start = max(pos - effective_overlap, seg_start_prev)
         else:
             overlap_start = -1
+        seg_start = overlap_start if overlap_start >= 0 else pos
 
         bsj_aware = False
         if is_circular:
@@ -204,15 +219,16 @@ def split_sequence(
                 bsj_aware = True
 
         segments.append({
-            "seq": sequence[pos:best_boundary],
-            "ss": secondary_structure[pos:best_boundary],
-            "start": pos,
+            "seq": sequence[seg_start:best_boundary],
+            "ss": secondary_structure[seg_start:best_boundary],
+            "start": seg_start,
             "end": best_boundary,
             "overlap_start": overlap_start,
-            "overlap_end": best_boundary if overlap_start >= 0 else -1,
+            "overlap_end": pos if overlap_start >= 0 else -1,
             "bsj_aware": bsj_aware,
         })
 
+        seg_start_prev = seg_start
         pos = best_boundary
         seg_idx += 1
 
@@ -1266,6 +1282,14 @@ def _predict_chunk(
 
     try:
         if use_ensemble:
+            # The region type must be computed HERE, not only in the use_trrosetta branch below.
+            # REGION_WEIGHTS (ensemble_predictor.py:61) carries a per-region division of labour --
+            # stem gives RhoFold 0.50, bsj gives it 1.00, loop hands trrna2 0.40 -- and every call
+            # through this branch was passing no region_type at all, so ensemble_predict fell back
+            # to equal-ish fixed weights and the division of labour was never exercised. The other
+            # branch is unreachable in production: isrnaclong.py:983 passes use_trrosetta=False.
+            chunk_region = _detect_chunk_region(seg, is_circular=True, full_length=L)
+            print(f"  segment {idx}: region_type={chunk_region}")
             from .ensemble_predictor import ensemble_predict
             result = ensemble_predict(
                 seg["seq"],
@@ -1275,6 +1299,7 @@ def _predict_chunk(
                 use_rhofold=True,
                 use_trrna2=True,
                 use_rnabpflow=True,
+                region_type=chunk_region,
             )
             coords = result.coords
             conf = result.confidence

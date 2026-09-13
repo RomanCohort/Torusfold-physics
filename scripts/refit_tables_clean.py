@@ -32,7 +32,10 @@ N = int(sys.argv[1]) if len(sys.argv) > 1 else 96
 OUT = Path(__file__).resolve().parent.parent / "results" / "boltzmann_tables_clean.npz"
 KBT = B.KBT
 
-K_HARM = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA, "intra_cn": C.K_INTRA,
+# K_INTRA was split into K_INTRA_PC (P-C4') and K_INTRA_CN (C4'-N). Referencing the old name
+# raised AttributeError, so this script -- the one that regenerates the baseline table the
+# whole IBI loop starts from -- could not run on a clean checkout.
+K_HARM = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_CN,
           "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
 LOCAL = ("bb_bond", "intra_pc", "intra_cn")
 

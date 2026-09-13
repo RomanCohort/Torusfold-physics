@@ -469,6 +469,73 @@ class RelaxationRL:
             self._online_learner.save(self._online_buffer_path)
 
 
+def _fuse_pair_sources(pf_high_set: set, mfe_set: set, divide_set: set,
+                       input_ss_set: set):
+    """Vote the Level 0 pair sources into the hard-restraint set.
+
+    A pair is hard when at least two sources name it. pf_high_set is admitted outright as well:
+    it is the partition-function tier above P>0.9 and the vote has never been allowed to veto
+    it, so in practice the threshold only discriminates between mfe/divide/input_ss.
+
+    input_ss_set is the caller's secondary structure from run_2013nt.py, which is a LINEAR
+    ViennaRNA fold. It reaches Level 0 by one of two routes:
+
+      * multisource_ss works: multisource_consensus_ss returns the ViennaRNA source's structure
+        (for L > 500, as-is). That fold is linear -- `RNA.fold_compound(sequence)` with no
+        md.circ -- so it is a genuinely different model from the circ=1 sources used below.
+        This route was dead until 2026-09-13; see the note at multisource_ss.py:30.
+      * multisource_ss returns all dots: run_2013nt.py:67 catches that and falls back to an
+        md.circ = 1 ViennaRNA MFE fold, which is the same call that builds mfe_set, and so an
+        exact duplicate of it.
+
+    The input is dropped only if it adds nothing beyond mfe_set, which covers the second route:
+    there it is the same source, and counting it twice would promote every MFE pair from soft to
+    hard. On the first route it is a different model and votes on all of its pairs, agreement
+    included -- see the note in the body.
+
+    Measured on ViennaRNA 2.7.2.
+
+    Returns (hard_pairs, hard_set, pair_votes, stats); stats feeds the Level 0 diagnostics.
+    """
+    input_ss_raw = set(input_ss_set)
+    # Drop the input only when it carries nothing mfe_set does not already have -- i.e. when it
+    # IS the same source. That happens on run_2013nt.py's fallback route, where the structure is
+    # this very md.circ = 1 fold; counting it again would promote every MFE pair from soft to
+    # hard. A per-pair subtraction was tried first and is wrong now that multisource_ss works:
+    # the input is a LINEAR fold, and a pair that both the linear and the circular model find is
+    # two independent models agreeing, which is exactly what the >=2 threshold is for.
+    input_ss_set = set() if input_ss_raw <= set(mfe_set) else input_ss_raw
+
+    all_sources = [pf_high_set, mfe_set, divide_set, input_ss_set]
+    pair_votes: Dict[Tuple[int, int], int] = {}
+    for src in all_sources:
+        for p in src:
+            pair_votes[p] = pair_votes.get(p, 0) + 1
+
+    # the same rule with the input held out, only so the diagnostics can report what it added
+    _votes_no_input: Dict[Tuple[int, int], int] = {}
+    for src in (pf_high_set, mfe_set, divide_set):
+        for p in src:
+            _votes_no_input[p] = _votes_no_input.get(p, 0) + 1
+    hard_no_input = set(p for p, v in _votes_no_input.items() if v >= 2) | pf_high_set
+
+    hard_pairs = [p for p, v in pair_votes.items() if v >= 2]
+    hard_set = set(hard_pairs)
+    for p in pf_high_set:
+        if p not in hard_set:
+            hard_pairs.append(p)
+            hard_set.add(p)
+
+    stats = {
+        "n_multi": sum(1 for v in pair_votes.values() if v >= 2),
+        "n_input_ss": len(input_ss_set),          # effective: after the mfe_set dedup
+        "n_input_ss_raw": len(input_ss_raw),      # what the caller actually supplied
+        "n_input_ss_hard": len(hard_set - hard_no_input),
+        "n_input_ss_single": sum(1 for p in input_ss_set if pair_votes.get(p, 0) <= 1),
+    }
+    return hard_pairs, hard_set, pair_votes, stats
+
+
 @dataclass
 class LongPipelineResult:
     """Result of the long-chain pipeline."""
@@ -731,19 +798,28 @@ def isrnaclong_pipeline(
                 elif c == ")" and stack:
                     divide_set.add((stack.pop(), i))
 
-        # ── hard restraints: consistent across methods (>=2 sources) ──
-        all_sources = [pf_high_set, mfe_set, divide_set]
-        pair_votes = {}
-        for src in all_sources:
-            for p in src:
-                pair_votes[p] = pair_votes.get(p, 0) + 1
+        # The caller-supplied secondary structure used to be dropped on the floor here: it is
+        # never read anywhere else in Level 0. It now votes like any other source.
+        input_ss_set = set()
+        try:
+            from torusfold.scheme2.segmented_vfold3d import _parse_dotbracket_strict
+            if len(secondary_structure) != L:
+                if verbose:
+                    print(f"  input SS ignored: length {len(secondary_structure)} != {L}")
+            else:
+                input_ss_set = set(_parse_dotbracket_strict(secondary_structure))
+                # _parse_dotbracket_strict returns [] on unbalanced input rather than raising,
+                # so a malformed string would otherwise look like "the input agreed with
+                # nothing" instead of "the input was unreadable"
+                if not input_ss_set and secondary_structure.strip(".") and verbose:
+                    print("  input SS malformed (unbalanced brackets); it gets no vote")
+        except Exception as _e:
+            if verbose:
+                print(f"  input SS unavailable: {_e}")
 
-        hard_pairs = [p for p, v in pair_votes.items() if v >= 2]
-        hard_set = set(hard_pairs)
-        for p in pf_high_set:
-            if p not in hard_set:
-                hard_pairs.append(p)
-                hard_set.add(p)
+        # ── hard restraints: consistent across methods (>=2 sources) ──
+        hard_pairs, hard_set, pair_votes, _vote_stats = _fuse_pair_sources(
+            pf_high_set, mfe_set, divide_set, input_ss_set)
 
         # ── soft restraints: MFE + PF medium-confidence + DivideFold (not truncated) ──
         soft_pairs = []
@@ -836,10 +912,14 @@ def isrnaclong_pipeline(
                   "RCM reweighting off")
 
         if verbose:
-            n_multi = sum(1 for v in pair_votes.values() if v >= 2)
-            print(f"  PF high-confidence: {len(pf_high_set)}, MFE: {len(mfe_set)}, DivideFold: {len(divide_set)}")
-            print(f"  multi-method consistent (>=2): {n_multi}")
-            print(f"  hard restraints: {len(hard_pairs)}, soft restraints: {len(soft_pairs)}")
+            print(f"  PF high-confidence: {len(pf_high_set)}, MFE: {len(mfe_set)}, "
+                  f"DivideFold: {len(divide_set)}, "
+                  f"input SS: {_vote_stats['n_input_ss_raw']} -> {_vote_stats['n_input_ss']} "
+                  f"after mfe dedup")
+            print(f"  multi-method consistent (>=2): {_vote_stats['n_multi']}")
+            print(f"  hard restraints: {len(hard_pairs)}, soft restraints: {len(soft_pairs)}"
+                  f" (input SS added {_vote_stats['n_input_ss_hard']} hard, "
+                  f"{_vote_stats['n_input_ss_single']} of its pairs left single-vote)")
             print(f"  total restraints: {len(pairs)}")
 
         # ── 3b. NCM non-canonical pairing detection (P0) ──
@@ -925,6 +1005,10 @@ def isrnaclong_pipeline(
                 "n_soft": len(soft_pairs),
                 "n_ncm": _n_ncm,
                 "n_mfe": _n_mfe,
+                "n_input_ss": _vote_stats["n_input_ss"],
+                "n_input_ss_raw": _vote_stats["n_input_ss_raw"],
+                "n_input_ss_hard": _vote_stats["n_input_ss_hard"],
+                "n_input_ss_single": _vote_stats["n_input_ss_single"],
                 "dividerefold_n_pairs": _n_divide,
                 "n_far": len(far_pairs),
                 "n_stem_blocks": len(stem_blocks),
@@ -1083,54 +1167,58 @@ def isrnaclong_pipeline(
     # ── Level 1.5: CG global restraint relaxation (smooths the seams of Vfold3D block assembly) ──
     # Level 1.5 depends on Level 1 output; only restore if Level 1 was also restored
     _l15_from_ckpt = (_l1_from_ckpt and "coords_relaxed" in ckpt)
+    _l15_ok = False
     if _l15_from_ckpt:
         coords_vfold = ckpt["coords_relaxed"]
+        _l15_ok = True
         if verbose:
             print(f"\n[Level 1.5] restored globally relaxed coordinates from checkpoint")
     else:
+        # This block used to sit at the same indent as the if/else above, so it ran even after
+        # the checkpoint had been restored: 5000 relaxation steps whose result immediately
+        # overwrote the coordinates that had just been read back.
         if verbose:
             print(f"\n[Level 1.5] CG global restraint relaxation...")
-    _l15_ok = False
-    try:
-        from torusfold.scheme2.openmm_gpu_refiner import (
-            _generate_compact_coords, _sanitize_p_coords,
-        )
-        from torusfold.scheme2.physical_relaxation import relax_structure
+        try:
+            from torusfold.scheme2.openmm_gpu_refiner import (
+                _generate_compact_coords, _sanitize_p_coords,
+            )
+            from torusfold.scheme2.physical_relaxation import relax_structure
 
-        _relax_coords = _sanitize_p_coords(coords_vfold.copy())
-        _avg_pp = 0.0
-        if L > 1:
-            _diffs = _relax_coords[1:] - _relax_coords[:-1]
-            _ppd = np.linalg.norm(_diffs, axis=1)
-            _avg_pp = float(np.mean(_ppd[:min(L - 1, 500)]))
-        if (not np.isfinite(_avg_pp)) or _avg_pp > 20.0 or _avg_pp < 1.0:
-            _relax_coords = _generate_compact_coords(L, pairs)
+            _relax_coords = _sanitize_p_coords(coords_vfold.copy())
+            _avg_pp = 0.0
+            if L > 1:
+                _diffs = _relax_coords[1:] - _relax_coords[:-1]
+                _ppd = np.linalg.norm(_diffs, axis=1)
+                _avg_pp = float(np.mean(_ppd[:min(L - 1, 500)]))
+            if (not np.isfinite(_avg_pp)) or _avg_pp > 20.0 or _avg_pp < 1.0:
+                _relax_coords = _generate_compact_coords(L, pairs)
 
-        # torch GPU relaxation (full CG force field, replaces OpenMM CPU)
-        _pairs_for_relax = [(i, j, w) for (i, j, w) in pairs
-                            if 0 <= i < L and 0 <= j < L]
-        _relaxed_l15, _metrics_l15 = relax_structure(
-            _relax_coords, sequence,
-            far_pairs=None,
-            n_steps=5000,
-            pairs_all=_pairs_for_relax if _pairs_for_relax else None)
-        _coords_relaxed = _relaxed_l15
+            # torch GPU relaxation (full CG force field, replaces OpenMM CPU)
+            _pairs_for_relax = [(i, j, w) for (i, j, w) in pairs
+                                if 0 <= i < L and 0 <= j < L]
+            _relaxed_l15, _metrics_l15 = relax_structure(
+                _relax_coords, sequence,
+                far_pairs=None,
+                n_steps=5000,
+                pairs_all=_pairs_for_relax if _pairs_for_relax else None)
+            _coords_relaxed = _relaxed_l15
 
-        # torch GPU relaxation finished; extract the result
-        _p_coords_relaxed = _coords_relaxed
-        _e = 0.0  # the torch GPU version does not output an OpenMM energy
+            # torch GPU relaxation finished; extract the result
+            _p_coords_relaxed = _coords_relaxed
+            _e = 0.0  # the torch GPU version does not output an OpenMM energy
 
-        if len(_p_coords_relaxed) == L:
-            coords_vfold = _p_coords_relaxed
+            if len(_p_coords_relaxed) == L:
+                coords_vfold = _p_coords_relaxed
+                if verbose:
+                    print(f"    global relaxation (torch GPU): bond_viol={_metrics_l15['final']['bond_violations']}")
+            else:
+                if verbose:
+                    print(f"    output dimension mismatch ({len(_p_coords_relaxed)} vs {L}), skipping")
+            _l15_ok = True
+        except Exception as e:
             if verbose:
-                print(f"    global relaxation (torch GPU): bond_viol={_metrics_l15['final']['bond_violations']}")
-        else:
-            if verbose:
-                print(f"    output dimension mismatch ({len(_p_coords_relaxed)} vs {L}), skipping")
-        _l15_ok = True
-    except Exception as e:
-        if verbose:
-            print(f"    CG relaxation failed: {e}, using the original coordinates")
+                print(f"    CG relaxation failed: {e}, using the original coordinates")
 
     # Level 1.5 validation
     v15 = _validate_structure(coords_vfold, pairs, bpp, sequence, "Level 1.5")

@@ -84,13 +84,19 @@ class CircRNAMultiTaskLoss(nn.Module):
             # Only compute where the label is not -1 (structRFM: skip struct == -1)
             known_mask = ss_labels != self.ss_mask_value
             if known_mask.any():
+                # reduction="none" is required: with the default "mean" this call returns a
+                # scalar, and (scalar * w).sum() / w.sum() is identically that scalar, so the
+                # weighting below would silently do nothing at all.
                 loss_ss = F.cross_entropy(
-                    ss_logits[known_mask], ss_labels[known_mask].long()
+                    ss_logits[known_mask], ss_labels[known_mask].long(),
+                    reduction="none",
                 )
                 if weight_mask is not None:
                     # Weight the known positions by weight_mask
                     w = weight_mask[known_mask]
                     loss_ss = (loss_ss * w).sum() / w.sum().clamp(min=1.0)
+                else:
+                    loss_ss = loss_ss.mean()
                 losses["loss_ss"] = loss_ss
                 total = total + self.w_ss * loss_ss
             else:
@@ -121,10 +127,16 @@ class CircRNAMultiTaskLoss(nn.Module):
             clash_scores = predictions["clash_scores"]  # (L,)
             clash_labels = labels["clash_labels"].float()  # (L,)
 
-            loss_clash = F.binary_cross_entropy(clash_scores, clash_labels)
+            # Same shape of bug as loss_ss above: binary_cross_entropy defaults to "mean" and
+            # returns a scalar, which made the weighting below a no-op.
+            loss_clash = F.binary_cross_entropy(
+                clash_scores, clash_labels, reduction="none"
+            )
             if weight_mask is not None:
                 w = weight_mask
                 loss_clash = (loss_clash * w).sum() / w.sum().clamp(min=1.0)
+            else:
+                loss_clash = loss_clash.mean()
             losses["loss_clash"] = loss_clash
             total = total + self.w_clash * loss_clash
 

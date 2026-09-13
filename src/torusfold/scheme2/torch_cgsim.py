@@ -620,7 +620,7 @@ class _ClashNeighborList:
         # union over replicas of the 27-cell adjacency
         in_cell = ((ci - cj).abs().max(dim=-1).values <= 1).any(dim=0)   # (N, N)
 
-        idx = torch.arange(N, device=dev)
+        idx = _arange_dev(N, dev)
         seq_near = (idx[:, None] - idx[None, :]).abs() <= 2
         valid = in_cell & ~seq_near & torch.triu(
             torch.ones(N, N, device=dev, dtype=bool), diagonal=1)
@@ -1028,7 +1028,7 @@ def _angle_f(pos, k, target_cos):
     B = pos.shape[0]; L = pos.shape[1] // 3; dev = pos.device
     if L < 3: return torch.zeros(B, device=dev), torch.zeros_like(pos)
     P = lambda i: 3*i+0
-    idx = torch.arange(L-2, device=dev)
+    idx = _arange_dev(L-2, dev)
     p0, p1, p2 = pos[:, P(idx)], pos[:, P(idx+1)], pos[:, P(idx+2)]
     v1, v2 = p0-p1, p2-p1
     n1 = _safe_norm(v1, dim=-1, keepdim=True)
@@ -1066,7 +1066,7 @@ def _dihedral_f(pos, k, target_cos):
     B = pos.shape[0]; L = pos.shape[1] // 3; dev = pos.device
     if L < 4: return torch.zeros(B, device=dev), torch.zeros_like(pos)
     P = lambda i: 3*i+0
-    idx = torch.arange(L-3, device=dev)
+    idx = _arange_dev(L-3, dev)
     p0, p1 = pos[:, P(idx)], pos[:, P(idx+1)]
     p2, p3 = pos[:, P(idx+2)], pos[:, P(idx+3)]
     b0, b1, b2 = p1-p0, p2-p1, p3-p2
@@ -1092,7 +1092,7 @@ def _dihedral_f(pos, k, target_cos):
     # of the P atoms so the caller's graph is untouched, and under enable_grad so the
     # result does not depend on the caller's grad mode.
     with torch.enable_grad():
-        p_ref = pos[:, P(torch.arange(L, device=dev))].detach().clone().requires_grad_(True)
+        p_ref = pos[:, P(_arange_dev(L, dev))].detach().clone().requires_grad_(True)
         # L-3 four-atom windows, so every bond slice must drop the same two from each end
         r0 = p_ref[:, 1:-2] - p_ref[:, :-3]
         r1 = p_ref[:, 2:-1] - p_ref[:, 1:-2]
@@ -1107,7 +1107,7 @@ def _dihedral_f(pos, k, target_cos):
 
     F = torch.zeros_like(pos)
     if p_ref.grad is not None:
-        F[:, P(torch.arange(L, device=dev))] = -p_ref.grad
+        F[:, P(_arange_dev(L, dev))] = -p_ref.grad
     return e, F
 
 
@@ -1272,12 +1272,12 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
     total_F = torch.zeros_like(pos_nm)
 
     # ── 1. BB bonds: O(N) analytic ──
-    idx = torch.arange(L-1, device=dev)
+    idx = _arange_dev(L-1, dev)
     e, f = _bond_f(pos_nm, P(idx), P(idx+1), _bb_k, BOND_P_NEXT)
     total_E += e; total_F += f
 
     # ── 2. Intra-bead: O(N) analytic ──
-    r = torch.arange(L, device=dev)
+    r = _arange_dev(L, dev)
     e1, f1 = _bond_f(pos_nm, P(r), C4(r), K_INTRA_PC, BOND_P_C4)
     e2, f2 = _bond_f(pos_nm, C4(r), NN(r), K_INTRA_CN, BOND_C4_N)
     # The three pairs nothing else covers (see K_INTRA_PN). The two that cross a backbone link
@@ -1285,7 +1285,7 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
     # the closure is already held by K_BSJ. Wrapping them onto residue 0 would add a term the fit
     # has no observation for, and on a chain whose ends are far apart it would add strain on top
     # of what K_BSJ already carries.
-    li = torch.arange(L - 1, device=dev)
+    li = _arange_dev(L - 1, dev)
     e3, f3 = _bond_f(pos_nm, P(r), NN(r), K_INTRA_PN, BOND_INTRA_PN)
     e4, f4 = _bond_f(pos_nm, C4(li), P(li + 1), K_LINK_CP, BOND_LINK_CP)
     e5, f5 = _bond_f(pos_nm, NN(li), P(li + 1), K_LINK_NP, BOND_LINK_NP)
@@ -1329,7 +1329,7 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
 
     # ── 7. Stacking: O(N) analytic ──
     if L > 2:
-        st = torch.arange(L-2, device=dev)
+        st = _arange_dev(L-2, dev)
         delta_st = pos_nm[:, P(st)] - pos_nm[:, P(st+2)]
         dist_st = _safe_norm(delta_st, dim=-1, keepdim=True, eps=eps)
         lam_st = lams[:,None,None] if lams is not None else torch.tensor([[lam]], device=dev)
@@ -1406,19 +1406,26 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
     # Measured on 1ET4, 35 of 105 beads differed by up to 7.77 kJ/mol/nm out of a maximum of
     # 2447.92, and the reported energy was short by the 23.22 kJ/mol Manning term.
     with torch.enable_grad():
-        gb_pos = pos_nm[:,P(torch.arange(L,device=dev)),:].detach().clone().requires_grad_(True)
+        gb_pos = pos_nm[:,P(_arange_dev(L, dev)),:].detach().clone().requires_grad_(True)
         ion_s = c_mg*2.0+c_na
         ld = 0.304/math.sqrt(max(ion_s,1e-6))
         SA_CUTOFF = 0.58; MG_CUTOFF = 1.0   # GB_CUTOFF is the module constant above
 
-        # P-particle cell-list
-        p_coords = gb_pos[0]
-        p_cell = torch.floor(p_coords / GB_CUTOFF).long()
-        ci = p_cell[:,None,:]; cj = p_cell[None,:,:]
-        p_in_cell = (ci-cj).abs().max(dim=2).values <= 1
-        p_idx_arr = torch.arange(L, device=dev)
+        # P-particle cell-list, taken as the UNION over replicas.
+        #
+        # It used to be built from `gb_pos[0]` alone while the distance computation below runs
+        # over the whole (B, L, 3) batch: a pair that is a cell-neighbour in replica 3 but not in
+        # replica 0 was dropped from replica 3's GB interaction entirely. Cost is B cell-grid
+        # passes instead of one; B is the replica count, and this runs inside no_grad.
+        p_idx_arr = _arange_dev(L, dev)
         p_seq_near = (p_idx_arr[:,None]-p_idx_arr[None,:]).abs() <= 2
-        p_valid = p_in_cell & ~p_seq_near & torch.triu(torch.ones(L,L,device=dev,dtype=bool), diagonal=1)
+        p_upper = torch.triu(torch.ones(L,L,device=dev,dtype=bool), diagonal=1)
+        p_in_cell = torch.zeros(L, L, device=dev, dtype=torch.bool)
+        for _b in range(gb_pos.shape[0]):
+            _cell = torch.floor(gb_pos[_b] / GB_CUTOFF).long()
+            _ci = _cell[:,None,:]; _cj = _cell[None,:,:]
+            p_in_cell |= ( (_ci-_cj).abs().max(dim=2).values <= 1 )
+        p_valid = p_in_cell & ~p_seq_near & p_upper
         p_pairs = torch.nonzero(p_valid, as_tuple=False)
 
         # Keep a differentiable tensor for backward
@@ -1486,16 +1493,21 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
             # 300 K target, because every other term then delivers more of its true force while
             # this one stays clipped at 50.
             #
-            # The clip can now be removed rather than retuned, because the excluded volume was
-            # rebuilt from the database with sigma = 0.3975 nm and diverges as d -> 0. It holds P
-            # beads at the distance real structures keep them, so the GB singularity it was
-            # guarding against is no longer reachable. If that is wrong, the honest repair is a
-            # soft-core GB pair term whose energy and gradient are clipped together -- not a clip
-            # on the gradient alone, which is what this was.
+            # The clip has been removed rather than retuned, for exactly the reason above: the
+            # excluded volume was rebuilt from the database with sigma = 0.3975 nm and diverges
+            # as d -> 0, so it holds P beads at the distance real structures keep them, and the
+            # GB singularity the clip guarded against is no longer reachable. The global force
+            # cap at the end of this function is untouched and _require_finite runs after it, so
+            # a blow-up would still be caught rather than propagated.
+            #
+            # GB_FORCE_CAP itself is left defined because scripts/check_gb_cap_heating.py
+            # assigns to it to measure the heating effect. That script now has nothing to
+            # measure -- it will report a null result because the cap no longer has a consumer.
+            # If the reasoning above is wrong, the honest repair is a soft-core GB pair term
+            # whose energy and gradient are clipped together, not a clip on the gradient alone,
+            # which is what this was.
             gb_f = -gb_pos.grad
-            _gb_f_mag = gb_f.norm(dim=-1, keepdim=True).clamp(min=1e-12)
-            gb_f = gb_f * torch.clamp(GB_FORCE_CAP / _gb_f_mag, max=1.0)
-            total_F[:,P(torch.arange(L,device=dev))] += gb_f
+            total_F[:,P(_arange_dev(L, dev))] += gb_f
 
     # ── Global safety net: NaN/Inf detection + force cap ──
 
@@ -1584,7 +1596,7 @@ def cg_forces_explicit_batched(
     def _angle(pos, k, target_cos):
         if L < 3:
             return torch.zeros(B, device=dev), torch.zeros_like(pos)
-        idx = torch.arange(L - 2, device=dev)
+        idx = _arange_dev(L - 2, dev)
         p0, p1, p2 = pos[:, P(idx)], pos[:, P(idx+1)], pos[:, P(idx+2)]
         v1, v2 = p0 - p1, p2 - p1
         n1 = v1.norm(dim=-1, keepdim=True).clamp(min=eps)
@@ -1603,17 +1615,17 @@ def cg_forces_explicit_batched(
         return e, forces
 
     # ── 1. BB bonds: O(N) ──
-    idx_a = torch.arange(L - 1, device=dev)
+    idx_a = _arange_dev(L - 1, dev)
     e, f = _bond(pos_nm, P(idx_a), P(idx_a+1), K_BB, BOND_P_NEXT)
     total_E += e; total_F += f
 
     # ── 2. Intra-bead: O(N) ──
-    all_r = torch.arange(L, device=dev)
+    all_r = _arange_dev(L, dev)
     e1, f1 = _bond(pos_nm, P(all_r), C4(all_r), K_INTRA_PC, BOND_P_C4)
     e2, f2 = _bond(pos_nm, C4(all_r), NN(all_r), K_INTRA_CN, BOND_C4_N)
     # The three pairs nothing else covers (see K_INTRA_PN); the two that cross a backbone link
     # stop at L-1 for the reason recorded in cg_energy_forces.
-    li = torch.arange(L - 1, device=dev)
+    li = _arange_dev(L - 1, dev)
     e3, f3 = _bond(pos_nm, P(all_r), NN(all_r), K_INTRA_PN, BOND_INTRA_PN)
     e4, f4 = _bond(pos_nm, C4(li), P(li + 1), K_LINK_CP, BOND_LINK_CP)
     e5, f5 = _bond(pos_nm, NN(li), P(li + 1), K_LINK_NP, BOND_LINK_NP)
@@ -1637,7 +1649,7 @@ def cg_forces_explicit_batched(
     #  same expression as the energy via a small autograd block over the
     #  P-atom windows only.)
     if L > 3:
-        p_chain = pos_nm[:, P(torch.arange(L, device=dev))]
+        p_chain = pos_nm[:, P(_arange_dev(L, dev))]
         p_ref = p_chain.detach().clone().requires_grad_(True)
         v0 = p_ref[:, :-3]; v1 = p_ref[:, 1:-2]; v2 = p_ref[:, 2:-1]; v3 = p_ref[:, 3:]
         b0 = v1 - v0; b1 = v2 - v1; b2 = v3 - v2
@@ -1650,7 +1662,7 @@ def cg_forces_explicit_batched(
         e_dih.sum().backward()
         total_E += e_dih.sum(dim=-1).detach()
         if p_ref.grad is not None:
-            total_F[:, P(torch.arange(L, device=dev))] += -p_ref.grad
+            total_F[:, P(_arange_dev(L, dev))] += -p_ref.grad
 
     # ── 6. WC pairing: O(P) ──
     if pairs_ij.numel() > 0:
@@ -1667,7 +1679,7 @@ def cg_forces_explicit_batched(
 
     # ── 7. Stacking: O(N) ──
     if L > 2:
-        st = torch.arange(L-2, device=dev)
+        st = _arange_dev(L-2, dev)
         e_s, f_s = _bond(pos_nm, P(st), P(st+2), K_STACK*lam, STACK_R0)
         total_E += e_s; total_F += f_s
 
@@ -1691,7 +1703,7 @@ def cg_forces_explicit_batched(
     # ── 10-11. GB/SA/Mg2+: O(L²) in two steps ──
     # Step 1: compute the energy with detach (no gradient)
     with torch.no_grad():
-        gb_p = pos_nm[:, P(torch.arange(L,device=dev)), :]
+        gb_p = pos_nm[:, P(_arange_dev(L, dev)), :]
         gb_pd = gb_p[:,:,None,:]-gb_p[:,None,:,:]
         gb_dd = _safe_norm(gb_pd, dim=-1, eps=eps)
         el = torch.eye(L,device=dev).unsqueeze(0)
@@ -1714,7 +1726,7 @@ def cg_forces_explicit_batched(
         total_E += gb_e+gb_sa_e+gb_mg_e+gb_mi_e+gb_ms_e
 
     # Step 2: compute forces with autograd (only GB/SA/Mg2+)
-    gb_pos = pos_nm[:, P(torch.arange(L,device=dev)), :].detach().clone().requires_grad_(True)
+    gb_pos = pos_nm[:, P(_arange_dev(L, dev)), :].detach().clone().requires_grad_(True)
     gb_pd2 = gb_pos[:,:,None,:]-gb_pos[:,None,:,:]
     gb_dd2 = _safe_norm(gb_pd2, dim=-1, eps=eps)
 
@@ -1733,7 +1745,7 @@ def cg_forces_explicit_batched(
 
     (gb_e2+gb_sa_e2+gb_mg_e2+gb_mi_e2+gb_ms_e2).sum().backward()
     if gb_pos.grad is not None:
-        total_F[:, P(torch.arange(L,device=dev))] += -gb_pos.grad
+        total_F[:, P(_arange_dev(L, dev))] += -gb_pos.grad
 
     _require_finite(total_E, "batched explicit energy")
     _require_finite(total_F, "batched explicit forces")
@@ -1886,7 +1898,7 @@ def _explicit_forces_angles(
         return torch.zeros(B, device=dev), torch.zeros_like(pos)
 
     P = lambda i: 3 * i + 0
-    idx = torch.arange(L - 2, device=dev)
+    idx = _arange_dev(L - 2, dev)
     p0 = pos[:, P(idx)]
     p1 = pos[:, P(idx + 1)]
     p2 = pos[:, P(idx + 2)]
@@ -1929,7 +1941,7 @@ def _explicit_forces_dihedrals(
         return torch.zeros(B, device=dev), torch.zeros_like(pos)
 
     P = lambda i: 3 * i + 0
-    idx = torch.arange(L - 3, device=dev)
+    idx = _arange_dev(L - 3, dev)
     p0 = pos[:, P(idx)]; p1 = pos[:, P(idx + 1)]
     p2 = pos[:, P(idx + 2)]; p3 = pos[:, P(idx + 3)]
 
@@ -1998,20 +2010,20 @@ def cg_forces_explicit(
     cell_list.build(pos_nm)
 
     # ── Bonds: O(N) direct indexing ──
-    idx_a = torch.arange(L - 1, device=dev)
+    idx_a = _arange_dev(L - 1, dev)
     e_bb, f_bb = _explicit_forces_bonds(
         pos_nm, torch.stack([P(idx_a), P(idx_a + 1)], dim=1), K_BB, BOND_P_NEXT)
     total_E += e_bb; total_F += f_bb
 
     # Intra-bead bonds
-    all_res = torch.arange(L, device=dev)
+    all_res = _arange_dev(L, dev)
     e_pc, f_pc = _explicit_forces_bonds(
         pos_nm, torch.stack([P(all_res), C4(all_res)], dim=1), K_INTRA_PC, BOND_P_C4)
     e_cn, f_cn = _explicit_forces_bonds(
         pos_nm, torch.stack([C4(all_res), NN(all_res)], dim=1), K_INTRA_CN, BOND_C4_N)
     # The three pairs nothing else covers (see K_INTRA_PN); the two that cross a backbone link
     # stop at L-1 for the reason recorded in cg_energy_forces.
-    li = torch.arange(L - 1, device=dev)
+    li = _arange_dev(L - 1, dev)
     e_pn, f_pn = _explicit_forces_bonds(
         pos_nm, torch.stack([P(all_res), NN(all_res)], dim=1), K_INTRA_PN, BOND_INTRA_PN)
     e_cp, f_cp = _explicit_forces_bonds(
@@ -2057,7 +2069,7 @@ def cg_forces_explicit(
 
     # ── Stacking (sparse indexing): O(N) ──
     if L > 2:
-        st = torch.arange(L - 2, device=dev)
+        st = _arange_dev(L - 2, dev)
         e_st, f_st = _explicit_forces_bonds(
             pos_nm, torch.stack([P(st), P(st + 2)], dim=1), K_STACK * lam, STACK_R0)
         total_E += e_st; total_F += f_st
@@ -2082,7 +2094,7 @@ def cg_forces_explicit(
 
     # ── GB/SA + Mg2+ (simplified: distance-dependent potentials) ──
     # Only for P particles: O(L) with direct indexing
-    p_idx = torch.arange(L, device=dev)
+    p_idx = _arange_dev(L, dev)
     p_coords = pos_nm[:, P(p_idx), :]  # (B, L, 3)
 
     # GB: screening energy (pairwise-sum approximation)
@@ -2332,7 +2344,13 @@ class BatchedREMD:
                 att += 1
                 dE = energies[ri] - energies[ri + 1]
                 expo = np.clip((beta[ri] - beta[ri + 1]) * dE, -30, 30)
-                if expo <= 0 or np.random.rand() < np.exp(-expo):
+                # expo IS the Metropolis exponent, so accept = min(1, exp(expo)). exp(-expo) is
+                # the reciprocal and inverts the exchange direction. Same defect as
+                # rest2_remd_2d.py:123 and rest2_sampler.py:163. This class (BatchedREMD, 1-D)
+                # is only reached from smoke tests -- the pipeline uses BatchedREMD2D below --
+                # so this one never affected a production run, but it is fixed rather than left
+                # as a trap.
+                if expo >= 0 or np.random.rand() < np.exp(expo):
                     acc += 1
                     tmp = pos[ri].clone()
                     pos[ri] = pos[ri + 1].clone()
@@ -2805,7 +2823,7 @@ class BatchedREMD2D:
             pos_in = pos_in.detach()
             e_kbt = tri_pot.energy_from_3bead(pos_in)
             if replica_indices is None:
-                indices = torch.arange(pos_in.shape[0], device=pos_in.device)
+                indices = _arange_dev(pos_in.shape[0], pos_in.device)
             else:
                 indices = torch.as_tensor(replica_indices, dtype=torch.long,
                                           device=pos_in.device)
@@ -2814,7 +2832,7 @@ class BatchedREMD2D:
         def _tri_energy(pos_in, replica_indices=None):
             """TriRNASP energy for supplied coordinates and replica slots."""
             if replica_indices is None:
-                indices = torch.arange(pos_in.shape[0], device=pos_in.device)
+                indices = _arange_dev(pos_in.shape[0], pos_in.device)
             else:
                 indices = torch.as_tensor(replica_indices, dtype=torch.long,
                                           device=pos_in.device)
@@ -2866,7 +2884,7 @@ class BatchedREMD2D:
         def _energy_split(pos_in, replica_indices=None):
             """Return own-λ energy and reference λ=1 solute energy."""
             if replica_indices is None:
-                indices = torch.arange(pos_in.shape[0], device=pos_in.device)
+                indices = _arange_dev(pos_in.shape[0], pos_in.device)
                 own_lams = lams_t
             else:
                 indices = torch.as_tensor(replica_indices, dtype=torch.long,
@@ -3019,7 +3037,7 @@ class BatchedREMD2D:
                     # Compute the cosine similarity; if the directions oppose, lower the Tri weight
                     if _tri_last_refresh_age[0] <= 1:  # only check right after a new force injection
                         f_tri_full_raw = torch.zeros_like(pos)
-                        p_idx = torch.arange(0, 3 * L, 3, device=dev)
+                        p_idx = 3 * _arange_dev(L, dev)
                         f_tri_raw_np = torch.tensor(
                             _tri_cpu_force_cache, dtype=torch.float32, device=dev)
                         f_tri_full_raw[:, p_idx, :] = f_tri_raw_np * tri_force_mask_t[:, None, None]
@@ -3056,7 +3074,7 @@ class BatchedREMD2D:
 
                     # Write forces only to the selected P beads; unselected replicas keep zero Tri force.
                     f_tri_full = torch.zeros_like(pos)
-                    p_idx = torch.arange(0, 3 * L, 3, device=dev)
+                    p_idx = 3 * _arange_dev(L, dev)
                     f_tri_raw = torch.tensor(
                         _tri_cpu_force_cache, dtype=torch.float32, device=dev)
                     f_tri_raw = f_tri_raw * tri_force_mask_t[:, None, None]

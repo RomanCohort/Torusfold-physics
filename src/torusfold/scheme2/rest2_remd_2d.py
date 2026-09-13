@@ -120,9 +120,15 @@ def try_exchange_2d(
             b = (ri + 1) * n_lam + cj
             if a not in energies or b not in energies:
                 continue
+            # delta = (beta_a - beta_b)(E_a - E_b) IS the Metropolis exponent, so the test is
+            # accept = min(1, exp(delta)). This read exp(-expo) -- the reciprocal -- which
+            # accepted unconditionally in exactly the cases that should usually be rejected,
+            # driving low-energy configurations onto the hot rungs and high-energy ones onto the
+            # cold rung that gets sampled. The lambda axis below uses the same exp(expo) form
+            # with d_lam = lam_a - lam_b; the two axes now share one convention.
             d_beta = _beta(temps[ri]) - _beta(temps[ri + 1])
             expo = np.clip(d_beta * (energies[a] - energies[b]), -30, 30)
-            if expo <= 0 or np.random.rand() < np.exp(-expo):
+            if expo >= 0 or np.random.rand() < np.exp(expo):
                 accepted.append((a, b))
 
     # ── Lambda axis: horizontal neighbor pairs within each row ──
@@ -137,9 +143,10 @@ def try_exchange_2d(
                 u_a, u_b = solute_energies[a], solute_energies[b]
             else:
                 u_a, u_b = energies[a], energies[b]  # approximation (equivalent when CG is fully solute)
-            d_lam = lambdas[cj + 1] - lambdas[cj]
+            # lam_a - lam_b, matching the exp(expo) convention used by the temperature axis.
+            d_lam = lambdas[cj] - lambdas[cj + 1]
             expo = np.clip(_beta(temps[ri]) * d_lam * (u_a - u_b), -30, 30)
-            if expo <= 0 or np.random.rand() < np.exp(-expo):
+            if expo >= 0 or np.random.rand() < np.exp(expo):
                 accepted.append((a, b))
 
     return accepted
@@ -160,9 +167,15 @@ def odd_parity_exchange(
             b = (ri + 1) * n_lam + cj
             if a not in energies or b not in energies:
                 continue
+            # delta = (beta_a - beta_b)(E_a - E_b) IS the Metropolis exponent, so the test is
+            # accept = min(1, exp(delta)). This read exp(-expo) -- the reciprocal -- which
+            # accepted unconditionally in exactly the cases that should usually be rejected,
+            # driving low-energy configurations onto the hot rungs and high-energy ones onto the
+            # cold rung that gets sampled. The lambda axis below uses the same exp(expo) form
+            # with d_lam = lam_a - lam_b; the two axes now share one convention.
             d_beta = _beta(temps[ri]) - _beta(temps[ri + 1])
             expo = np.clip(d_beta * (energies[a] - energies[b]), -30, 30)
-            if expo <= 0 or np.random.rand() < np.exp(-expo):
+            if expo >= 0 or np.random.rand() < np.exp(expo):
                 accepted.append((a, b))
     for ri in range(n_t):
         for cj in range(1, n_lam - 1, 2):
@@ -175,9 +188,10 @@ def odd_parity_exchange(
                 u_a, u_b = solute_energies[a], solute_energies[b]
             else:
                 u_a, u_b = energies[a], energies[b]
-            d_lam = lambdas[cj + 1] - lambdas[cj]
+            # lam_a - lam_b, matching the exp(expo) convention used by the temperature axis.
+            d_lam = lambdas[cj] - lambdas[cj + 1]
             expo = np.clip(_beta(temps[ri]) * d_lam * (u_a - u_b), -30, 30)
-            if expo <= 0 or np.random.rand() < np.exp(-expo):
+            if expo >= 0 or np.random.rand() < np.exp(expo):
                 accepted.append((a, b))
     return accepted
 

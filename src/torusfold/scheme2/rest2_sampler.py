@@ -159,8 +159,11 @@ def rest2_sample(
                 u_i, u_j = msgs[ri][2], msgs[ri + 1][2]
                 beta_i = 1.0 / (KB * temps[ri])
                 beta_j = 1.0 / (KB * temps[ri + 1])
+                # exponent = (beta_i - beta_j)(u_i - u_j) is the Metropolis exponent itself, so
+                # the test is accept = min(1, exp(exponent)). It read exp(-exponent), which is
+                # the reciprocal and inverted the exchange direction.
                 exponent = np.clip((beta_i - beta_j) * (u_i - u_j), -30.0, 30.0)
-                acc = exponent <= 0 or np.random.rand() < np.exp(-exponent)
+                acc = exponent >= 0 or np.random.rand() < np.exp(exponent)
                 decisions.append(acc)
 
             # apply the swaps: send coordinates to the workers that must exchange

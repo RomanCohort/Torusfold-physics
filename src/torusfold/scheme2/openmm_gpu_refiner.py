@@ -211,6 +211,12 @@ K_CLASH = 300.0       # no declared unit; *10 at use -> 3000 kJ/mol/nm^2 in E = 
 K_BSJ = 800.0         # BSJ closure; RAW at use -> 800 kJ/mol/nm^2 (NOT *100; raised 500->800)
 K_BSJ_GUIDE = 1200.0  # BSJ guide force; RAW at use -> 1200 kJ/mol/nm^2 (NOT *100; raised 800->1200)
 
+# Boltzmann constant in kJ/(mol*K), for the REMD Metropolis criterion. OpenMM energies are in
+# kJ/mol, so beta must be 1/(KB_KJ*T). scipy.constants.k is 1.380649e-23 J/K -- per molecule --
+# and dividing it by 1000 does not convert it: that made beta too large by Avogadro's number,
+# clipping every exponent to +/-30 and reducing the swap test to a deterministic rule.
+KB_KJ = 0.008314462618
+
 # ── Geometric parameters: unit of each AS USED (same rule as the table above) ──
 # The four lengths are declared in Angstroms and divided by 10 at their own use site, so
 # what the force receives is nm.  The two angles are radians and used raw.
@@ -240,6 +246,7 @@ def _build_3bead_system_gpu(
     pair_predictions: Optional[np.ndarray] = None,
     ss_predictions: Optional[np.ndarray] = None,
     bsj_prediction: Optional[float] = None,
+    rng_seed: int = 42,
 ):
     """Build the 3-bead CG OpenMM system (GPU-optimized version).
 
@@ -270,7 +277,11 @@ def _build_3bead_system_gpu(
 
     # Build the 3-bead coordinates: each nt -> P, C4', N
     coords_3bead = np.zeros((N_total, 3), dtype=np.float64)
-    rng = np.random.default_rng(42)
+    # Seeded explicitly so a caller can vary it. This was a hard-coded 42 while
+    # _run_remd_worker seeded the *legacy global* np.random state -- which does not reach a
+    # Generator -- so every worker produced identical C4'/N perturbations despite the worker
+    # docstring claiming otherwise.
+    rng = np.random.default_rng(rng_seed)
     for i in range(L):
         p = p_coords[i]
         coords_3bead[3 * i] = p  # P
@@ -730,13 +741,21 @@ def _run_annealing(
     Returns:
         (final_energy, final_coords_nm)
     """
+    # Capture the per-bond force constants written at build time. Those are
+    # K_PAIR * effective_w * pair_scale, where effective_w carries the bpp probability, the
+    # hard-coded pair weight and the structRFM pair/ss modulation (see the block around :435).
+    # The annealing below used to overwrite each of them with scale*K_PAIR, which threw every
+    # per-pair weight away for the whole schedule.
+    _base_pair_k = [pair_force.getBondParameters(i)[2][0]
+                    for i in range(pair_force.getNumBonds())]
+
     def set_pair_k(scale):
         for i in range(pair_force.getNumBonds()):
             p1, p2, params = pair_force.getBondParameters(i)
-            # Update k, keep r0
+            # Scale the build-time k, keep r0
             pair_force.setBondParameters(
                 i, p1, p2,
-                [scale * K_PAIR, params[1]])
+                [scale * _base_pair_k[i], params[1]])
         pair_force.updateParametersInContext(sim.context)
 
     def set_bsj_k(scale):
@@ -810,14 +829,15 @@ def _run_anneal_worker(
     Returns:
         (final_energy, final_coords_nm)
     """
-    import numpy as _np
-    # Different seeds -> different C4'/N initial perturbations
-    _np.random.seed(42 + worker_idx)
 
     system, coords_nm, pair_force, stack_force, bsj_force, bsj_guide = \
         _build_3bead_system_gpu(
             p_coords, pairs, pair_scale=1.0, bsj_k_scale=0.1 + 0.05 * worker_idx,
-            pair_guide_k=600.0)  # pair-window guide force (raised 300->600), pulls far pairs together
+            pair_guide_k=600.0,  # pair-window guide force (raised 300->600)
+            # Per-worker seed, so the replicas start from different C4'/N perturbations.
+            # This used to be _np.random.seed(42 + worker_idx), which cannot reach the
+            # Generator inside the builder -- all workers started identically.
+            rng_seed=42 + worker_idx)
     topo = _create_3bead_topology(len(p_coords))
 
     integrator = LangevinMiddleIntegrator(
@@ -978,6 +998,22 @@ def _run_parallel_annealing(
 
 # ── T-REMD (multi-temperature replica exchange) ──
 
+def _remd_report_count(n_steps: int, exchange_interval: int) -> int:
+    """How many ("report", ...) messages a REMD worker sends in one round.
+
+    The worker anneals first -- for max(200, 40% of n_steps) steps -- and only then enters the
+    reporting loop, so this is NOT n_steps // exchange_interval. Both masters used that simpler
+    expression and waited for more reports than any worker sends; the surplus recv() returned
+    the worker's final ("done", ...), which the single-round master asserted on and the
+    multistage master folded into energies[] as None, giving a TypeError on the next (ui - uj).
+
+    With the defaults (n_steps=33333, exchange_interval=3333) the worker sends 6 and the old
+    expression expected 10.
+    """
+    n_anneal = max(200, int(n_steps * 0.4))
+    return max(n_steps - n_anneal, exchange_interval) // exchange_interval
+
+
 def _run_remd_worker(
     worker_idx: int,
     p_coords: np.ndarray,       # (L,3) Angstroms, P coordinates
@@ -1024,6 +1060,11 @@ def _run_remd_worker(
         system, coords_nm, _pf = _build_minimal_system_gpu(
             p_coords, pairs, pair_scale=1.0)
         topo = _create_minimal_topology(len(p_coords))
+        # _run_annealing below takes all four force objects, but the minimal system builds only
+        # the pair force. Binding the other three to None here keeps them defined: the call
+        # raised NameError on this branch, and the surrounding `except` printed it as
+        # "anneal skipped" -- so the annealing stage was silently skipped rather than failing.
+        _sf = _bjf = _bjg = None
     else:
         # Each worker builds its own system (different bsj_k_scale adds diversity)
         system, coords_nm, _pf, _sf, _bjf, _bjg = _build_3bead_system_gpu(
@@ -1256,17 +1297,20 @@ def _run_remd(
     Returns:
         (best_energy, best_coords_nm)  # minimal=True: P-only nm; False: 3-bead nm
     """
-    from scipy.constants import k as kB
     import multiprocessing as mp
-
-    # Temperature ladder: 300K -> ~460K (geometric spacing)
-    temperatures = [300.0 * (1.10 ** i) for i in range(n_replicas)]
 
     # Threads per replica: prioritize filling all cores with replicas
     total_threads = os.cpu_count() or 8
     # Memory-aware: measured ~200-300MB per process, so 1.5GB/replica is generous
     n_replicas = _clamp_replicas_by_memory(n_replicas, mem_per_proc_gb=1.5)
     n_replicas, per_replica_threads = _balance_replicas_threads(n_replicas)
+
+    # Temperature ladder: 300K -> ~460K (geometric spacing).
+    # Built AFTER the clamps. It used to be built from the requested n_replicas and then
+    # truncated to the clamped count, so the ladder lost its top rungs and the hottest replica
+    # never reached its design temperature. The multistage path below already clamps first, and
+    # says so in a comment.
+    temperatures = [300.0 * (1.10 ** i) for i in range(n_replicas)]
     if verbose:
         print(f"    REMD: {n_replicas} replicas in parallel, "
               f"{per_replica_threads} threads per replica "
@@ -1313,7 +1357,7 @@ def _run_remd(
             best_energy = msg[2]
 
     # Stage 2: coordinate exchanges
-    n_exchange_points = n_steps // exchange_interval
+    n_exchange_points = _remd_report_count(n_steps, exchange_interval)
     for _ in range(n_exchange_points):
         energies = [None] * n_replicas
         positions = [None] * n_replicas
@@ -1330,8 +1374,8 @@ def _run_remd(
         swap_decisions = [False] * (n_replicas - 1)
         for ri in range(n_replicas - 1):
             ui, uj = energies[ri], energies[ri + 1]
-            beta_i = 1.0 / (kB * temperatures[ri] / 1000.0)
-            beta_j = 1.0 / (kB * temperatures[ri + 1] / 1000.0)
+            beta_i = 1.0 / (KB_KJ * temperatures[ri])
+            beta_j = 1.0 / (KB_KJ * temperatures[ri + 1])
             exponent = np.clip((beta_i - beta_j) * (ui - uj), -30, 30)
             if np.random.random() < min(1.0, np.exp(exponent)):
                 swap_decisions[ri] = True
@@ -1538,7 +1582,6 @@ def _run_multistage_remd(
                   f"{n_replicas} replicas, {n_steps_per_round} steps")
 
         # Use a custom temperature ladder instead of the default 300*1.1^i
-        from scipy.constants import k as kB
         import multiprocessing as mp
 
         # Clamp first, then build the temperatures (avoid a length mismatch in the temperature list)
@@ -1550,6 +1593,10 @@ def _run_multistage_remd(
         n_replicas_clamped, per_replica_threads = _balance_replicas_threads(n_replicas_clamped)
         n_replicas = n_replicas_clamped
 
+        # Named once and shared with the worker spawn and with _remd_report_count below: the
+        # master must wait for exactly as many reports as the workers send.
+        exchange_interval = max(10, n_steps_per_round // 10)
+
         ctx = mp.get_context("spawn")
         processes = []
         conns = []
@@ -1558,7 +1605,7 @@ def _run_multistage_remd(
             p = ctx.Process(
                 target=_run_remd_worker,
                 args=(ri, best_pos, pairs, temperatures[ri], n_steps_per_round,
-                      max(10, n_steps_per_round // 10), per_replica_threads,
+                      exchange_interval, per_replica_threads,
                       child_conn, False,  # full force-field REMD
                       sequence, use_trirnasp, trirnasp_energy_dir,
                       trirnasp_scale, trirnasp_update_freq),
@@ -1579,7 +1626,7 @@ def _run_multistage_remd(
             if msg[0] == "init" and msg[2] < round_best_e:
                 round_best_e = msg[2]
 
-        n_ex = n_steps_per_round // max(10, n_steps_per_round // 10)
+        n_ex = _remd_report_count(n_steps_per_round, exchange_interval)
         for _ in range(n_ex):
             energies = [None] * n_replicas
             positions = [None] * n_replicas
@@ -1595,8 +1642,8 @@ def _run_multistage_remd(
             swap_decisions = [False] * (n_replicas - 1)
             for ri in range(n_replicas - 1):
                 ui, uj = energies[ri], energies[ri + 1]
-                beta_i = 1.0 / (kB * temperatures[ri] / 1000.0)
-                beta_j = 1.0 / (kB * temperatures[ri + 1] / 1000.0)
+                beta_i = 1.0 / (KB_KJ * temperatures[ri])
+                beta_j = 1.0 / (KB_KJ * temperatures[ri + 1])
                 exponent = np.clip((beta_i - beta_j) * (ui - uj), -30, 30)
                 if np.random.random() < min(1.0, np.exp(exponent)):
                     swap_decisions[ri] = True

@@ -141,10 +141,21 @@ def torch_gpu_refine(
                 opt = torch.optim.Adam([pos_3bead], lr=1e-3)
                 for step in range(2000):
                     opt.zero_grad()
-                    e, _ = cg_energy_forces(pos_3bead, pairs_t, pw)
+                    e, f = cg_energy_forces(pos_3bead, pairs_t, pw)
                     if not torch.isfinite(e).all():
                         raise RuntimeError(f"pre-fold stage {stage + 1} energy not finite")
-                    e.sum().backward()
+                    # Take the gradient from the returned force, not from e.sum().backward().
+                    #
+                    # cg_energy_forces adds the GB/SA and Manning energies with .detach()
+                    # (torch_cgsim.py:1442/1468), so they are constants as far as autograd is
+                    # concerned: backward() over e produced a gradient containing every term's
+                    # force EXCEPT the solvation one, while e itself still contained the
+                    # solvation energy. Adam was therefore descending a field that is not
+                    # -dE/dx. total_F carries all terms, and grad = -force.
+                    #
+                    # Note total_F is the capped force (torch_cgsim.py:1500+), so this is the
+                    # same field the dynamics below integrate, which is the point.
+                    pos_3bead.grad = (-f).clone()
                     if pos_3bead.grad is None or not torch.isfinite(pos_3bead.grad).all():
                         raise RuntimeError(f"pre-fold stage {stage + 1} gradient not finite")
                     opt.step()

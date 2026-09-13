@@ -59,8 +59,8 @@ def row(name, target, measured, const, unit="nm", angle=False):
 
 
 row("P-P backbone bond", C.BOND_P_NEXT, d(P[:-1], P[1:]), "K_BB 500")
-row("P-C4' intra-bead", C.BOND_P_C4, d(P, C4), "K_INTRA 400")
-row("C4'-N intra-bead", C.BOND_C4_N, d(C4, NN), "K_INTRA 400")
+row("P-C4' intra-bead", C.BOND_P_C4, d(P, C4), f"K_INTRA_PC {C.K_INTRA_PC:g}")
+row("C4'-N intra-bead", C.BOND_C4_N, d(C4, NN), f"K_INTRA_CN {C.K_INTRA_CN:g}")
 row("N-N WC pair (harmonic)", C.PAIR_NN, d(NN[pi], NN[pj]), "K_PAIR 600")
 row("N-N WC pair (bpp)", C.PAIR_NN, d(NN[pi], NN[pj]), "K_BPP/w = 2000")
 row("P-P WC pair (guide)", C.PAIR_NN, d(P[pi], P[pj]), "K_PAIR_GUIDE/0.2 = 500")

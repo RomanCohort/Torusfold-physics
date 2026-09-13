@@ -77,7 +77,7 @@ for label, sample in regimes.items():
 # constants as they currently read
 print("=" * 88)
 print("constants as shipped now")
-for name in ("K_BB", "K_INTRA", "K_PAIR", "K_STACK", "K_ANGLE", "K_DIH", "K_CLASH",
+for name in ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_PAIR", "K_STACK", "K_ANGLE", "K_DIH", "K_CLASH",
              "K_BSJ", "K_BSJ_GUIDE", "K_PAIR_GUIDE", "K_BSJ_CONTACT", "K_BPP", "K_MG"):
     print(f"  {name:16s} {getattr(C, name, float('nan')):>10.3f}")
 print()

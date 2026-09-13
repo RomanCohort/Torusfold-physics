@@ -36,7 +36,7 @@ N_DECOY = 2
 SEED = 20260216
 FACTORS = (0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0)
 
-KNAMES = ["K_BB", "K_INTRA", "K_ANGLE", "K_DIH", "K_STACK", "K_PAIR",
+KNAMES = ["K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_ANGLE", "K_DIH", "K_STACK", "K_PAIR",
           "K_PAIR_GUIDE", "K_BSJ", "K_BSJ_GUIDE", "K_BSJ_CONTACT", "K_BPP"]
 BONDED = ("bb bond P-P", "intra P-C4'", "intra C4'-N",
           "angle P-P-P", "dihedral P-P-P-P", "stacking P-P")

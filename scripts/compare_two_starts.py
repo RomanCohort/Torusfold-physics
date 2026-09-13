@@ -130,25 +130,26 @@ if Ja and Jb:
 
 print()
 print("=== verdict (per-coordinate, team-lead criteria) ===")
-# A coordinate is flagged "still drifting" when its net motion over the window (|slope| x 7
-# blocks) is not small against its own block-to-block spread: a run whose mean moves more than a
-# quarter of its block noise over the window has not settled. This is the threshold reported.
-DRIFT = 0.25
+# "Still drifting" means the mean is moving by a meaningful fraction of ITSELF over the window:
+# net motion |slope| x 7 blocks vs 3 percent of the terminal value. A max-min block range is a
+# noisy ruler (8 points), and it mis-flags a settled coordinate whose blocks merely wiggle; a
+# relative threshold asks the physically right question -- "is this number still changing?"
+DRIFT = 0.03
 have_b = any(tb.get(c, float("nan")) == tb.get(c, float("nan")) for c in COORDS)
 for c in COORDS:
     a, b = ta.get(c, float("nan")), tb.get(c, float("nan"))
     rel = abs(b - a) / a if a and a == a and b == b else float("nan")
     sa, sb = slope(ba.get(c, [])), slope(bb.get(c, []))
-    ra = max(ba.get(c, [0.0])) - min(ba.get(c, [0.0])) if ba.get(c) else float("nan")
-    rb = max(bb.get(c, [0.0])) - min(bb.get(c, [0.0])) if bb.get(c) else float("nan")
-    drift_a = abs(sa) * 7 > DRIFT * ra if (sa == sa and ra == ra and ra > 0) else False
-    drift_b = abs(sb) * 7 > DRIFT * rb if (sb == sb and rb == rb and rb > 0) else False
+    drift_a = abs(sa) * 7 > DRIFT * abs(a) if (sa == sa and a and a == a) else False
+    drift_b = abs(sb) * 7 > DRIFT * abs(b) if (sb == sb and b and b == b) else False
     if not have_b:
         verdict = "B not yet run"
-    elif drift_a and drift_b:
-        verdict = "cannot separate (BOTH still drifting)"
     elif rel > 0.20:
         verdict = "NOT ergodic (differ >20%)"
+    elif drift_a and drift_b:
+        verdict = "agrees, but BOTH still drifting (endpoint not final)"
+    elif drift_a or drift_b:
+        verdict = "agrees, but one start still drifting"
     else:
         verdict = "ergodic (agree within spread)"
     print(f"  {c:9s} A={a:.3f} B={b:.3f} rel={rel:.1%} "

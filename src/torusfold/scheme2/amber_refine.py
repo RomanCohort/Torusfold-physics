@@ -618,7 +618,11 @@ def _amber_refine_impl(
         cj = atom_lookup.get((j + 1, "C1'"))
         if ci is None or cj is None:
             continue
-        pair_force.addBond(ci, cj, [0.106])
+        # 1.06 nm, not 0.106: CustomBondForce lengths are nm and the C1'-C1' target is 10.6 A
+        # (see the module header and the final annealing stage below). The literal used to be
+        # 0.106, which only stayed hidden because the default annealing overwrites r0 -- but
+        # passing pair_anneal_stages=[] skips that and leaves this value live.
+        pair_force.addBond(ci, cj, [1.06])
     system.addForce(pair_force)
 
     # --- Force 4: A-form dihedral restraints (backbone torsions) ---

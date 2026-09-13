@@ -77,7 +77,7 @@ print(f"{'coordinate':10s} {'K in library':>13s} {'kBT/s_between^2':>16s} "
       f"{'kBT/s_within^2':>16s} {'kBT/s_pool^2':>14s}")
 print("-" * 74)
 import torusfold.scheme2.torch_cgsim as C   # noqa: E402
-K = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA, "intra_cn": C.K_INTRA,
+K = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_CN,
      "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
 for c in B.COORDS:
     ps = per_struct[c]

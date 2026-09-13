@@ -94,7 +94,8 @@ def main():
             f"{manifest} not found. Without it there is no record of which potential produced "
             f"these histograms, and a non-table potential has no U_i for the update to add to. "
             f"Re-run the sampling with --write so the manifest is written.")
-    _pots = json.loads(manifest.read_text(encoding="utf-8")).get("potentials", {})
+    _manifest = json.loads(manifest.read_text(encoding="utf-8"))
+    _pots = _manifest.get("potentials", {})
     for c in coords:
         spec = _pots.get(c)
         if spec is None:
@@ -142,6 +143,20 @@ def main():
                      "max_abs_dU": (float(max(abs(res.dU))) if res.table is not None else None),
                      "diagnostics": {k: (float(v) if isinstance(v, (int, float, np.floating))
                                          else v) for k, v in res.diagnostics.items()}}
+
+    # Carry the sampler's fingerprint into the update's own record.
+    #
+    # ibi_round0.py takes care to write it, and this script read only manifest["potentials"] --
+    # so the produced table carried no record of which force field, seed or round produced the
+    # histograms it was derived from. With a patched field (the K_BSJ=0 probes) that is the
+    # difference between a result and an unattributable one. The `_source` key does not collide
+    # with any coordinate name in B.COORDS.
+    report["_source"] = {
+        "manifest": str(manifest),
+        "cmdline": _manifest.get("cmdline"),
+        "seed": _manifest.get("seed"),
+        "fingerprint": _manifest.get("fingerprint"),
+    }
 
     if not new_tables:
         print("every coordinate was refused; nothing written. That is a measurement: the round "
