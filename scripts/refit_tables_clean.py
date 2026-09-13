@@ -63,9 +63,19 @@ for name in B.COORDS:
     print(f"{name:12s} {len(v):7d} {sd:9.4f} {k_match:12.1f} {K_HARM[name]:10.1f} "
           f"{ratios[name]:13.4f}")
 print()
-lo = min(ratios.values())
-hi = max(ratios.values())
+# Only coordinates that actually carry a shipped spring can be in this span. K_STACK is
+# deliberately 0 (torch_cgsim: "redundant, see above"), so its ratio is 0 -- which made
+# lo = 0 and hi/lo a ZeroDivisionError, crashing the script before it saved anything. The
+# shipped .npz predates this line, so the failure was invisible: the tables of record had
+# simply not been regenerated since.
+active = {n: r for n, r in ratios.items() if K_HARM[n] != 0.0}
+lo = min(active.values())
+hi = max(active.values())
 print(f"shipped k over the data-derived k spans {lo:.4f} to {hi:.1f}, a factor of {hi/lo:,.0f}")
+inactive = [n for n in ratios if K_HARM[n] == 0.0]
+if inactive:
+    print(f"  ({', '.join(inactive)} carries no shipped spring, so its ratio is 0 by "
+          f"construction and it is excluded from that span)")
 print("values below 1 mean the shipped spring is too soft to reproduce the observed spread;")
 print("values above 1 mean it is too stiff.")
 print()
