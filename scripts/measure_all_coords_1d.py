@@ -85,8 +85,9 @@ def main():
 
     specs = [
         ("bb_bond", "distance", C.K_BB, C.BOND_P_NEXT),
-        ("intra_pc", "distance", C.K_INTRA_PC, C.BOND_P_C4),
-        ("intra_cn", "distance", C.K_INTRA_CN, C.BOND_C4_N),
+        # No intra_pc / intra_cn rows: those two distances are rigid constraints now and have
+        # no harmonic k to sample at. Sampling them "1-D" would mean sampling a coordinate the
+        # dynamics holds fixed, which returns a delta function and nothing else.
         ("angle", "angle-cos", C.K_ANGLE, np.cos(C.ANGLE_PPP)),
         ("dihedral", "torsion-cos", C.K_DIH, np.cos(C.DIH_PPPP)),
         ("stack", "distance", C.K_STACK, C.STACK_R0),

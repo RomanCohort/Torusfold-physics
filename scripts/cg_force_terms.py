@@ -52,12 +52,18 @@ def term_energies_forces(pos_nm, pairs_ij, pair_w=None, cell_list=None):
     e, f = C._bond_f(pos_nm, P(idx), P(idx + 1), C.K_BB, C.BOND_P_NEXT)
     add("bb bond P-P", f, e)
 
-    # 2/3. intra-bead
+    # 2/3. P-C4' and C4'-N are GONE from this decomposition, and their absence is the point.
+    #
+    # They used to be two more `_bond_f` calls here, at K_INTRA_PC / K_INTRA_CN. Those constants
+    # are deleted: the distances are held rigid by SHAKE/RATTLE (rigid_bonds.py), so they carry
+    # no force this decomposition could name. There is deliberately no "intra P-C4'" entry with a
+    # zero force -- a zero would read as "the term is present and happens to be switched off",
+    # which is the confusion the deleted constant is meant to make impossible.
+    #
+    # Consequence for a caller: this dict is no longer a complete decomposition of
+    # cg_energy_forces. The two missing entries are not missing energy -- the field has no such
+    # term, so the sum over the remaining names is still exact.
     r = torch.arange(L, device=dev)
-    e1, f1 = C._bond_f(pos_nm, P(r), C4(r), C.K_INTRA_PC, C.BOND_P_C4)
-    e2, f2 = C._bond_f(pos_nm, C4(r), NN(r), C.K_INTRA_CN, C.BOND_C4_N)
-    add("intra P-C4'", f1, e1)
-    add("intra C4'-N", f2, e2)
 
     # 3b. the three backbone pairs nothing else covers (see C.K_INTRA_PN). The two that cross a
     # backbone link stop at L-1 for the reason recorded in C.cg_energy_forces.

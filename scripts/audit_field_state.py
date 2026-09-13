@@ -20,7 +20,11 @@ import cg_force_terms as FT           # noqa: E402
 C.ALLOW_ALTERNATE_FIELDS = True
 
 GROUP = {
-    "bonded": ("K_BB", "BOND_P_NEXT", "K_INTRA_PC", "K_INTRA_CN", "K_INTRA_PN",
+    # K_INTRA_PC / K_INTRA_CN are absent because they no longer exist: P-C4' and C4'-N are rigid
+    # constraints now (rigid_bonds.py), and the constants were deleted rather than zeroed. The
+    # two distances still have live TARGETS, printed just below as BOND_P_C4 / BOND_C4_N --
+    # the target is what a constrained model has instead of a spring constant.
+    "bonded": ("K_BB", "BOND_P_NEXT", "K_INTRA_PN",
                "K_LINK_CP", "K_LINK_NP", "K_LINK_NC",
                "K_ANGLE", "ANGLE_PPP", "K_DIH", "DIH_PPPP", "K_STACK", "STACK_R0"),
     "nonbonded": ("K_PAIR", "PAIR_NN", "K_PAIR_GUIDE", "K_BPP", "K_CLASH", "CLASH_SIGMA"),
@@ -32,6 +36,11 @@ for g, names in GROUP.items():
     for n in names:
         v = getattr(C, n, "<MISSING>")
         print(f"    {n:16s} {v}")
+print(f"--- constrained (no spring; a target and a solver instead) ---")
+for n in ("BOND_P_C4", "BOND_C4_N"):
+    print(f"    {n:16s} {getattr(C, n, '<MISSING>')}")
+print(f"    {'make_intra_constraints':16s} {C.make_intra_constraints(1).describe()}")
+print()
 print(f"--- numerics ---")
 print(f"    {'force_cap':16s} {inspect.signature(C.cg_energy_forces).parameters['force_cap'].default}")
 print(f"    {'CLASH_DIST':16s} {getattr(C, 'CLASH_DIST', '<MISSING>')}  (retired)")

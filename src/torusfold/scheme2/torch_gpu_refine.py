@@ -134,6 +134,29 @@ def torch_gpu_refine(
             pairs_t = torch.tensor([(i, j) for i, j, _ in pairs], dtype=torch.long, device=dev) if pairs else torch.zeros(0, 2, dtype=torch.long, device=dev)
             pw = torch.tensor([w for _, _, w in pairs], dtype=torch.float64, device=dev) if pairs else torch.zeros(0, dtype=torch.float64, device=dev)
 
+            # Intra-residue rigid distances.
+            #
+            # cg_energy_forces no longer carries a P-C4' or C4'-N term: those two are rigid
+            # constraints now (see the K_BB comment in torch_cgsim.py). A Langevin sampler gets
+            # them from batch_langevin_step, but this is an Adam minimiser, and SHAKE has no
+            # place inside a gradient step. So the distance is enforced AFTER each step instead,
+            # which makes this projected gradient descent.
+            #
+            # It has to be here at all: without it C4'(i) is held only by K_LINK_CP and C4'(L-1)
+            # by nothing, so the folding would run on a field in which two of the three beads of
+            # every nucleotide are free to drift. Only the P beads are returned below, so the
+            # drift would not show in the output -- it would show as forces on P that came from a
+            # geometry no sampler would ever visit.
+            #
+            # Adam's momentum carries across the projection, so this is not a true projected
+            # method: the search direction may point off the constraint manifold and be clipped
+            # back. That is acceptable here because the projection moves the coordinates by ~the
+            # step size when the constraints are already close to satisfied, which they are after
+            # the first step.
+            from .torch_cgsim import make_intra_constraints
+            con = make_intra_constraints(L)
+            pos_3bead.data = con.shake(pos_3bead.data)
+
             # 6-stage temperature annealing
             fold_temps = [400.0, 350.0, 325.0, 310.0, 300.0, 300.0]
             for stage, T in enumerate(fold_temps):
@@ -160,6 +183,10 @@ def torch_gpu_refine(
                         raise RuntimeError(f"pre-fold stage {stage + 1} gradient not finite")
                     opt.step()
                     pos_3bead.data.clamp_(-1.0, 10.0)
+                    # Projected gradient descent: back onto the constraint manifold after the
+                    # unconstrained step. See the note above con for why this is not exact and
+                    # why it is still the right thing here.
+                    pos_3bead.data = con.shake(pos_3bead.data)
                     if not torch.isfinite(pos_3bead).all():
                         raise RuntimeError(f"pre-fold stage {stage + 1} coordinates not finite")
                 pos_3bead = pos_3bead.detach()

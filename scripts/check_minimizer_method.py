@@ -39,7 +39,16 @@ import boltzmann_bonded as B          # noqa: E402
 import torusfold.scheme2.torch_cgsim as C   # noqa: E402
 
 MAXITS = [int(a) for a in sys.argv[1:]] or [1500, 6000]
-FLOOR = 236.3                          # sqrt(K_INTRA_PC * kBT), the stated force floor
+# sqrt(k * kBT): the force a harmonic at this stiffness exerts when the coordinate is one
+# thermal width from its target, i.e. the scale at which the field stops being gentle.
+#
+# It was 236.3 = sqrt(K_INTRA_PC * kBT). K_INTRA_PC is deleted -- P-C4' is a rigid constraint
+# now -- and the stiffest harmonic BONDED term left is C4'(i)-P(i+1), so the floor moves to
+# sqrt(9574.4 * 2.494) = 154.5. Read live rather than pasted, because the whole failure this
+# number guards against is a constant being retuned and the guard not following. K_CLASH is
+# stiffer still (20000) but it is a wall, not a harmonic, and sqrt(k*kBT) is not its scale --
+# its force is bounded by construction and reported separately.
+FLOOR = float(np.sqrt(C.K_LINK_CP * 2.494))
 CAP = 5000.0                           # = inspect.signature(C.cg_energy_forces)['force_cap'].default
 
 pool = [s for s in B.load_structures(limit=400) if len(s["pairs"]) >= 8 and 24 <= len(s["pos"]) <= 34]
@@ -132,7 +141,8 @@ print(f"{s0['name']}  L={L} / {NB} beads / {len(ij)} WC pairs")
 print(f"start: E = {e0:.2f} kJ/mol, max|F| = {float(torch.linalg.norm(f0.reshape(-1,3),dim=-1).max()):.2f}")
 print(f"minimising on the uncapped potential (as check_field_after_fix.py does); the shipped cap is "
       f"{CAP:.0f}")
-print(f"harmonic force floor sqrt(K_INTRA_PC*kBT) = {FLOOR} kJ/mol/nm")
+print(f"harmonic force floor sqrt(K_LINK_CP*kBT) = {FLOOR:.1f} kJ/mol/nm "
+      f"(the stiffest remaining bonded spring; P-C4'/C4'-N are rigid constraints)")
 print()
 print(f"{'method':>30s} {'max_iter':>8s} {'iters':>7s} {'restart':>7s} {'E':>10s} "
       f"{'max|F|':>9s} {'vs floor':>9s} {'would clip':>10s}")

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import functools
 import math
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -133,20 +133,32 @@ except ImportError:
 # is already too NARROW and gets narrower. A single k cannot fix six coordinates at once; that is
 # the measured case for IBI, not an argument against this change.
 K_BB = 1122.4       # P-P backbone bond, kBT/sigma^2; was 500.0, see above
-# Intra-residue bonds. Split, because they are not the same spring and were sharing one number.
-# Reference spreads over 126 gap-free chains, results/boltzmann_tables_clean.npz:
-#   P-C4'  sigma = 0.010963 nm  ->  kBT/sigma^2 = 20752.7 kJ/mol/nm^2
-#   C4'-N  sigma = 0.008278 nm  ->  kBT/sigma^2 = 36399.2 kJ/mol/nm^2
-# The single value these replace was 400, i.e. 52x and 91x too soft. This criterion is exact
-# here rather than an extrapolation: C4' appears only in these two bonds and the clash term,
-# N only in these two plus pairing, bpp and clash, and the clash repulsion does not fire at
-# native geometry (closest bead pair 0.309 nm against a 0.300 nm cutoff). So each is a
-# one-dimensional harmonic whose thermal width is sqrt(kBT/k), and nothing else competes.
-K_INTRA_PC = 20752.7   # P-C4'
-K_INTRA_CN = 36399.2   # C4'-N
-# The four backbone pairs nothing else covers. The 3-bead nucleotide is P-C4'-N9/N1, so its only
-# bonds are the two above, and the excluded volume skips |i-j| <= 2 in both the cell list and the
-# O(N^2) mask. Enumerating every bead pair at gap 1, 2 and 3 (scripts/audit_intra_residue_pairs.py,
+# P-C4' AND C4'-N ARE NOT HERE. They are RIGID CONSTRAINTS now, not springs, and the constants
+# that used to hold them (K_INTRA_PC = 20752.7, K_INTRA_CN = 36399.2) are deleted rather than
+# retired to zero, so that any surviving reference raises instead of quietly doing nothing.
+#
+# They were kBT/sigma^2 with sigma = 0.010963 nm and 0.008278 nm -- 0.11 A and 0.08 A -- which is
+# BELOW the 0.1-0.3 A coordinate-error floor of the PDB data they were fitted on. So they measured
+# how tightly refinement restrained those two distances, not how wide thermal motion makes them,
+# and no larger or cleaner dataset fixes that: the noise is bigger than the signal, at every
+# resolution. Refitting on the expanded 439-structure set gives a bb_bond k 21% lower for the same
+# reason, which is why that refit was never applied either.
+#
+# What replaces them is a constraint: |P-C4'| held at 0.390 nm and |C4'-N| at 0.335 nm exactly, by
+# SHAKE/RATTLE in the integrator (rigid_bonds.py, wired at the bottom of batch_langevin_step).
+# A constraint has no width, so there is no number left to calibrate. See
+# memory/spring-criterion-resolution-confounded.md for the measurement that forced this.
+#
+# The consequence for every caller: this field no longer holds those two distances. A caller that
+# runs DYNAMICS must pass a constraint set to batch_langevin_step, and a caller that MINIMISES
+# must project onto the constraint manifold after each step -- otherwise C4'(i) is held only by
+# K_LINK_CP and C4'(L-1) by nothing at all. The three consumers in src/ (BatchedREMD2D,
+# metadynamics_gpu, torch_gpu_refine) all do one or the other.
+# The four backbone pairs nothing else covers. The 3-bead nucleotide is P-C4'-N9/N1, so within a
+# residue its only distances are P-C4' and C4'-N -- which are constraints now, contributing no
+# energy -- plus the pair below, and the excluded volume skips |i-j| <= 2 in both the cell list
+# and the O(N^2) mask. Enumerating every bead pair at gap 1, 2 and 3
+# (scripts/audit_intra_residue_pairs.py,
 # nine classes, derived from the bead indexing rather than listed by hand) leaves four with no
 # bonded term AND no excluded volume:
 #     P(i)-N9/N1(i)      |i-j| = 2
@@ -396,11 +408,17 @@ DIH_PPPP = math.acos(0.975)
 #
 # It replaces a one-sided LINEAR spring, E = 0.5*K_CLASH*max(0, 0.300 - d)^2, whose force was
 # bounded: |F| <= K_CLASH*0.300 = 150 kJ/mol/nm, reached only at full overlap and never
-# exceeded. A C4' bead is held by two intra-residue bonds (K_INTRA_PC = 20752.7, K_INTRA_CN =
-# 36399.2 kJ/mol/nm^2) and by this term, so the spring was being asked to hold back driving
-# forces up to 4718 kJ/mol/nm (scripts/measure_force_cap_headroom.py, cap off). A bounded
-# repulsion cannot exclude anything; the old one only looked like it worked because its range,
-# 0.300 nm, is below every distance native structures reach, and so it never fired at all.
+# exceeded. A C4' bead is held by two intra-residue bonds -- then springs at K_INTRA_PC = 20752.7
+# and K_INTRA_CN = 36399.2 kJ/mol/nm^2, now the rigid constraints at 0.390 and 0.335 nm -- and by
+# this term, so the linear spring was being asked to hold back driving forces up to 4718
+# kJ/mol/nm (scripts/measure_force_cap_headroom.py, cap off). A bounded repulsion cannot exclude
+# anything; the old one only looked like it worked because its range, 0.300 nm, is below every
+# distance native structures reach, and so it never fired at all.
+#
+# The constraint form makes the argument stronger rather than weaker, which is worth stating
+# because it is the opposite of the usual intuition: a constraint exerts EXACTLY the force the
+# geometry demands, however large, so there is no bound at all on what holds C4' in place. The
+# numbers above are kept as the record of what the springs were, not as live values.
 #
 # CLASH_SIGMA is measured. Over the database (191 PDB files, 126 gap-free chains, loader
 # scripts/boltzmann_bonded.py) the 213732 non-bonded P-P pairs -- residue index gap >= 3, the
@@ -651,11 +669,18 @@ _clash_nlist = _ClashNeighborList()
 # NAMES, so a caller who reaches for one of them gets a different potential and nothing said so.
 # Measured on 1L2X (L=27, 16 WC pairs) at ONE geometry, force_cap=None:
 #
-#     cg_energy_forces               1358.5544 kJ/mol     <- the production field
-#     cg_forces_explicit_batched    -1107.1753 kJ/mol     ratio -0.8150
-#     cg_forces_explicit            -1107.1753 kJ/mol     ratio -0.8150
-#     cg_energy_3bead               -6978.6758 kJ/mol     ratio -5.1368
+#     cg_energy_forces               3622.6509 kJ/mol     <- the production field
+#     cg_forces_explicit_batched     -150.1289 kJ/mol     ratio -0.0414
+#     cg_forces_explicit             -150.1289 kJ/mol     ratio -0.0414
+#     cg_energy_3bead                1153.2234 kJ/mol     ratio  0.3183
 #     cg_energy / cg_forces_autograd  1 bead per residue, not the 3-bead layout at all
+#
+# These were re-measured when P-C4' and C4'-N stopped being springs (see K_BB above): the
+# production field lost two harmonic terms, which at that geometry were contributing +2264
+# kJ/mol between them, so 1358.5544 became 3622.6509. The two explicit paths moved much further
+# -- -1107.1753 to -150.1289 -- because they are the ones whose sums the missing terms had been
+# dominating. The ratios are the finding, not the absolute values: they say the five entry
+# points are still five different potentials, which is why the guard exists.
 #
 # (scripts/audit_field_state.py reproduces that table.) None of the five has a caller anywhere in
 # src/. They are kept because tests/test_clash_single_potential.py, tests/test_ff_bonded_targets.py
@@ -669,16 +694,16 @@ _ALTERNATE_WHY = {
                  "3-bead (P/C4'/N9-N1) and does not have the same term list.",
     "cg_forces_autograd": "cg_forces_autograd differentiates cg_energy, which is a "
                           "ONE-BEAD-PER-RESIDUE model, not the 3-bead production field.",
-    "cg_energy_3bead": "cg_energy_3bead is 3-bead but a different field: measured -6978.6758 "
-                       "kJ/mol against cg_energy_forces's 1358.5544 on the same geometry, a "
-                       "ratio of -5.1368.",
+    "cg_energy_3bead": "cg_energy_3bead is 3-bead but a different field: measured 1153.2234 "
+                       "kJ/mol against cg_energy_forces's 3622.6509 on the same geometry, a "
+                       "ratio of 0.3183.",
     "cg_forces_explicit_batched": "cg_forces_explicit_batched is a different field: measured "
-                                  "-1107.1753 kJ/mol against cg_energy_forces's 1358.5544 on the "
-                                  "same geometry, a ratio of -0.8150. It is missing bpp, pair "
+                                  "-150.1289 kJ/mol against cg_energy_forces's 3622.6509 on the "
+                                  "same geometry, a ratio of -0.0414. It is missing bpp, pair "
                                   "guide and BSJ contact, and its GB coefficients differ by 4x.",
-    "cg_forces_explicit": "cg_forces_explicit is a different field: measured -1107.1753 kJ/mol "
-                          "against cg_energy_forces's 1358.5544 on the same geometry, a ratio of "
-                          "-0.8150. It is missing bpp, pair guide and BSJ contact, and its GB "
+    "cg_forces_explicit": "cg_forces_explicit is a different field: measured -150.1289 kJ/mol "
+                          "against cg_energy_forces's 3622.6509 on the same geometry, a ratio of "
+                          "-0.0414. It is missing bpp, pair guide and BSJ contact, and its GB "
                           "coefficients differ by 4x.",
 }
 
@@ -801,7 +826,7 @@ def cg_energy_3bead(
 
     Force-field terms:
       backbone bond P-P        K_BB
-      intra-bead bond P-C4'/C4'-N K_INTRA_PC / K_INTRA_CN
+      intra-bead P-C4' / C4'-N   RIGID CONSTRAINTS, no energy term (see rigid_bonds.py)
       intra-residue 1-3 P-N9/N1  K_INTRA_PN
       backbone link C4'(i)-P(i+1) / N9/N1(i)-P(i+1) / N9/N1(i)-C4'(i+1)
                                    K_LINK_CP / K_LINK_NP / K_LINK_NC
@@ -837,20 +862,16 @@ def cg_energy_3bead(
     d_bb = dist[:, P(idx_a), P(idx_a + 1)]                  # (B,L-1)
     e_bb = 0.5 * K_BB * (d_bb - BOND_P_NEXT) ** 2
 
-    # ── Intra-bead bonds ──
+    # ── The four pairs nothing else covers (see K_INTRA_PN) ──
+    # P-C4' and C4'-N are constraints now and have no energy here; only these four remain.
+    # The two that cross a backbone link stop at L-1: the constants are fitted on a linear
+    # database, which has no closure link, and the closure is already held by K_BSJ. Wrapping
+    # them onto residue 0 would add a term the fit has no observation for, and on a chain whose
+    # ends are far apart it would add strain on top of what K_BSJ already carries.
     all_res = _arange_dev(L, dev)
-    d_pc = dist[:, P(all_res), C4(all_res)]
-    d_cn = dist[:, C4(all_res), NN(all_res)]
-    e_intra = (0.5 * K_INTRA_PC * (d_pc - BOND_P_C4) ** 2).sum(dim=-1) \
-        + (0.5 * K_INTRA_CN * (d_cn - BOND_C4_N) ** 2).sum(dim=-1)
-    # The three pairs nothing else covers (see K_INTRA_PN). The two that cross a backbone link
-    # stop at L-1: the constants are fitted on a linear database, which has no closure link, and
-    # the closure is already held by K_BSJ. Wrapping them onto residue 0 would add a term the fit
-    # has no observation for, and on a chain whose ends are far apart it would add strain on top
-    # of what K_BSJ already carries.
     _li = _arange_dev(L - 1, dev)
-    e_intra = e_intra \
-        + (0.5 * K_INTRA_PN * (dist[:, P(all_res), NN(all_res)] - BOND_INTRA_PN) ** 2
+    e_intra = \
+        (0.5 * K_INTRA_PN * (dist[:, P(all_res), NN(all_res)] - BOND_INTRA_PN) ** 2
            ).sum(dim=-1) \
         + (0.5 * K_LINK_CP * (dist[:, C4(_li), P(_li + 1)] - BOND_LINK_CP) ** 2).sum(dim=-1) \
         + (0.5 * K_LINK_NP * (dist[:, NN(_li), P(_li + 1)] - BOND_LINK_NP) ** 2).sum(dim=-1) \
@@ -1293,21 +1314,20 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         e, f = bond_potential(pos_nm)
     total_E += e; total_F += f
 
-    # ── 2. Intra-bead: O(N) analytic ──
+    # ── 2. The four pairs nothing else covers: O(N) analytic ──
+    # P-C4' and C4'-N used to be here as two more harmonics. They are constraints now and
+    # contribute no energy; this section carries only the four gap-1/2/3 pairs.
     r = torch.arange(L, device=dev)
-    e1, f1 = _bond_f(pos_nm, P(r), C4(r), K_INTRA_PC, BOND_P_C4)
-    e2, f2 = _bond_f(pos_nm, C4(r), NN(r), K_INTRA_CN, BOND_C4_N)
-    # The three pairs nothing else covers (see K_INTRA_PN). The two that cross a backbone link
-    # stop at L-1: the constants are fitted on a linear database, which has no closure link, and
-    # the closure is already held by K_BSJ. Wrapping them onto residue 0 would add a term the fit
-    # has no observation for, and on a chain whose ends are far apart it would add strain on top
-    # of what K_BSJ already carries.
+    # The two that cross a backbone link stop at L-1: the constants are fitted on a linear
+    # database, which has no closure link, and the closure is already held by K_BSJ. Wrapping
+    # them onto residue 0 would add a term the fit has no observation for, and on a chain whose
+    # ends are far apart it would add strain on top of what K_BSJ already carries.
     li = torch.arange(L - 1, device=dev)
     e3, f3 = _bond_f(pos_nm, P(r), NN(r), K_INTRA_PN, BOND_INTRA_PN)
     e4, f4 = _bond_f(pos_nm, C4(li), P(li + 1), K_LINK_CP, BOND_LINK_CP)
     e5, f5 = _bond_f(pos_nm, NN(li), P(li + 1), K_LINK_NP, BOND_LINK_NP)
     e6, f6 = _bond_f(pos_nm, NN(li), C4(li + 1), K_LINK_NC, BOND_LINK_NC)
-    total_E += e1+e2+e3+e4+e5+e6; total_F += f1+f2+f3+f4+f5+f6
+    total_E += e3+e4+e5+e6; total_F += f3+f4+f5+f6
 
     # ── 3. BSJ: O(1) analytic ──
     d = pos_nm[:,P(0)]-pos_nm[:,P(L-1)]
@@ -1629,18 +1649,15 @@ def cg_forces_explicit_batched(
     e, f = _bond(pos_nm, P(idx_a), P(idx_a+1), K_BB, BOND_P_NEXT)
     total_E += e; total_F += f
 
-    # ── 2. Intra-bead: O(N) ──
+    # ── 2. The four pairs nothing else covers: O(N) ──
+    # P-C4' and C4'-N are constraints now and contribute no energy (see cg_energy_forces).
     all_r = torch.arange(L, device=dev)
-    e1, f1 = _bond(pos_nm, P(all_r), C4(all_r), K_INTRA_PC, BOND_P_C4)
-    e2, f2 = _bond(pos_nm, C4(all_r), NN(all_r), K_INTRA_CN, BOND_C4_N)
-    # The three pairs nothing else covers (see K_INTRA_PN); the two that cross a backbone link
-    # stop at L-1 for the reason recorded in cg_energy_forces.
     li = torch.arange(L - 1, device=dev)
     e3, f3 = _bond(pos_nm, P(all_r), NN(all_r), K_INTRA_PN, BOND_INTRA_PN)
     e4, f4 = _bond(pos_nm, C4(li), P(li + 1), K_LINK_CP, BOND_LINK_CP)
     e5, f5 = _bond(pos_nm, NN(li), P(li + 1), K_LINK_NP, BOND_LINK_NP)
     e6, f6 = _bond(pos_nm, NN(li), C4(li + 1), K_LINK_NC, BOND_LINK_NC)
-    total_E += e1+e2+e3+e4+e5+e6; total_F += f1+f2+f3+f4+f5+f6
+    total_E += e3+e4+e5+e6; total_F += f3+f4+f5+f6
 
     # ── 3. BSJ: O(1) ──
     delta_b = pos_nm[:, P(0)] - pos_nm[:, P(L-1)]
@@ -2025,14 +2042,10 @@ def cg_forces_explicit(
         pos_nm, torch.stack([P(idx_a), P(idx_a + 1)], dim=1), K_BB, BOND_P_NEXT)
     total_E += e_bb; total_F += f_bb
 
-    # Intra-bead bonds
+    # The four pairs nothing else covers (see K_INTRA_PN). P-C4' and C4'-N are constraints now
+    # and have no term here; the two that cross a backbone link stop at L-1 for the reason
+    # recorded in cg_energy_forces.
     all_res = torch.arange(L, device=dev)
-    e_pc, f_pc = _explicit_forces_bonds(
-        pos_nm, torch.stack([P(all_res), C4(all_res)], dim=1), K_INTRA_PC, BOND_P_C4)
-    e_cn, f_cn = _explicit_forces_bonds(
-        pos_nm, torch.stack([C4(all_res), NN(all_res)], dim=1), K_INTRA_CN, BOND_C4_N)
-    # The three pairs nothing else covers (see K_INTRA_PN); the two that cross a backbone link
-    # stop at L-1 for the reason recorded in cg_energy_forces.
     li = torch.arange(L - 1, device=dev)
     e_pn, f_pn = _explicit_forces_bonds(
         pos_nm, torch.stack([P(all_res), NN(all_res)], dim=1), K_INTRA_PN, BOND_INTRA_PN)
@@ -2042,8 +2055,8 @@ def cg_forces_explicit(
         pos_nm, torch.stack([NN(li), P(li + 1)], dim=1), K_LINK_NP, BOND_LINK_NP)
     e_nc, f_nc = _explicit_forces_bonds(
         pos_nm, torch.stack([NN(li), C4(li + 1)], dim=1), K_LINK_NC, BOND_LINK_NC)
-    total_E += e_pc + e_cn + e_pn + e_cp + e_np + e_nc
-    total_F += f_pc + f_cn + f_pn + f_cp + f_np + f_nc
+    total_E += e_pn + e_cp + e_np + e_nc
+    total_F += f_pn + f_cp + f_np + f_nc
 
     # ── BSJ: O(1) ──
     delta_bsj = pos_nm[:, P(0)] - pos_nm[:, P(L - 1)]
@@ -2207,10 +2220,10 @@ def make_intra_constraints(
     """The two intra-residue rigid distances of an L-residue 3-bead chain: P-C4' and C4'-N.
 
     They are the two springs this model cannot calibrate. K_INTRA_PC = 20752.7 and
-    K_INTRA_CN = 36399.2 come from sigma = 0.13 A and 0.08 A, which is BELOW the 0.1-0.3 A
+    K_INTRA_CN = 36399.2 came from sigma = 0.11 A and 0.08 A, which is BELOW the 0.1-0.3 A
     coordinate-error floor of the PDB data they were fitted on: the "width" being matched is
     refinement noise, not thermal motion. A constraint has no width and therefore no constant
-    to get wrong.
+    to get wrong. Both constants are deleted, not zeroed, so a surviving reference raises.
 
     The targets are read from BOND_P_C4 / BOND_C4_N AT CALL TIME, not captured at import. A
     module-level alias would bind once and then hold a stale target forever while every print of
@@ -2639,6 +2652,8 @@ class BatchedREMD2D:
         tri_stage_config: Optional[dict] = None,
         initial_global_step: int = 0,  # New: accumulated step count across rounds
         initial_velocities: Optional["torch.Tensor"] = None,  # New: velocities carried across rounds
+        potentials: Optional[dict] = None,
+        constraints: "Union[None, bool, rigid_bonds.DistanceConstraints]" = None,
     ):
         assert TORCH_OK
         self.temps = np.geomspace(t_lo, t_hi, n_t).tolist()
@@ -2674,6 +2689,27 @@ class BatchedREMD2D:
         self.tri_stage_config = tri_stage_config
         self.initial_global_step = initial_global_step
         self.initial_velocities = initial_velocities
+        # Keyword arguments forwarded to EVERY cg_energy_forces call in run(), e.g.
+        # {"bond_potential": make_potential("bb_bond", ("table_wall", 200.0))}.
+        #
+        # This is a constructor argument rather than a run() one because run() evaluates the field
+        # at nine separate sites -- the relaxation loop, _energy_split's three energies, the MD
+        # step, the tail force_fn, the report -- and the exchange criterion compares energies
+        # drawn from several of them. A field injected at some sites and not others makes the
+        # Metropolis test compare two different Hamiltonians, which does not raise and does not
+        # look wrong: it just accepts the wrong fraction of swaps. Measured once already, for the
+        # cell list: cg_energy_forces without one differs by up to 753.7 kJ/mol/nm (the comment
+        # above cl_2d). The _cg wrapper below is what makes that structural rather than a
+        # discipline -- there is no way to evaluate a different field from inside run().
+        self.potentials = dict(potentials or {})
+        # None  -> build the standard intra-residue set (the P-C4' / C4'-N distances).
+        # False -> no constraints, for characterising an alternate field that still springs them.
+        # an object -> use it.
+        #
+        # The default is "build them" and not "none" because cg_energy_forces NO LONGER HAS a
+        # P-C4' or C4'-N term: without a constraint those two distances are held only by whatever
+        # happens to pull on the beads, and C4'(L-1) is held by nothing at all.
+        self.constraints = constraints
 
     @property
     def n_replicas(self):
@@ -2993,6 +3029,32 @@ class BatchedREMD2D:
         # One instance is enough: GPUCellList rebuilds itself lazily inside get_pair_info.
         cl_2d = GPUCellList(cell_size=1.5)
 
+        # Intra-residue rigid distances. Built here, next to the cell list and for the same reason:
+        # every site below must use the same one.
+        if self.constraints is None:
+            con = make_intra_constraints(L)
+            if verbose:
+                print(f"    [GPU-2D] {con.describe()}")
+        elif self.constraints is False:
+            con = None
+        else:
+            con = self.constraints
+            if con.n_constraints != 2 * L:
+                raise ValueError(
+                    f"the supplied constraint set has {con.n_constraints} constraints for a "
+                    f"{L}-residue chain, which needs 2L = {2 * L}; it is not this run's set")
+
+        def _cg(p, **kw):
+            """cg_energy_forces at the run's coordinates, potentials and cell list.
+
+            EVERY field evaluation in this method goes through here. The point is not brevity:
+            run() has nine of them, the exchange criterion draws its energies from several, and a
+            site that evaluates a different Hamiltonian makes the Metropolis test compare two
+            different systems -- silently, as a wrong acceptance rate. self.potentials and cl_2d
+            are captured once, so there is no call site left that could forget either.
+            """
+            return cg_energy_forces(p, pairs_t, pw, cell_list=cl_2d, **self.potentials, **kw)
+
         def _energy_split(pos_in, replica_indices=None):
             """Return own-λ energy and reference λ=1 solute energy."""
             if replica_indices is None:
@@ -3005,13 +3067,13 @@ class BatchedREMD2D:
             with torch.no_grad():
                 p = pos_in.detach()
                 # Solute term: the λ=1 minus λ=0 difference, plus the TriRNASP λ=1 reference term.
-                en_ref, _ = cg_energy_forces(p, pairs_t, pw, lam=1.0, cell_list=cl_2d)
-                en_base, _ = cg_energy_forces(p, pairs_t, pw, lam=0.0, cell_list=cl_2d)
+                en_ref, _ = _cg(p, lam=1.0)
+                en_base, _ = _cg(p, lam=0.0)
                 solute = en_ref - en_base
                 tri_ref = _tri_energy_reference(p, indices)
                 solute = (solute + tri_ref).detach()
                 # CG total energy at each slot's own λ; Tri is added by the caller.
-                en_own, _ = cg_energy_forces(p, pairs_t, pw, lams=own_lams, cell_list=cl_2d)
+                en_own, _ = _cg(p, lams=own_lams)
             return en_own.detach(), solute
 
         # ── Before the MD loop: Langevin relaxation ──
@@ -3024,17 +3086,17 @@ class BatchedREMD2D:
             print(f"    [GPU-2D] Relaxing for 500 steps...")
         with torch.no_grad():
             for _ in range(500):
-                _e, _f = cg_energy_forces(pos, pairs_t, pw, lams=lams_t, cell_list=cl_2d)
+                _e, _f = _cg(pos, lams=lams_t)
                 pos, vel = batch_langevin_step(
                     pos, vel, _f, temps_t, dt_ps=self.dt,
-                    force_fn=lambda _p: cg_energy_forces(
-                        _p, pairs_t, pw, lams=lams_t, cell_list=cl_2d)[1])
+                    force_fn=lambda _p: _cg(_p, lams=lams_t)[1],
+                    constraints=con)
         _require_finite(pos, "equilibrated coordinates")
 
         if verbose:
             with torch.no_grad():
                 # Report the joint CG+Tri energy (first replica, λ=1.0)
-                e_cg, _ = cg_energy_forces(pos[:1], pairs_t, pw, lam=1.0, cell_list=cl_2d)
+                e_cg, _ = _cg(pos[:1], lam=1.0)
                 tri_val = ""
                 if tri_pot is not None:
                     tri_raw = _tri_energy(pos, range(n_rep)).cpu().numpy()
@@ -3107,8 +3169,7 @@ class BatchedREMD2D:
                 # (replicas sharing the same λ reuse one forward pass; n_lam groups)
                 # A single forward: all replicas use their per-replica λ
                 # Bug 5 fix: renamed to clearer variable names (recomputed each step, not accumulated)
-                en_total, f_total = cg_energy_forces(pos, pairs_t, pw, lams=lams_t,
-                                                     cell_list=cl_2d)
+                en_total, f_total = _cg(pos, lams=lams_t)
                 # The TriRNASP part of f_total, when one is injected below; it is held
                 # fixed between refreshes, so the recomputed tail force uses the same term.
                 f_tri_injected = None
@@ -3213,16 +3274,15 @@ class BatchedREMD2D:
                     # reuses f(x) and the deterministic map is not symplectic.
                     pos, vel = batch_langevin_step(
                         pos, vel, f_total, temps_t, dt_ps=self.dt,
-                        force_fn=lambda _p: cg_energy_forces(
-                            _p, pairs_t, pw, lams=lams_t, cell_list=cl_2d)[1])
+                        force_fn=lambda _p: _cg(_p, lams=lams_t)[1],
+                        constraints=con)
                 else:
                     # The cached TriRNASP force is constant across the refresh interval, so
                     # the tail force is CG(x') + the same injected Tri term.
                     pos, vel = batch_langevin_step(
                         pos, vel, f_total, temps_t, dt_ps=self.dt,
-                        force_fn=lambda _p: cg_energy_forces(
-                            _p, pairs_t, pw, lams=lams_t, cell_list=cl_2d)[1]
-                        + f_tri_injected)
+                        force_fn=lambda _p: _cg(_p, lams=lams_t)[1] + f_tri_injected,
+                        constraints=con)
 
             e_full, e_solute = _energy_split(pos)
             # Extract the total energy of each swapped state before accepting; rejected states are left untouched.

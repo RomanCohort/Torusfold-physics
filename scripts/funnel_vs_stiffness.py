@@ -36,9 +36,14 @@ N_DECOY = 2
 SEED = 20260216
 FACTORS = (0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0)
 
-KNAMES = ["K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_ANGLE", "K_DIH", "K_STACK", "K_PAIR",
+# No K_INTRA_PC / K_INTRA_CN: they are deleted, and scaling a constant that does not exist is
+# the failure this list would produce (base_k raises on the getattr). The two distances are
+# rigid constraints, and a constraint has no stiffness to scale -- so this script's deliberate
+# question, "which bonded term's stiffness drives the folding funnel", no longer has those two
+# as candidates.
+KNAMES = ["K_BB", "K_ANGLE", "K_DIH", "K_STACK", "K_PAIR",
           "K_PAIR_GUIDE", "K_BSJ", "K_BSJ_GUIDE", "K_BSJ_CONTACT", "K_BPP"]
-BONDED = ("bb bond P-P", "intra P-C4'", "intra C4'-N",
+BONDED = ("bb bond P-P",
           "angle P-P-P", "dihedral P-P-P-P", "stacking P-P")
 
 allstructs = B.load_structures(limit=N_FIT + N_TEST)

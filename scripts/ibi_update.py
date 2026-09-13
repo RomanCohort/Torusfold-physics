@@ -76,6 +76,27 @@ def main():
     if not out_path or not str(out_path):
         raise SystemExit("--out=FILE.npz is required (where the next tables go)")
 
+    # A constrained coordinate has no table to correct, so refuse by name before reading
+    # anything. These two distances are held rigid by SHAKE/RATTLE, and the field has no term
+    # for them at all -- the constants were deleted, not zeroed.
+    #
+    # The reason this is refused rather than skipped silently: ibi_update's whole job is
+    # dU = kBT*ln(P_sim/P_ref) added to the U_i that was simulated. For a constrained coordinate
+    # P_sim is a spike of width ~1e-7 nm sitting in one bin, so dU is a large positive number in
+    # that one bin and -inf in every other bin the reference occupies. Writing that back would
+    # produce a table that is a wall of -inf with a needle in it, and it would look, in the
+    # max|dU| line this script prints, exactly like a healthy update.
+    _bad = [c for c in coords if c in B.CONSTRAINED]
+    if _bad:
+        raise SystemExit(
+            f"refusing to update {', '.join(_bad)}: "
+            f"{'this coordinate is' if len(_bad) == 1 else 'these coordinates are'} held rigid by "
+            f"a constraint, not by a spring (boltzmann_bonded.CONSTRAINED), so there is no U_i "
+            f"for dU to be added to and no equilibrium distribution for P_ref to be compared "
+            f"against. An IBI round excludes them from J as well "
+            f"(ibi_core.run_round's skip defaults to CONSTRAINED); pass a --coords list without "
+            f"them.")
+
     ref = np.load(ref_path)
     print(f"reference  {ref_path}")
     print(f"histograms {hist_dir}")

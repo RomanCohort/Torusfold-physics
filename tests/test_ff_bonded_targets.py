@@ -244,41 +244,63 @@ def test_both_paths_read_the_live_dihedral_target():
         "cg_forces_explicit_batched ignored a change to DIH_PPPP")
 
 
-def test_the_two_intra_bonds_are_separate_live_constants():
-    """P-C4' and C4'-N are not the same spring and must not share one number.
+def test_the_two_intra_springs_are_gone_and_stay_gone():
+    """P-C4' and C4'-N are rigid constraints now, and the springs are DELETED, not zeroed.
 
-    Their reference spreads over 126 gap-free chains are 0.010963 and 0.008278 nm, which under
-    k = kBT/sigma^2 is 20752.7 against 36399.2. The single K_INTRA of 400 they replaced was
-    52x and 91x too soft. Both coordinates are one-dimensional -- C4' appears only in these two
-    bonds and the clash term, and the clash repulsion does not fire at native geometry -- so
-    the criterion is exact here rather than an extrapolation.
+    The reason they had to go is recorded in torch_cgsim.py above K_BB: k = kBT/sigma^2 with
+    sigma = 0.11 A and 0.08 A measures the refinement restraints of the deposited structures,
+    not thermal motion, because both are below the 0.1-0.3 A coordinate-error floor of those
+    same structures. No dataset calibrates them.
+
+    Why "deleted" and not "set to zero": a zeroed constant still exists, still appears in every
+    provenance line this project prints, and still leaves K_HARM-style code paths alive that
+    silently do nothing. A deleted name raises at the first reference, in the first run, which
+    is the only failure mode that actually gets noticed. The two TARGETS survive and are what a
+    constrained model has instead of a spring constant.
     """
-    assert not hasattr(C, "K_INTRA"), (
-        "K_INTRA is back; one value cannot serve two coordinates whose reference spreads differ "
-        "by 1.3x, which is a factor 1.75 in stiffness")
-    npz = Path(__file__).resolve().parent.parent / "results" / "boltzmann_tables_clean.npz"
-    if npz.exists():
-        z = np.load(npz)
-        for name, value in (("intra_pc", C.K_INTRA_PC), ("intra_cn", C.K_INTRA_CN)):
-            want = 2.494 / float(z[f"{name}__sigma"]) ** 2
-            assert abs(value / want - 1.0) < 0.01, (
-                f"{name}: the constant is {value} but kBT/sigma^2 is {want}")
+    for name in ("K_INTRA_PC", "K_INTRA_CN", "K_INTRA"):
+        assert not hasattr(C, name), (
+            f"{name} is back in torch_cgsim. P-C4' and C4'-N are held by SHAKE/RATTLE "
+            f"(rigid_bonds.py) and the field has no term for them; a surviving constant would "
+            f"be read by nothing and would make every fingerprint look like it still mattered.")
+    assert hasattr(C, "BOND_P_C4") and hasattr(C, "BOND_C4_N"), (
+        "the constraint TARGETS must still exist -- they are live, unlike the constants")
 
 
-def test_both_paths_read_the_live_intra_constants():
-    """Either force path silently ignoring a change here is the frozen-copy bug again."""
+def test_changing_the_targets_moves_the_constraints_and_nothing_in_the_field():
+    """The inverse of the old frozen-copy check, and it is the sharper direction.
+
+    BOND_P_C4 and BOND_C4_N used to be read by both force paths. They are now read by exactly
+    one thing -- make_intra_constraints -- so perturbing them must leave every force path's
+    energy BIT-IDENTICAL while moving the constraint target. Both halves matter:
+
+      * if a force path still moves, a spring survived the removal and is being driven by a
+        constant that no longer describes it;
+      * if the target does not move, the factory captured the value at import, which is the
+        frozen-copy bug with a worse consequence than before -- the run would hold the wrong
+        bond length exactly, with no thermal width for any statistic to notice.
+    """
     pos, pairs = _chain()
-    for name in ("K_INTRA_PC", "K_INTRA_CN"):
-        try:
-            base_unified, base_batched = _energies(pos, pairs)
-            setattr(C, name, getattr(C, name) * 1.5)
-            alt_unified, alt_batched = _energies(pos, pairs)
-        finally:
-            setattr(C, name, getattr(C, name) / 1.5)
-        assert base_unified != alt_unified, f"cg_energy_forces ignored a change to {name}"
-        assert base_batched != alt_batched, (
-            f"cg_forces_explicit_batched ignored a change to {name} -- it is reading a frozen "
-            f"copy, so the two paths would use different intra-residue bonds")
+    before_u, before_b = _energies(pos, pairs)
+    before_con = C.make_intra_constraints(3)
+
+    saved = (C.BOND_P_C4, C.BOND_C4_N)
+    try:
+        C.BOND_P_C4, C.BOND_C4_N = saved[0] * 1.05, saved[1] * 1.05
+        after_u, after_b = _energies(pos, pairs)
+        after_con = C.make_intra_constraints(3)
+    finally:
+        C.BOND_P_C4, C.BOND_C4_N = saved
+
+    assert before_u == after_u, (
+        "cg_energy_forces moved with BOND_P_C4/BOND_C4_N, so a term for that distance is still "
+        "in the field while the constant no longer describes a spring")
+    assert before_b == after_b, (
+        "cg_forces_explicit_batched moved with BOND_P_C4/BOND_C4_N -- same thing, other path")
+    assert float(before_con.targets[0]) == saved[0]
+    assert abs(float(after_con.targets[0]) / before_con.targets[0] - 1.05) < 1e-12, (
+        "the factory did not pick up the new target; it is holding a copy taken at import")
+    assert float(C.make_intra_constraints(3).targets[0]) == saved[0]
 
 
 # ── every frozen copy in the block, not just _R0_STACK ─────────────────────────────────────
@@ -410,8 +432,6 @@ def test_every_live_constant_reaches_all_three_force_paths():
     no_pairs = torch.zeros((0, 2), dtype=torch.long)
     cases = (
         ("K_BB", folded, paired_pairs, weight, {}),
-        ("K_INTRA_PC", folded, paired_pairs, weight, {}),
-        ("K_INTRA_CN", folded, paired_pairs, weight, {}),
         ("K_BSJ", folded, paired_pairs, weight, {}),
         ("K_ANGLE", folded, paired_pairs, weight, {}),
         ("K_DIH", folded, paired_pairs, weight, {}),
@@ -419,12 +439,14 @@ def test_every_live_constant_reaches_all_three_force_paths():
         ("K_PAIR", folded, paired_pairs, weight, {}),
         ("PAIR_NN", folded, paired_pairs, weight, {}),
         ("BOND_P_NEXT", folded, paired_pairs, weight, {}),
-        ("BOND_P_C4", folded, paired_pairs, weight, {}),
-        ("BOND_C4_N", folded, paired_pairs, weight, {}),
         ("K_STACK", folded, paired_pairs, weight, {"K_STACK": 500.0}),
         ("K_CLASH", clash, no_pairs, None, {}),
         ("CLASH_SIGMA", clash, no_pairs, None, {}),
     )
+    # BOND_P_C4 / BOND_C4_N are gone from this list on purpose, and the reason is now a test
+    # of its own (test_changing_the_targets_moves_the_constraints_and_nothing_in_the_field):
+    # they no longer reach any force path, so requiring one to move with them would be
+    # requiring a spring to still be there.
     paths = ("cg_energy_forces", "cg_forces_explicit_batched", "cg_forces_explicit")
     failures = []
     for name, pos, pair_ij, weights, enable in cases:

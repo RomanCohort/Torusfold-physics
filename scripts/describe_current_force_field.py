@@ -77,9 +77,13 @@ for label, sample in regimes.items():
 # constants as they currently read
 print("=" * 88)
 print("constants as shipped now")
-for name in ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_PAIR", "K_STACK", "K_ANGLE", "K_DIH", "K_CLASH",
+for name in ("K_BB", "K_PAIR", "K_STACK", "K_ANGLE", "K_DIH", "K_CLASH",
              "K_BSJ", "K_BSJ_GUIDE", "K_PAIR_GUIDE", "K_BSJ_CONTACT", "K_BPP", "K_MG"):
     print(f"  {name:16s} {getattr(C, name, float('nan')):>10.3f}")
+# P-C4' and C4'-N have no constant to print. They are rigid distances held by SHAKE/RATTLE,
+# so what this field carries for them is a TARGET and a solver, not a stiffness.
+print(f"  {'BOND_P_C4':16s} {C.BOND_P_C4:>10.3f}  (rigid constraint target, nm)")
+print(f"  {'BOND_C4_N':16s} {C.BOND_C4_N:>10.3f}  (rigid constraint target, nm)")
 print()
 for name in ("BOND_P_NEXT", "BOND_P_C4", "BOND_C4_N", "PAIR_NN", "STACK_R0",
              "CLASH_DIST", "C_MG_DEFAULT", "C_NA_DEFAULT"):

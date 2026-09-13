@@ -77,8 +77,11 @@ print(f"{'coordinate':10s} {'K in library':>13s} {'kBT/s_between^2':>16s} "
       f"{'kBT/s_within^2':>16s} {'kBT/s_pool^2':>14s}")
 print("-" * 74)
 import torusfold.scheme2.torch_cgsim as C   # noqa: E402
-K = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_CN,
-     "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
+# intra_pc / intra_cn are not here: those distances are rigid constraints, not springs, so
+# there is no shipped k to divide the database variance by. They are still printed below --
+# with no k -- because their observed spread is exactly the number that shows why they had to
+# stop being springs: it is below the coordinate-error floor of the data it was measured on.
+K = {"bb_bond": C.K_BB, "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
 for c in B.COORDS:
     ps = per_struct[c]
     means = np.array([m for m, _v, _n in ps])
@@ -87,7 +90,9 @@ for c in B.COORDS:
     s_between = means.std(ddof=1)
     s_within = float(np.sqrt((vars_ * (ns - 1)).sum() / (ns - 1).sum()))
     s_pool = float(np.sqrt(s_between ** 2 + s_within ** 2))
-    print(f"{c:10s} {K[c]:13.1f} {B.KBT / s_between ** 2:16.1f} "
+    _k = K.get(c)
+    print(f"{c:10s} {('constraint' if _k is None else f'{_k:13.1f}'):>13s} "
+          f"{B.KBT / s_between ** 2:16.1f} "
           f"{B.KBT / s_within ** 2:16.1f} {B.KBT / s_pool ** 2:14.1f}")
 print()
 print("  sigma_pool here is the ANOVA combination, not the np.std of the concatenation;")

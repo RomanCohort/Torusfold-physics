@@ -38,11 +38,13 @@ N_DECOY = 2
 SEED = 20260215
 MULTIPLIERS = (0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0)
 
-# K_INTRA was split into K_INTRA_PC (P-C4') and K_INTRA_CN (C4'-N); the old name no longer
-# exists and referencing it raised AttributeError here too.
-K_HARM = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_CN,
+# intra_pc and intra_cn are absent: those distances are rigid constraints now
+# (rigid_bonds.py) and K_INTRA_PC/K_INTRA_CN are deleted. There is no shipped harmonic k for
+# them to compare a table's curvature against -- which is the whole point of the change, not a
+# gap in this dict.
+K_HARM = {"bb_bond": C.K_BB,
           "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
-BONDED = ("bb bond P-P", "intra P-C4'", "intra C4'-N",
+BONDED = ("bb bond P-P",
           "angle P-P-P", "dihedral P-P-P-P", "stacking P-P")
 
 allstructs = B.load_structures(limit=N_FIT + N_TEST)

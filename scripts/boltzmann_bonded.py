@@ -41,6 +41,32 @@ import torch
 
 KBT = 2.494          # kJ/mol at 300 K
 COORDS = ("bb_bond", "intra_pc", "intra_cn", "angle", "dihedral", "stack")
+# The two coordinates the model holds RIGID, by SHAKE/RATTLE, rather than by a spring
+# (src/torusfold/scheme2/rigid_bonds.py; the field's K_INTRA_PC/K_INTRA_CN are deleted).
+#
+# They belong to COORDS -- the reference tables for them are real, measured from deposited
+# structures -- but they do NOT belong in an IBI round or in the residual that scores one:
+#
+#   * their simulated distribution is a delta at the constraint target, not the field's
+#     equilibrium distribution, so kBT*ln(P_sim/P_ref) is meaningless for them;
+#   * sigma_sim is EXACTLY ZERO, measured over 48 observations of a six-residue round: SHAKE
+#     puts the distance in the same place to the last bit every frame, so the per-frame spread
+#     is 0.0, not merely small.
+#
+# The second point does NOT do what it looks like it should. A zero ratio would give
+# |ln(sim/ref)| = inf, and one such term would swamp the mean -- which is what this comment
+# claimed until it was measured. simref's `r > 0` guard counts a zero ratio out instead, so the
+# coordinate is DROPPED from the average and the denominator silently shrinks. A constrained
+# round scored without an explicit skip would report a J averaged over four coordinates while
+# the run's configuration says six, and nothing in the output would say so: the number would look
+# like a plain improvement.
+#
+# That is worse than a bad number, because a bad number gets investigated. Hence two defences:
+# run_round skips these by default, AND it prints the denominator next to J (res.j_coords), so a
+# shrinking J is visible as "4/6" rather than as progress.
+#
+# ibi_update additionally refuses to write a table for them.
+CONSTRAINED = ("intra_pc", "intra_cn")
 # The deposited-structure database. It lives OUTSIDE this repository (191 PDB files, 686.7 MB), so
 # a checkout on another machine has to be told where it is. TORUSFOLD_RSRNASP overrides; the
 # Windows default is kept so nothing here changes on the machine it was measured on.

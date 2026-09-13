@@ -48,8 +48,11 @@ print("-" * 52)
 for label, name in [("dihedral points", "K_DIH"),
                     ("angle points", "K_ANGLE"),
                     ("bb bonds", "K_BB"),
-                    ("intra P-C4'", "K_INTRA_PC"),
-                    ("intra C4'-N", "K_INTRA_CN"),
+                    # No "intra P-C4'" / "intra C4'-N" rows: those distances are rigid
+                    # constraints now, contribute no force, and the constants are deleted.
+                    # The loop below already skips a missing constant by name, so leaving
+                    # them would print "(no such constant)" -- which reads as a rename, not
+                    # as a term that stopped existing.
                     ("stacking", "K_STACK"),
                     ("WC pair", "K_PAIR"),
                     ("BSJ closure", "K_BSJ"),

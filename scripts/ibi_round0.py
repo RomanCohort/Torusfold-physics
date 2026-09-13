@@ -146,7 +146,7 @@ print(f"full field as shipped, 300 K, mass 110 Da, friction {FRICTION}/ps, "
 # backbone terms were added after this script was written, and without them here a run under the
 # old field and a run under the new one print the same fingerprint -- which is the provenance hole
 # the paragraph above says invalidated three earlier runs.
-_FINGERPRINT = ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_INTRA_PN",
+_FINGERPRINT = ("K_BB", "K_INTRA_PN",
                 "K_LINK_CP", "K_LINK_NP", "K_LINK_NC",
                 "K_PAIR", "K_ANGLE", "K_DIH", "K_BPP", "K_STACK",
                 "K_CLASH", "CLASH_SIGMA", "K_BSJ", "K_BSJ_GUIDE",
@@ -237,7 +237,10 @@ print(f"burn = {burn} steps = {burn * 0.002:.1f} ps; sampling window "
       f"{burn * 0.002:.1f}-{NSTEPS * 0.002:.1f} ps")
 print("  progress: each column is sim/ref; J is the joint mean |ln(sim/ref)| over the window so far")
 # hoisted so the progress line can print the coupling ratio while the run is going
-K_SHIPPED = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_CN,
+# No intra_pc / intra_cn: those two distances are rigid constraints and K_INTRA_PC/K_INTRA_CN
+# are deleted, so there is no shipped k to compare a 1-D width against. They are also absent
+# from acc[] entirely, because run_round skips them -- see the loop below.
+K_SHIPPED = {"bb_bond": C.K_BB,
              "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
 # Stationarity needs DISJOINT blocks, not a cumulative average. A cumulative J over [burn, t]
 # cannot separate "the window is settling" from "the early part of the window happened to look
@@ -308,6 +311,8 @@ print("-" * 86)
 rows = {}
 # counts/acc are bound from the run_round result above; the report does not recompute them.
 for c in B.COORDS:
+    if c in _res.skip:
+        continue
     t = TAB[c]
     s1, s2, n = acc[c]
     m = s1 / n

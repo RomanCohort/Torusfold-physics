@@ -46,16 +46,22 @@ DT_PS = 0.002
 MASS_AMU = 110.0
 
 
-def load_tables(npz_path):
-    """The six stored tables in boltzmann_bonded's format.
+def load_tables(npz_path, skip=()):
+    """The stored tables in boltzmann_bonded's format, minus any coordinate in `skip`.
 
     Note this does NOT call B.prepare: the loop bins against centre/U/binw/sigma and never
     evaluates a table as a potential, so the interpolation cache would be dead weight here. A
     caller that injects a table potential builds it through cg_potentials, which goes to
     force_reference for the interpolation instead.
+
+    skip exists so a constrained round tolerates a table file that does not carry the
+    constrained coordinates at all. Requiring them would force every writer to keep two dead
+    arrays alive for coordinates nothing samples; requiring them only where they are used is
+    the same check, applied to the set that actually reaches the binning loop.
     """
     z = np.load(npz_path)
-    need = [f"{n}__{k}" for n in B.COORDS
+    keep = [n for n in B.COORDS if n not in set(skip)]
+    need = [f"{n}__{k}" for n in keep
             for k in ("centre", "U", "binw", "sigma", "lo", "hi")]
     missing = [k for k in need if k not in z.files]
     if missing:
@@ -67,7 +73,7 @@ def load_tables(npz_path):
     return {name: {"centre": z[f"{name}__centre"], "U": z[f"{name}__U"],
                    "binw": float(z[f"{name}__binw"]), "sigma": float(z[f"{name}__sigma"]),
                    "lo": float(z[f"{name}__lo"]), "hi": float(z[f"{name}__hi"])}
-            for name in B.COORDS}
+            for name in keep}
 
 
 def summed(b_counts, b_acc, nb):
@@ -84,26 +90,71 @@ def summed(b_counts, b_acc, nb):
     return ct, ac
 
 
-def simref(acc, tab):
-    """(six sim/ref values, joint J) from a moments accumulator.
+def sim_ref_ratio(acc, coord, tab, samples=None):
+    """sigma_sim / sigma_ref for one coordinate, or nan if it cannot be scored.
 
-    J is the mean over the coordinates of |ln(sim/ref)|; a coordinate with no samples is skipped
-    rather than counted as zero. Returned in B.COORDS order.
+    The single place that decides what "scorable" means, so simref and j_denominator can never
+    disagree about the denominator -- a divergence between those two would be invisible, since
+    both would still return a number.
+
+    nan means one of three things, and they are NOT equivalent: no samples at all; a reference
+    sigma of zero; or a sigma_sim of zero. The last one is the interesting case and it is why
+    this returns a ratio rather than a verdict -- a coordinate held exactly rigid has
+    sigma_sim == 0.0 to the last bit, and that is a property of the MODEL, not of the round.
     """
-    vals, js = [], []
-    for c in B.COORDS:
-        s1, s2, n = acc[c]
-        if not n:
-            vals.append(float("nan"))
-            continue
-        mm = s1 / n
-        ss = float(np.sqrt(max(s2 / n - mm * mm, 0.0)))
-        sig = tab[c]["sigma"]
-        r = ss / sig if sig > 0 else float("nan")
-        vals.append(r)
-        if r == r and r > 0:
-            js.append(abs(float(np.log(r))))
+    s1, s2, n = acc[coord]
+    if samples is not None:
+        n = samples
+    if not n:
+        return float("nan")
+    mm = s1 / n
+    ss = float(np.sqrt(max(s2 / n - mm * mm, 0.0)))
+    sig = tab[coord]["sigma"]
+    return ss / sig if sig > 0 else float("nan")
+
+
+def simref(acc, tab, skip=()):
+    """(per-coordinate sim/ref values, joint J) from a moments accumulator.
+
+    J is the mean over the coordinates of |ln(sim/ref)|. Returned in B.COORDS order, with nan for
+    anything skipped or unscorable.
+
+    THE DENOMINATOR IS NOT len(B.COORDS), AND THAT IS THE POINT. Three things shrink it: a
+    coordinate named in `skip`; a coordinate with no samples; and -- the one that bites -- a
+    coordinate whose sigma_sim is exactly zero, which is counted out by the `r > 0` guard rather
+    than scored. A rigid constraint produces exactly that: measured on a six-residue round, a
+    constrained P-C4' has sigma_sim == 0.0 over 48 observations, because SHAKE puts it in the
+    same place every frame.
+
+    So a constrained round scored WITHOUT an explicit skip reports a J averaged over four
+    coordinates while the run's own configuration says six, and nothing in the output says so.
+    The J is not inflated -- it is silently computed over fewer things, which reads as an
+    improvement. That is a worse failure than a bad number, because a bad number gets
+    investigated. run_round therefore prints the denominator next to J and reports it as
+    res.j_coords; see j_denominator.
+    """
+    skip = set(skip)
+    vals = [float("nan") if c in skip else sim_ref_ratio(acc, c, tab) for c in B.COORDS]
+    js = [abs(float(np.log(r))) for r in vals if r == r and r > 0]
     return vals, (float(np.mean(js)) if js else float("nan"))
+
+
+def j_denominator(acc, tab, skip=()):
+    """(how many coordinates J actually averaged over, how many were offered). Prints "4/6".
+
+    A joint J is a mean, and a mean over four things is not a mean over six. Without this the one
+    number a reader compares between rounds silently changes meaning when a coordinate drops out
+    -- and dropping out is exactly what a constrained coordinate does, with no other symptom.
+
+    It counts with the SAME predicate simref scores with (sim_ref_ratio + r > 0), so "4/6" always
+    describes the J that was printed next to it. Two independent counts of the same thing is how
+    a denominator comes to disagree with its own numerator.
+    """
+    skip = set(skip)
+    offered = [c for c in B.COORDS if c not in skip]
+    scored = [c for c in offered
+              if (lambda r: r == r and r > 0)(sim_ref_ratio(acc, c, tab))]
+    return len(scored), len(offered)
 
 
 class RoundResult:
@@ -123,6 +174,8 @@ class RoundResult:
         # rather than reconstructed by the caller, because only the binning loop knows them.
         self.n_total = {c: 0 for c in B.COORDS}
         self.n_outside = {c: 0 for c in B.COORDS}
+        self.skip = ()            # the coordinates excluded from J, by name
+        self.j_coords = (0, 0)    # (averaged over, offered), as j_denominator returns
         self.values = None        # {coord: (frames, M)} raw q, only when collect_values
         self.pos = None           # final coordinates
         self.vel = None
@@ -132,7 +185,7 @@ class RoundResult:
 
 def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, friction,
               force_cap, pot_kw=None, seed=None, collect_values=False, nrep=None,
-              progress=True, log=print):
+              progress=True, log=print, constraints=None, skip=None):
     """Sample, binning into `blocks` disjoint equal-time blocks. Returns a RoundResult.
 
     The accumulators are per block on purpose. A cumulative J over [burn, t] cannot separate
@@ -141,24 +194,49 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
     climbed to 0.0968 -- the second half was worse and the average hid it behind the first.
 
     force_cap is passed through to cg_energy_forces unchanged, including None. pot_kw is the
-    injection dict ({"angle_potential": .., "dihedral_potential": ..}), empty for the shipped
-    field. Both are the caller's decision and neither is defaulted here.
+    injection dict ({"angle_potential": .., "dihedral_potential": .., "bond_potential": ..}),
+    empty for the shipped field. Both are the caller's decision and neither is defaulted here.
+
+    constraints: the distance set the integrator holds rigid. None (the default) builds the
+    standard intra-residue P-C4' / C4'-N set, False disables it, an object uses that one. The
+    default is "build it" because cg_energy_forces HAS NO P-C4' OR C4'-N TERM ANY MORE -- a round
+    that ran unconstrained would sample a field in which those two distances are held only by
+    whatever pulls on the beads, and C4'(L-1) by nothing at all.
+
+    skip: coordinates excluded from the binning loop and from the joint J. None (the default)
+    means B.CONSTRAINED whenever constraints are active and () otherwise. Pass () explicitly to
+    score the constrained coordinates anyway, which is a thing to do once, deliberately, to see
+    what the exclusion is worth.
     """
     pot_kw = pot_kw or {}
     nb = max(blocks, 1)
     if nrep is None:
         nrep = pos.shape[0]
 
+    if constraints is None:
+        con = C.make_intra_constraints(pos.shape[1] // 3)
+    elif constraints is False:
+        con = None
+    else:
+        con = constraints
+    if skip is None:
+        skip = tuple(B.CONSTRAINED) if con is not None else ()
+    else:
+        skip = tuple(skip)
+
     res = RoundResult()
     res.b_counts = {b: {c: np.zeros(len(tab[c]["U"]), dtype=np.int64) for c in B.COORDS}
                     for b in range(nb)}
     res.b_acc = {b: {c: [0.0, 0.0, 0] for c in B.COORDS} for b in range(nb)}
     res.b_frames = [0] * nb
+    res.skip = skip
     if collect_values:
         res.values = {c: [] for c in B.COORDS}
 
     if seed is not None:
         torch.manual_seed(seed)
+
+    _skip_set = set(skip)
 
     def _forces_at(p):
         """Fresh forces at the post-update coordinates, for the symplectic tail kick.
@@ -177,7 +255,7 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
             _e, f = C.cg_energy_forces(pos, ij, pw, cell_list=cl, force_cap=force_cap, **pot_kw)
             pos, vel = C.batch_langevin_step(pos, vel, f, temps, dt_ps=DT_PS,
                                              mass_amu=MASS_AMU, friction=friction,
-                                             force_fn=_forces_at)
+                                             force_fn=_forces_at, constraints=con)
         if step == 0:
             log(f"first step {time.time() - t0:.3f} s")
         if step >= burn and step % stride == 0:
@@ -186,6 +264,8 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
             res.b_frames[blk] += 1
             with torch.no_grad():
                 for c in B.COORDS:
+                    if c in _skip_set:
+                        continue
                     q = B.coords_of(pos, c).reshape(-1).numpy().astype(np.float64)
                     if res.values is not None:
                         res.values[c].append(q.copy())
@@ -208,14 +288,17 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
         if progress and (step + 1) % max(nsteps // 10, 1) == 0:
             el = time.time() - t0
             _ct, _ac = summed(res.b_counts, res.b_acc, nb)
-            vals, j = simref(_ac, tab)
+            vals, j = simref(_ac, tab, skip)
+            _used, _off = j_denominator(_ac, tab, skip)
             parts = [f"{c[:5]} {v:5.3f}" if v == v else f"{c[:5]}   --" for c, v in zip(B.COORDS, vals)]
-            log(f"  {step+1:>7d} {el:6.0f}s  " + "  ".join(parts) + f"   J {j:.4f}")
+            log(f"  {step+1:>7d} {el:6.0f}s  " + "  ".join(parts) +
+                f"   J {j:.4f} over {_used}/{_off}")
 
     res.seconds = time.time() - t0
     res.steps_per_s = nsteps / res.seconds if res.seconds else float("nan")
     res.pos, res.vel = pos, vel
     res.counts, res.acc = summed(res.b_counts, res.b_acc, nb)
+    res.j_coords = j_denominator(res.acc, tab, skip)
     if res.values is not None:
         res.values = {c: (np.asarray(v, dtype=np.float64) if v
                           else np.zeros((0, 1), dtype=np.float64))

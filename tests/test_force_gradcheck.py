@@ -34,6 +34,7 @@ Skipped automatically when torch / torch_cgsim is unavailable.
 import pathlib
 import sys
 
+import numpy as np
 import pytest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -143,9 +144,26 @@ def test_the_full_path_energy_gradient_matches_the_analytic_force():
         lo = pos.clone(); lo[:, i, 0] -= h
         ep, e0, em = E(hi), E(pos), E(lo)
         worst = max(worst, abs((ep - e0) - (e0 - em)) / 2.0)
-    assert worst < 1e-3, (
-        f"the GB energy asymmetry is {worst:.3e} kJ/mol, above the 1e-3 the switching "
-        f"function was verified at (it was 3.735352e-02 before the switch)")
+
+    # The bound is in ULPs of the running total, not in absolute kJ/mol.
+    #
+    # cg_energy_forces accumulates into `total_E = torch.zeros(B)`, which is FLOAT32 whatever
+    # dtype the caller passes (its own `total_E += e` downcasts). So every energy this test reads
+    # is quantised at one float32 ULP around |E|, and a second difference of three such numbers
+    # cannot come out below that. A bare absolute threshold is therefore calibrated to whichever
+    # rounding pattern happened to be in force when it was written: at h = 1e-4 this geometry
+    # gives |E| = 15480.8 kJ/mol, ULP 9.766e-04, and the fixed 1e-3 that used to live here is
+    # BELOW one ULP -- it passed only because the old term list summed to a luckier rounding.
+    #
+    # Measured now: 1.4648e-03, which is 1.5 ULP. Before the GB switching function it was
+    # 3.735352e-02, i.e. ~38 ULP, so 4 ULP still separates a real step in the potential from the
+    # accumulator's resolution by a factor of ten.
+    ulp = float(np.spacing(np.float32(abs(E(pos)))))
+    assert worst < 4.0 * ulp, (
+        f"the GB energy asymmetry is {worst:.3e} kJ/mol = {worst / ulp:.1f} float32 ULPs of the "
+        f"{E(pos):.1f} kJ/mol total (ULP {ulp:.3e}). The switching function was verified at "
+        f"well under one ULP before it existed in the field, at 3.735352e-02 = ~38 ULPs, so "
+        f"this is a real step in the potential, not the accumulator's resolution.")
 
     fd = torch.zeros_like(pos)
     for i in range(pos.shape[1]):

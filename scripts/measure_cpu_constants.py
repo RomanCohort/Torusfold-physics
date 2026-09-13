@@ -237,8 +237,10 @@ def main():
     print()
     print("CPU constants as the file declares them (distance terms in kJ/mol/A^2):")
     print(f"  K_BB       = {KBT/(stats['bb_bond']['sd']*10)**2:.4f}")
-    print(f"  K_INTRA_PC = {KBT/(stats['intra_pc']['sd']*10)**2:.4f}")
-    print(f"  K_INTRA_CN = {KBT/(stats['intra_cn']['sd']*10)**2:.4f}")
+    # K_INTRA_PC / K_INTRA_CN are deliberately NOT printed. This file measures what a spring
+    # SHOULD be, and these two distances are not springs any more -- the number that would go
+    # here is the one the model just stopped using. Their observed spreads are printed above.
+    print("  (intra_pc/intra_cn: rigid constraints now, no k -- see the spread table above)")
     print(f"  K_ANGLE    = {KBT/stats['angle_rad']['sd']**2:.4f}  kJ/mol/rad^2")
     print(f"  K_DIHEDRAL = {KBT/stats['dihedral_rad']['sd']**2:.4f}  kJ/mol/rad^2")
     print(f"  K_STACK    = {KBT/(stats['stack_nn']['sd']*10)**2:.4f}")

@@ -32,8 +32,13 @@ GAPS = (1, 2, 3)
 # The bonded terms the field HAS, as (residue offset, atom of the lower bead, atom of the higher).
 # Derived from the index sets each path builds; nothing here is from memory.
 BONDED = {
-    (0, 0, 1): "K_INTRA_PC",     # P(i)   - C4'(i)
-    (0, 1, 2): "K_INTRA_CN",     # C4'(i) - N9/N1(i)
+    # These two are NOT bonded terms any more -- they are the rigid distances held by
+    # SHAKE/RATTLE, and the field has no energy for them. The label says so rather than the
+    # entries being deleted: this script reports unguarded classes as holes, and a deleted
+    # entry would file the two best-determined distances in the model as holes. "covered by
+    # something that is not a bonded term" is the fact; "not covered" is not.
+    (0, 0, 1): "constraint",     # P(i)   - C4'(i)
+    (0, 1, 2): "constraint",     # C4'(i) - N9/N1(i)
     (0, 0, 2): "K_INTRA_PN",     # P(i)   - N9/N1(i)
     (1, 0, 0): "K_BB_BOND",      # P(i)   - P(i+1)
     (1, 1, 0): "K_LINK_CP",      # C4'(i) - P(i+1)

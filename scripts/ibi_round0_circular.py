@@ -106,7 +106,7 @@ print(f"burn = {burn} steps = {burn * 0.002:.1f} ps; sampling window "
       f"{burn * 0.002:.1f}-{NSTEPS * 0.002:.1f} ps; {NB} blocks")
 
 # Provenance fingerprint, the same list ibi_round0 prints, so the two runs are comparable.
-_FINGERPRINT = ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_INTRA_PN",
+_FINGERPRINT = ("K_BB", "K_INTRA_PN",
                 "K_LINK_CP", "K_LINK_NP", "K_LINK_NC",
                 "K_PAIR", "K_ANGLE", "K_DIH", "K_BPP", "K_STACK",
                 "K_CLASH", "CLASH_SIGMA", "K_BSJ", "K_BSJ_GUIDE")
@@ -125,6 +125,12 @@ print(f"guide shape: E(0.5 nm)={float(_gs[0]):.3f}  E(3.0 nm)={float(_gs[1]):.3f
 print()
 
 pos = torch.tensor(s0["pos"].reshape(1, 3 * L, 3), dtype=torch.float64).repeat(NREP, 1, 1)
+# P-C4' and C4'-N are rigid constraints: cg_energy_forces has no term for them any more, so an
+# unconstrained step below would leave them held only by the link terms (and C4'(L-1) by
+# nothing). This script carries its own copy of the sampler rather than calling
+# ibi_core.run_round, so it carries its own constraint set too.
+CON = C.make_intra_constraints(L)
+print(f"constraints: {CON.describe()}")
 vel = torch.zeros_like(pos)
 temps = torch.full((NREP,), 300.0, dtype=torch.float64)
 
@@ -204,7 +210,8 @@ for step in range(NSTEPS):
         e, f = C.cg_energy_forces(pos, ij, pw, cell_list=cl)
         pos, vel = C.batch_langevin_step(pos, vel, f, temps,
                                          dt_ps=0.002, mass_amu=110.0,
-                                         friction=FRICTION, force_fn=_forces_at)
+                                         friction=FRICTION, force_fn=_forces_at,
+                                         constraints=CON)
     if step == 0:
         print(f"first step {time.time() - t0:.3f} s")
     if step >= burn and step % STRIDE == 0:
@@ -212,6 +219,8 @@ for step in range(NSTEPS):
         b_frames[blk] += 1
         with torch.no_grad():
             for c in B.COORDS:
+                if c in B.CONSTRAINED:
+                    continue
                 q = B.coords_of(pos, c).reshape(-1).numpy().astype(np.float64)
                 a = b_acc[blk][c]
                 a[0] += q.sum()

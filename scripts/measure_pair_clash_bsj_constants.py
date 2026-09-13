@@ -1,8 +1,12 @@
 r"""Can the structure database set K_PAIR, K_CLASH, K_BSJ and K_BSJ_GUIDE?
 
-Context.  src/torusfold/scheme2/torch_cgsim.py brought K_BB, K_INTRA_PC, K_INTRA_CN,
-K_ANGLE, K_DIH and K_BPP in line with D:\torusfold-cgdata\rsRNASP\Training_set using
-k = kBT/sigma^2.  Four constants were left alone "because nobody has produced a criterion
+Context.  src/torusfold/scheme2/torch_cgsim.py brought K_BB, K_ANGLE, K_DIH and K_BPP in
+line with D:\torusfold-cgdata\rsRNASP\Training_set using k = kBT/sigma^2.  (It brought
+K_INTRA_PC and K_INTRA_CN in line the same way, and that turned out to be the criterion's
+counterexample: those two sigma were below the coordinate-error floor of the data they were
+measured on, so the constants were measuring refinement restraints rather than thermal motion.
+Both distances are rigid constraints now and both constants are deleted.)  Four constants were
+left alone "because nobody has produced a criterion
 for them" -- K_PAIR, K_CLASH, K_BSJ, K_BSJ_GUIDE -- and the GPU (torch_cgsim.py) and CPU
 (openmm_gpu_refiner.py) implementations disagree about all four.  This script asks, per
 constant, whether the same family of criterion applies at all and what it gives.

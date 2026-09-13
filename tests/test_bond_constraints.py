@@ -32,6 +32,7 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
+import numpy as np                                    # noqa: E402
 import torch                                          # noqa: E402
 import torusfold.scheme2.torch_cgsim as C             # noqa: E402
 import torusfold.scheme2.rigid_bonds as R             # noqa: E402
@@ -414,6 +415,211 @@ def test_the_factory_reads_the_constants_at_call_time():
         C.BOND_P_C4, C.BOND_C4_N = saved_pc, saved_cn
 
     assert float(C.make_intra_constraints(2, mass_amu=MASS).targets[0]) == saved_pc
+
+
+# ── what the field no longer does, and who notices ─────────────────────────────────────────
+def test_an_ibi_round_excludes_the_constrained_coordinates():
+    """A constrained coordinate has no equilibrium distribution, so it cannot enter J.
+
+    ibi_core.run_round bins all six of boltzmann_bonded.COORDS and J is the mean of
+    |ln(sigma_sim/sigma_ref)| over them. Held rigid, sigma_sim is the solver's tolerance --
+    ~1e-7 nm against a reference sigma of 0.011 nm -- so |ln| is ~9.6, and one such term adds
+    about 1.6 to a J that is otherwise ~0.1. The failure is not subtle, but it is misread:
+    a round that started constraining would look CATASTROPHICALLY worse for a reason that has
+    nothing to do with the four tables it is actually updating.
+
+    This checks the two things that make the exclusion real rather than documented: nothing is
+    accumulated for those coordinates, and the denominator J is reported against shrinks with
+    them. A J of 0.09 over four is not the same number as a J of 0.09 over six.
+    """
+    sys.path.insert(0, str(REPO / "scripts"))
+    import boltzmann_bonded as B
+    import ibi_core as IC
+
+    assert B.CONSTRAINED == ("intra_pc", "intra_cn")
+    for name in B.CONSTRAINED:
+        assert name in B.COORDS, (
+            f"{name} left COORDS. The reference tables for it are still measured from deposited "
+            f"structures and boltzmann_bonded still has to be able to name it.")
+
+    # L=6, not 3: the dihedral has L-3 windows and the stack L-2, so a 3-residue chain has
+    # neither and would leave those two coordinates with no samples -- which simref skips, so
+    # the denominator would read 2/4 and this test would be measuring its own fixture.
+    L, BATCH, NSTEPS = 6, 2, 4
+    con = C.make_intra_constraints(L)
+    g = torch.Generator().manual_seed(101)
+    pos = con.shake(torch.randn(BATCH, 3 * L, 3, dtype=torch.float64, generator=g))
+    vel = torch.zeros_like(pos)
+    ij = torch.tensor([[0, 2]], dtype=torch.long)      # residue indices, not bead indices
+    pw = torch.ones(1, dtype=torch.float64)
+    temps = torch.full((BATCH,), T_K, dtype=torch.float64)
+
+    # A tab that only the four scored coordinates need. The skipped ones are never indexed --
+    # that is half of what this test is checking, so an incomplete tab is the assertion.
+    tab = {}
+    for name in B.COORDS:
+        lo = 0.0 if name not in ("angle", "dihedral") else -1.0
+        hi = 1.0 if name in ("angle", "dihedral") else (2.0 if name == "bb_bond" else 1.6)
+        n = 20
+        tab[name] = {"lo": lo, "hi": hi, "binw": (hi - lo) / n,
+                     "centre": np.linspace(lo + (hi - lo) / (2 * n), hi - (hi - lo) / (2 * n), n),
+                     "U": np.zeros(n),
+                     "sigma": 0.02 if name not in B.CONSTRAINED else 0.011}
+
+    res = IC.run_round(pos=pos, vel=vel, ij=ij, pw=pw, temps=temps, tab=tab,
+                       nsteps=NSTEPS, burn=0, stride=1, blocks=1, friction=1.0,
+                       force_cap=None, seed=7, progress=False, log=lambda *_a, **_k: None)
+
+    assert res.skip == B.CONSTRAINED, (
+        f"run_round skipped {res.skip}; with the constraints active it must default to "
+        f"boltzmann_bonded.CONSTRAINED")
+    for name in B.CONSTRAINED:
+        assert res.n_total[name] == 0, (
+            f"{name} accumulated {res.n_total[name]} observations; a constrained coordinate is "
+            f"a delta function and binning it poisons J")
+        assert res.acc[name][2] == 0
+    for name in ("bb_bond", "angle", "dihedral", "stack"):
+        assert res.n_total[name] > 0, f"{name} accumulated nothing, so the loop did not run"
+    assert res.j_coords == (4, 4), (
+        f"J was reported over {res.j_coords}; four coordinates are scored and four offered")
+
+    # Two defences, not one. If a caller overrides skip and bins the constrained coordinates
+    # anyway, simref still drops them -- their moments are empty, and it skips n == 0 rather than
+    # scoring them as zero. So J is right even when the call is wrong.
+    vals_no_skip, _j_no_skip = IC.simref(res.acc, tab)
+    vals_skipped, _j_skipped = IC.simref(res.acc, tab, B.CONSTRAINED)
+    # nan-aware: both paths return nan for these, and nan != nan would fail a plain list compare.
+    assert all((x != x and y != y) or x == y
+               for x, y in zip(vals_no_skip, vals_skipped)), (
+        "simref disagrees with itself between skip=CONSTRAINED and no skip, although the "
+        "constrained coordinates hold no samples either way")
+    for name in B.CONSTRAINED:
+        assert res.acc[name][2] == 0
+
+    # And now the failure itself, measured rather than asserted in prose. A second round with the
+    # exclusion turned off bins all six.
+    #
+    # THIS IS NOT THE FAILURE THAT WAS EXPECTED. The plan for this change says a constrained
+    # coordinate has sigma_sim ~ 1e-7, giving |ln| ~ 9.6 which would swamp the mean over six.
+    # Measured, sigma_sim is EXACTLY 0.0 -- SHAKE puts the distance in the same place to the last
+    # bit every frame -- and simref's `r > 0` guard therefore counts it OUT of the average
+    # instead of scoring it. The denominator shrinks from six to four and J goes DOWN.
+    #
+    # That is the worse failure of the two: a swamped J looks broken and gets investigated, while
+    # a J averaged over four of six looks like progress and does not. Hence j_coords.
+    con2 = C.make_intra_constraints(L)
+    g2 = torch.Generator().manual_seed(101)
+    pos2 = con2.shake(torch.randn(BATCH, 3 * L, 3, dtype=torch.float64, generator=g2))
+    res_all = IC.run_round(pos=pos2, vel=torch.zeros_like(pos2), ij=ij, pw=pw, temps=temps,
+                           tab=tab, nsteps=NSTEPS, burn=0, stride=1, blocks=1, friction=1.0,
+                           force_cap=None, seed=7, skip=(), progress=False,
+                           log=lambda *_a, **_k: None)
+
+    for name in B.CONSTRAINED:
+        assert res_all.n_total[name] > 0, f"skip=() did not bin {name} after all"
+        s1, s2, n = res_all.acc[name]
+        sd = float(np.sqrt(max(s2 / n - (s1 / n) ** 2, 0.0)))
+        assert sd == 0.0, (
+            f"{name} has sigma_sim = {sd:.3e} over {n} observations, not exactly zero. The "
+            f"dropped-denominator failure below needs it to be exactly zero; if it is not, then "
+            f"a constrained coordinate is being SCORED, and the concern is the other one.")
+
+    assert res_all.j_coords == (4, 6), (
+        f"a round with skip=() reports J over {res_all.j_coords}. Six coordinates were offered "
+        f"and only four can be scored, because the two constrained ones have sigma_sim == 0. "
+        f"That 4/6 is the whole point: without it the reader sees a J that dropped when the "
+        f"constraint was switched on, and nothing tells them the mean got smaller.")
+    # The number a reader would compare against an unconstrained round, which offered six.
+    _v, j_all = IC.simref(res_all.acc, tab)
+    _v2, j_excluded = IC.simref(res.acc, tab)
+    assert j_excluded == j_excluded and j_all == j_all
+    for c in B.CONSTRAINED:
+        assert IC.sim_ref_ratio(res_all.acc, c, tab) == 0.0, (
+            f"{c} did not come back as a zero ratio, so j_denominator and simref are counting "
+            f"with different predicates -- which is the one way this denominator can lie")
+
+
+def test_ibi_update_refuses_the_constrained_coordinates():
+    """The refusal is the point: a table written for a constrained coordinate is a wall of -inf.
+
+    dU = kBT*ln(P_sim/P_ref) added to the U_i that was simulated. For a constrained coordinate
+    P_sim is a 1e-7 nm spike in one bin, so dU is large in that bin and -inf everywhere else the
+    reference lives -- and max|dU|, the one number that script prints, would be finite and would
+    look like a healthy update.
+    """
+    import subprocess
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "ibi_update.py"),
+         "--hist=nonexistent", "--out=" + str(REPO / "tmp_should_not_exist.npz"),
+         "--coords=intra_pc"],
+        capture_output=True, text=True, cwd=str(REPO))
+    assert proc.returncode != 0, "ibi_update accepted --coords=intra_pc"
+    combined = proc.stdout + proc.stderr
+    assert "CONSTRAINED" in combined or "held rigid" in combined, (
+        "ibi_update refused intra_pc but not for the constraint reason: "
+        + combined[-800:])
+
+
+def test_batched_remd_2d_has_one_field_and_one_constraint_set():
+    """Every field evaluation in BatchedREMD2D.run must go through the wrapper.
+
+    run() evaluates cg_energy_forces at NINE sites -- the 500-step relaxation, _energy_split's
+    three energies, the MD step, the tail force_fn, the report -- and the exchange criterion
+    compares energies drawn from several of them. A potential injected at some sites and not
+    others makes the Metropolis test compare two different Hamiltonians. Nothing raises; the
+    acceptance rate is just wrong. The same is true of the cell list, which has already cost
+    this file one incident (753.7 kJ/mol/nm, recorded above cl_2d).
+
+    The fix was a local `_cg` closure, and this is the test that keeps it: a structural check on
+    the source, because the failure needs no runtime to exist and a spy would have to run a full
+    REMD to look at nine moments out of thousands. It is the same technique
+    test_ff_bonded_targets.py uses on module-level aliases.
+
+    Checking source rather than behaviour also makes the failure legible. An assertion here says
+    "line 3120 evaluates a field of its own", which is a five-second fix; an assertion on an
+    acceptance rate says nothing at all.
+    """
+    import ast
+
+    src = pathlib.Path(C.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    run = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == "BatchedREMD2D":
+            for item in node.body:
+                if isinstance(item, ast.FunctionDef) and item.name == "run":
+                    run = item
+    assert run is not None, "BatchedREMD2D.run not found; has the class been renamed?"
+
+    # The wrapper's own body is the ONE place allowed to call cg_energy_forces, so its subtree is
+    # excluded -- otherwise this test asserts that the wrapper does not exist.
+    wrapper = [n for n in run.body
+               if isinstance(n, ast.FunctionDef) and n.name == "_cg"]
+    assert len(wrapper) == 1, (
+        f"expected exactly one _cg wrapper in BatchedREMD2D.run, found {len(wrapper)}; without it "
+        f"there is no single place carrying the potentials and the cell list to every site")
+    wrapper_nodes = {id(n) for n in ast.walk(wrapper[0])}
+
+    direct, bare_steps = [], []
+    for node in ast.walk(run):
+        if id(node) in wrapper_nodes:
+            continue
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id == "cg_energy_forces":
+                direct.append(node.lineno)
+            if node.func.id == "batch_langevin_step":
+                if not any(k.arg == "constraints" for k in node.keywords):
+                    bare_steps.append(node.lineno)
+
+    assert not direct, (
+        f"BatchedREMD2D.run calls cg_energy_forces directly at line(s) {direct}. Every field "
+        f"evaluation in this method must go through the local _cg wrapper, which is what carries "
+        f"self.potentials and the cell list to all of them at once. A direct call is a site the "
+        f"exchange criterion can disagree with.")
+    assert not bare_steps, (
+        f"BatchedREMD2D.run calls batch_langevin_step without constraints= at line(s) "
+        f"{bare_steps}. cg_energy_forces has no P-C4' or C4'-N term any more, so an unconstrained "
+        f"step leaves those distances held by whatever pulls on the beads.")
 
 
 if __name__ == "__main__":

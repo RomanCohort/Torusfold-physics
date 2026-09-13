@@ -133,11 +133,17 @@ print(f"structure {s0['name']}  L={L}  pairs={len(s0['pairs'])}  tag={TAG}")
 print(f"{NREP} replicas, {NSTEPS} steps of 0.002 ps = {NSTEPS * 0.002:.1f} ps per replica")
 print(f"300 K, mass 110 Da, friction {FRICTION}/ps, sampling every {STRIDE} steps, "
       f"burn {burn * 0.002:.1f} ps")
-_FINGERPRINT = ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_INTRA_PN",
+_FINGERPRINT = ("K_BB", "K_INTRA_PN",
                 "K_LINK_CP", "K_LINK_NP", "K_LINK_NC",
                 "K_PAIR", "K_ANGLE", "K_DIH", "K_BPP", "K_STACK",
                 "K_CLASH", "CLASH_SIGMA", "K_BSJ", "K_BSJ_GUIDE")
 print("field: " + "  ".join(f"{n}={getattr(C, n)}" for n in _FINGERPRINT))
+# A constrained run and an unconstrained one print IDENTICAL constants -- the field no longer
+# carries a P-C4' or C4'-N term at all -- so the constraint set has to be named separately or
+# this log cannot tell the two apart. Two numbers, because they are two different claims: the
+# TARGETS are BOND_P_C4/BOND_C4_N, the solver is SHAKE/RATTLE at that tolerance.
+print(f"constraints: BOND_P_C4={C.BOND_P_C4}  BOND_C4_N={C.BOND_C4_N} nm, "
+      f"{C.make_intra_constraints(L).describe()}")
 print(f"force_cap={_cap}  mass=110.0 Da  dt=0.002 ps  friction={FRICTION}/ps  threads={torch.get_num_threads()}")
 
 pos = torch.tensor(s0["pos"].reshape(1, 3 * L, 3), dtype=torch.float64).repeat(NREP, 1, 1)
@@ -188,6 +194,12 @@ print()
 print(f"{'coordinate':10s} {'ref sig':>8s} {'sim sig':>8s} {'sim/ref':>8s} {'n':>8s}")
 print("-" * 44)
 for c in B.COORDS:
+    # A constrained coordinate accumulated nothing, and dividing by its n would be a
+    # ZeroDivisionError rather than a nan -- 0.0/0 on Python floats raises. Naming it instead
+    # of printing a statistic also keeps the row count honest.
+    if c in _res.skip:
+        print(f"{c:10s} {'--':>8s} {'--':>8s} {'rigid constraint':>8s} {0:8d}")
+        continue
     s1, s2, n = acc[c]
     m = s1 / n
     sig = float(np.sqrt(max(s2 / n - m * m, 0.0)))

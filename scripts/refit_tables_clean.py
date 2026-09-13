@@ -32,12 +32,13 @@ N = int(sys.argv[1]) if len(sys.argv) > 1 else 96
 OUT = Path(__file__).resolve().parent.parent / "results" / "boltzmann_tables_clean.npz"
 KBT = B.KBT
 
-# K_INTRA was split into K_INTRA_PC (P-C4') and K_INTRA_CN (C4'-N). Referencing the old name
-# raised AttributeError, so this script -- the one that regenerates the baseline table the
-# whole IBI loop starts from -- could not run on a clean checkout.
-K_HARM = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_CN,
+# intra_pc and intra_cn are absent on purpose. They are rigid constraints now and both
+# constants are deleted; what the tables still carry for them is a measured sigma, which is
+# printed below because it is the evidence for the change -- 0.11 A and 0.08 A against a PDB
+# coordinate-error floor of 0.1-0.3 A, i.e. below the noise of the structures they came from.
+K_HARM = {"bb_bond": C.K_BB,
           "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
-LOCAL = ("bb_bond", "intra_pc", "intra_cn")
+LOCAL = ("bb_bond",)
 
 structs = B.load_structures(limit=N)
 print(f"{len(structs)} cleaned chains, lengths "
@@ -59,8 +60,10 @@ for name in B.COORDS:
     v = values[name]
     sd = float(v.std())
     k_match = KBT / sd ** 2
-    ratios[name] = K_HARM[name] / k_match
-    print(f"{name:12s} {len(v):7d} {sd:9.4f} {k_match:12.1f} {K_HARM[name]:10.1f} "
+    k_ship = K_HARM.get(name)
+    ratios[name] = 0.0 if k_ship is None else k_ship / k_match
+    _ktxt = "constraint" if k_ship is None else f"{k_ship:10.1f}"
+    print(f"{name:12s} {len(v):7d} {sd:9.4f} {k_match:12.1f} {_ktxt:>10s} "
           f"{ratios[name]:13.4f}")
 print()
 # Only coordinates that actually carry a shipped spring can be in this span. K_STACK is
@@ -68,22 +71,27 @@ print()
 # lo = 0 and hi/lo a ZeroDivisionError, crashing the script before it saved anything. The
 # shipped .npz predates this line, so the failure was invisible: the tables of record had
 # simply not been regenerated since.
-active = {n: r for n, r in ratios.items() if K_HARM[n] != 0.0}
+active = {n: r for n, r in ratios.items() if K_HARM.get(n, 0.0) != 0.0}
 lo = min(active.values())
 hi = max(active.values())
 print(f"shipped k over the data-derived k spans {lo:.4f} to {hi:.1f}, a factor of {hi/lo:,.0f}")
-inactive = [n for n in ratios if K_HARM[n] == 0.0]
+inactive = [n for n in ratios if K_HARM.get(n, 0.0) == 0.0]
 if inactive:
-    print(f"  ({', '.join(inactive)} carries no shipped spring, so its ratio is 0 by "
-          f"construction and it is excluded from that span)")
+    print(f"  ({', '.join(inactive)} carries no nonzero shipped spring, so its ratio is 0 by "
+          f"construction and it is excluded from that span -- stack because K_STACK ships at "
+          f"zero, intra_pc/intra_cn because they have no spring at all any more)")
 print("values below 1 mean the shipped spring is too soft to reproduce the observed spread;")
 print("values above 1 mean it is too stiff.")
 print()
-print("the three local coordinates are the ones proposed to keep a harmonic form:")
+print("the local coordinates are the ones proposed to keep a harmonic form. It was three;")
+print("intra_pc and intra_cn left when they became rigid constraints -- there is no")
+print("harmonic to propose for a distance that has no width:")
 for name in LOCAL:
     v = values[name]
     print(f"  {name:10s} k {K_HARM[name]:7.1f} -> {KBT/v.std()**2:9.1f}  "
           f"({ratios[name]:.4f}x)")
+print("  (intra_pc and intra_cn used to be here. They are rigid constraints now, so there is")
+print("   no harmonic form left to propose for them.)")
 print()
 
 tables = B.prepare(B.fit(structs))

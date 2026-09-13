@@ -20,9 +20,7 @@ produces. So the half-kick is not evidence that the integrator is the heater.
 The timestep is comfortable for a second reason. omega = sqrt(k/mu) over the field, at the 55 amu
 reduced mass this script already uses for C4'-N:
 
-    K_INTRA_CN   36399.2   omega 25.73 /ps   omega*dt = 0.051  at dt = 0.002
-    K_INTRA_PC   20752.7   omega 19.42 /ps   0.039
-    K_CLASH      20000.0   omega 19.07 /ps   0.038
+    K_CLASH      20000.0   omega 19.07 /ps   omega*dt = 0.038  at dt = 0.002
     K_LINK_CP     9574.4   omega 13.19 /ps   0.026
     K_LINK_NP     5477.7   omega  9.98 /ps   0.020
     K_INTRA_PN    1785.9   omega  5.70 /ps   0.011
@@ -31,15 +29,34 @@ reduced mass this script already uses for C4'-N:
     K_ANGLE         28.1   omega  0.71 /ps   0.001
     K_DIH            7.2   omega  0.36 /ps   0.001
 
-omega*dt maxes at 0.051, so the Verlet integration error is order (omega*dt)^2/4 = 6.5e-4. That is
+omega*dt maxes at 0.038, so the Verlet integration error is order (omega*dt)^2/4 = 3.6e-4. That is
 not a heater either.
 
-And the reduction is small: constraining the bonds with SHAKE/LINCS -- the obvious way to buy a
-bigger dt -- removes 25.73 and 19.42 but NOT K_CLASH at 19.07, which is a repulsive wall and is
-not constrainable. So the ceiling is 25.73/19.07 = 1.35x, about 2 fs to 2.7 fs. The ten-fold
-timestep is not on the table, and it is worth knowing that before paying for constraints, because
-constraining the intra bonds would set the width of intra_pc and intra_cn to zero -- the two
-coordinates this field currently reproduces exactly (1.010 and 1.000 of reference).
+The two stiffest rows this table used to carry -- K_INTRA_CN at omega 25.73 /ps and K_INTRA_PC at
+19.42 -- ARE GONE, because those two distances stopped being springs. P-C4' and C4'-N are rigid
+constraints now (src/torusfold/scheme2/rigid_bonds.py, applied every step by batch_langevin_step),
+and the constants are deleted rather than zeroed. A constraint has no omega: it does not oscillate,
+it is projected onto.
+
+THAT CHANGES NOTHING ABOUT dt, AND IT IS IMPORTANT TO SAY SO. The obvious reading is "the stiffest
+terms are gone, so dt can grow". It cannot. The ceiling here was never set by the two intra bonds:
+it is K_CLASH at 19.07 /ps, a repulsive wall between beads more than two residues apart, and a wall
+is not constrainable -- there is no fixed distance to hold. So the ceiling is 25.73/19.07 = 1.35x
+both before and after, about 2 fs to 2.7 fs, and dt stays at 0.002 ps.
+
+The other half of the argument that used to conclude "do not constrain them" needs retracting too.
+It said constraining the intra bonds would set the width of intra_pc and intra_cn to zero, "the two
+coordinates this field currently reproduces exactly (1.010 and 1.000 of reference)". Those numbers
+are ARITHMETIC, NOT EVIDENCE. Both constants were SET to kBT/sigma_ref^2, and a harmonic with that
+k reproduces sigma_ref by construction, to the digit, whatever the reference is. The measurement
+says the division was done correctly. Where sigma_ref is noise below the coordinate-error floor --
+which is what 0.11 A and 0.08 A are, against a PDB floor of 0.1-0.3 A -- a spring reproduces the
+noise. So 1.000 was the case FOR a constraint, not against one.
+
+What the trade buys is not a timestep. It is a field with no uncalibratable number left in it:
+`k = kBT/sigma^2` is unusable when sigma measures refinement restraints rather than thermal motion,
+and for these two distances that is exactly what it measured. See
+memory/spring-criterion-resolution-confounded.md.
 
 None of that settles where the 440/607 K comes from. It only removes one candidate. The test is dt
 convergence at FIXED SIMULATED TIME, which is what this script does: fixing the step count

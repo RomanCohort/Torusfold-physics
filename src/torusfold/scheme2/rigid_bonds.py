@@ -383,7 +383,9 @@ class DistanceConstraints:
         worst, iters = None, 0
         for it in range(self.max_iter):
             _r, _u, G, g = self._geometry(x, loc_i, loc_j, sigma)
-            worst = (g.abs() / sigma).amax()
+            # detach: torch_cgsim's minimiser path calls shake on a requires_grad tensor, and the
+            # convergence test is a diagnostic, not part of the expression anything differentiates.
+            worst = (g.abs() / sigma).amax().detach()
             iters = it
             if float(worst) <= tol_rel:
                 break

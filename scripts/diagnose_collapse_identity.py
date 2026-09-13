@@ -50,7 +50,11 @@ temps = torch.full((NREP,), 300.0, dtype=torch.float64)
 
 print(f"structure {s0['name']} L={L} pairs={len(ij)}, {NREP} replicas x {NSTEPS} steps")
 print("field: " + "  ".join(f"{n}={getattr(C, n)}" for n in
-                            ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_PAIR", "K_CLASH")))
+                            ("K_BB", "K_PAIR", "K_CLASH")))
+# The fingerprint names constants, and P-C4'/C4'-N no longer have one. The constraint set is
+# named on its own line rather than left implicit, because a constrained and an unconstrained
+# run print IDENTICAL constants and would otherwise be indistinguishable in this log.
+print(f"constraints: {C.make_intra_constraints(L).describe()}")
 print(f"force_cap = {CAP}")
 print(f"clash spring: k={C.K_CLASH}, d0={C.CLASH_DIST}. Force at full overlap = "
       f"{C.K_CLASH * C.CLASH_DIST:.0f} kJ/mol/nm")

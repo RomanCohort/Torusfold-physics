@@ -34,7 +34,7 @@ except ImportError:
 
 if TORCH_OK:
     from .torch_cgsim import (
-        cg_energy_forces, batch_langevin_step, GPUCellList,
+        cg_energy_forces, batch_langevin_step, GPUCellList, make_intra_constraints,
         KB_KJ, _safe_zeros, _arange_dev,
     )
 
@@ -149,6 +149,18 @@ class BatchedMetadynamics:
         # Batch: (n_rep, 3L, 3)
         pos = torch.tensor(pos0, dtype=torch.float32, device=dev)[None].repeat(
             n_rep, 1, 1).contiguous()
+
+        # ── Intra-residue rigid distances ──
+        # The 0.03 nm random offsets just above put C4' and N almost on top of P, so the starting
+        # geometry is ~0.36 nm away from every one of the 2L constraints. SHAKE is run once here
+        # rather than left to the first integrator step: batch_langevin_step projects every step
+        # anyway, so this is not a correctness requirement, but it means the first reported energy
+        # is already at a reachable geometry instead of at a start nothing would ever sample.
+        #
+        # cg_energy_forces has no P-C4' or C4'-N term (they are constraints now), so without this
+        # the two distances would be held only by the link terms -- and C4'(L-1) by nothing.
+        con = make_intra_constraints(L)
+        pos = con.shake(pos)
         vel = _safe_zeros(pos.shape, dev)
 
         # ── Pairs tensor ──
@@ -227,7 +239,7 @@ class BatchedMetadynamics:
                 pos, vel = batch_langevin_step(
                     pos, vel, f_total, temps_t,
                     dt_ps=dt_ps, friction=friction,
-                    force_fn=_total_force)
+                    force_fn=_total_force, constraints=con)
 
                 # Clamp positions to prevent explosion
                 pos.data.clamp_(-10.0, 10.0)

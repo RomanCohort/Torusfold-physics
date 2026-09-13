@@ -150,7 +150,7 @@ print(f"{NSTEPS} steps of 0.002 ps = {NSTEPS * 0.002:.1f} ps, "
       f"sampling the cold rung (T={temps[0]:.1f} K, lambda={lambdas[0]}) every {STRIDE} steps")
 print(f"full field (after any --set patch), mass 110 Da, friction {FRICTION}/ps, "
       f"float32, symplectic BAOAB, chunk {CHUNK} steps")
-_FINGERPRINT = ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_INTRA_PN",
+_FINGERPRINT = ("K_BB", "K_INTRA_PN",
                 "K_LINK_CP", "K_LINK_NP", "K_LINK_NC",
                 "K_PAIR", "K_ANGLE", "K_DIH", "K_BPP", "K_STACK",
                 "K_CLASH", "CLASH_SIGMA", "K_BSJ", "K_BSJ_GUIDE", "K_BSJ_CONTACT")
@@ -169,7 +169,8 @@ print(f"burn = {burn} steps = {burn * 0.002:.1f} ps; sampling window "
       f"{burn * 0.002:.1f}-{NSTEPS * 0.002:.1f} ps; {NB} disjoint blocks")
 print()
 
-K_SHIPPED = {"bb_bond": C.K_BB, "intra_pc": C.K_INTRA_PC, "intra_cn": C.K_INTRA_CN,
+# No intra_pc / intra_cn -- see the same dict in ibi_round0.py.
+K_SHIPPED = {"bb_bond": C.K_BB,
              "angle": C.K_ANGLE, "dihedral": C.K_DIH, "stack": C.K_STACK}
 
 
@@ -300,6 +301,14 @@ def _forces_at(p):
     return C.cg_energy_forces(p, ij, pw, lams=lams_t, cell_list=cl2)[1]
 
 
+# P-C4' and C4'-N are rigid constraints: cg_energy_forces has no term for them any more, so an
+# unconstrained step here would leave them held only by the link terms, and C4'(L-1) by nothing.
+# This loop carries its own copy of the sampler rather than calling ibi_core.run_round, so it
+# carries its own constraint set too, and the same CONSTRAINED skip applies to its binning.
+CON = C.make_intra_constraints(L)
+print(f"constraints: {CON.describe()}")
+
+
 t0 = time.time()
 step = start_step
 while step < NSTEPS:
@@ -311,13 +320,15 @@ while step < NSTEPS:
             _e, f = C.cg_energy_forces(pos, ij, pw, lams=lams_t, cell_list=cl)
             pos, vel = C.batch_langevin_step(
                 pos, vel, f, temps_t, dt_ps=0.002, mass_amu=110.0, friction=FRICTION,
-                force_fn=_forces_at)
+                force_fn=_forces_at, constraints=CON)
         step += 1
         if step >= burn and step % STRIDE == 0:
             blk = min(((step - burn) * NB) // max(NSTEPS - burn, 1), NB - 1)
             b_frames[blk] += 1
             with torch.no_grad():
                 for c in B.COORDS:
+                    if c in B.CONSTRAINED:
+                        continue
                     q = B.coords_of(pos[:1], c).reshape(-1).numpy().astype(np.float64)
                     a = b_acc[blk][c]
                     a[0] += q.sum(); a[1] += (q ** 2).sum(); a[2] += q.size
@@ -409,6 +420,8 @@ print(f"{'coordinate':10s} {'ref sig':>8s} {'1-D sig':>8s} {'sim sig':>8s} "
 print("-" * 60)
 counts, acc = _summed()
 for c in B.COORDS:
+    if c in B.CONSTRAINED:
+        continue
     t = TAB[c]
     s1, s2, n = acc[c]
     m = s1 / n
