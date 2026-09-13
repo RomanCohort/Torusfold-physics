@@ -188,3 +188,20 @@ The current state, stated as limits rather than as plans:
   covalently closed.
 
 The ordered experiment list is in `docs/dev_machine_handoff.md`, section 7.
+
+## After this arc
+
+The next session's measurements are in `docs/ibi_loop_and_oxrna_findings.md`. Three entries above
+are superseded by it rather than merely extended:
+
+- **"The sampler the IBI loop needs does not exist yet"** -- it does now, and it has run a full
+  round. Round 0 -> round 1 left the joint residual unchanged while improving dihedral, which is
+  the coupling this list already describes seen from the other side.
+- **"The residual is one chain's"** -- E2 ran five structures, and the arms that matter are
+  quoted pooled, not per chain.
+- **"no constant can fix the dihedral"** -- Fourier N=2 does fix it (0.659 -> 1.060 pooled over
+  five chains), and the reason it cannot simply be adopted is new: it cannot enter the IBI loop.
+
+It also reports a negative that belongs to this list's caution about the sampler: REMD does not
+reduce the block spread, and the 660 ps production budget came out *worse* than the plain 400 ps
+no-exchange run.
