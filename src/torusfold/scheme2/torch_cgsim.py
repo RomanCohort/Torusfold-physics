@@ -2251,6 +2251,24 @@ def make_intra_constraints(
         pairs, targets, mass_amu=mass_amu, name="intra_residue", **kwargs)
 
 
+def constraint_fingerprint() -> str:
+    """One line naming the rigid-constraint set, for a run's provenance record.
+
+    A run under the two intra-residue constraints and a run under the two springs they
+    replaced print the SAME constant fingerprint, because a constraint has no constant to
+    name.  That is the provenance hole the _FINGERPRINT comments in scripts/ibi_round0.py
+    describe, one level down: there it is a constant whose value is missing from the record,
+    here it is a term with no value at all.  Both IBI scripts print this beside their
+    fingerprint so the record says which dynamics produced the numbers.
+
+    Read at call time, like the targets themselves, so a changed target changes the line.
+    """
+    return (f"rigid intra-residue constraints: P-C4' {BOND_P_C4} A, C4'-N {BOND_C4_N} A, "
+            f"2 per residue, no stiffness (SHAKE/RATTLE, tol_rel "
+            f"{rigid_bonds._TOL_REL[torch.float32]:g} float32 / "
+            f"{rigid_bonds._TOL_REL[torch.float64]:g} float64)")
+
+
 def batch_langevin_step(
     pos: "torch.Tensor", vel: "torch.Tensor", forces: "torch.Tensor",
     temperatures: "torch.Tensor",           # (B,) K

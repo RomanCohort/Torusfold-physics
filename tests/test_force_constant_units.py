@@ -1,11 +1,17 @@
 r"""Lock the per-constant unit convention of openmm_gpu_refiner.py, as its header states it.
 
-The trap this file keeps shut: that module declares K_BB, K_INTRA_PC, K_INTRA_CN and K_STACK
-in kJ/mol/angstrom^2 and multiplies them by 100 at their own use site, but hands K_PAIR, K_BSJ
-and K_BSJ_GUIDE to OpenMM RAW (no conversion), and multiplies K_CLASH by 10 rather than 100.
-The declaration therefore does not carry the unit.  Reading the block as if one conversion
-applied to all of it is wrong by a factor of 100 on three constants -- wrong in a way that
-still builds a legal System and raises nothing.
+The trap this file keeps shut: that module declares K_BB and K_STACK in kJ/mol/angstrom^2 and
+multiplies them by 100 at their own use site, but hands K_PAIR, K_BSJ and K_BSJ_GUIDE to OpenMM
+RAW (no conversion), and multiplies K_CLASH by 10 rather than 100.  The declaration therefore
+does not carry the unit.  Reading the block as if one conversion applied to all of it is wrong
+by a factor of 100 on three constants -- wrong in a way that still builds a legal System and
+raises nothing.
+
+K_INTRA_PC and K_INTRA_CN used to be the two other *100 rows and are deleted.  They are not
+missing from the dict below by oversight: P-C4' and C4'-N are System constraints now, and a
+constraint has no factor at use and no unit to convert.  The 3-bead model therefore has ONE
+HarmonicBondForce, the backbone; the intra-residue pairs appear in getNumConstraints() and in
+getConstraintParameters(), which is where this file and test_cpu_force_constants.py read them.
 
 _build_minimal_system_gpu is a second, P-only model with its own literals and no measurement
 behind them; it is locked here too, together with the two facts that make it a different model
@@ -30,8 +36,6 @@ import torusfold.scheme2.openmm_gpu_refiner as C  # noqa: E402
 # point of the table, and this dict is the second copy of it that fails loudly on drift.
 MAIN_FIELD_FACTOR = {
     "K_BB": 100.0,
-    "K_INTRA_PC": 100.0,
-    "K_INTRA_CN": 100.0,
     "K_STACK": 100.0,
     "K_ANGLE": 1.0,
     "K_DIHEDRAL": 1.0,
@@ -85,28 +89,38 @@ def test_each_main_field_constant_reaches_openmm_at_its_own_factor():
     def expect(name):
         return getattr(C, name) * MAIN_FIELD_FACTOR[name]
 
-    # -- the two HarmonicBondForces: backbone (*100) and intra-residue (*100, two constants)
+    # -- the one HarmonicBondForce: the backbone (*100).  The intra-residue pair is a
+    #    constraint here, so it has no factor to get wrong; it is asserted below.
     hb = [f for f in system.getForces() if isinstance(f, openmm.HarmonicBondForce)]
-    assert len(hb) == 2, "expected the backbone bond force and the intra-residue one"
-    backbone = intra = None
-    for f in hb:
-        ids = {_bond(f, b)[0] for b in range(f.getNumBonds())}
-        if (0, 3) in ids:            # P(0)-P(1), the backbone bond
-            backbone = f
-        if (0, 1) in ids:            # P(0)-C4'(0), intra-residue
-            intra = f
-    assert backbone is not None and intra is not None
+    assert len(hb) == 1, (
+        f"expected exactly one HarmonicBondForce (the backbone), got {len(hb)}. P-C4' and "
+        f"C4'-N are System constraints now; a second bonded force means they are springs "
+        f"again, and the factor table above would be silently incomplete")
+    backbone = hb[0]
+    ids = {_bond(backbone, b)[0] for b in range(backbone.getNumBonds())}
+    assert (0, 3) in ids, "the single HarmonicBondForce is not the P(i)-P(i+1) backbone"
+    assert (0, 1) not in ids and (1, 2) not in ids, (
+        "an intra-residue pair is in the bonded force list again")
 
     _, r0, k = _bond(backbone, 0)
     assert k == pytest.approx(expect("K_BB")), (
         f"K_BB reaches OpenMM as {k}, not K_BB * {MAIN_FIELD_FACTOR['K_BB']}")
     assert r0 == pytest.approx(C.BOND_P_NEXT / 10.0), "BOND_P_NEXT is not divided by 10"
 
-    intra_k = {_bond(intra, b)[0]: _bond(intra, b)[2] for b in range(intra.getNumBonds())}
-    assert intra_k[(0, 1)] == pytest.approx(expect("K_INTRA_PC"))
-    assert intra_k[(1, 2)] == pytest.approx(expect("K_INTRA_CN"))
-    assert expect("K_INTRA_PC") != pytest.approx(expect("K_INTRA_CN")), (
-        "P-C4' and C4'-N are back on one shared constant")
+    # -- the intra-residue pair, in the list that has no units: 2 constraints per residue
+    assert system.getNumConstraints() == 2 * L, (
+        f"expected 2 constraints per residue; got {system.getNumConstraints()}")
+    cst = {}
+    for c in range(system.getNumConstraints()):
+        i, j, d = system.getConstraintParameters(c)
+        cst[(min(i, j), max(i, j))] = _scalar(d)
+    assert set(cst) == {(3 * i, 3 * i + 1) for i in range(L)} \
+        | {(3 * i + 1, 3 * i + 2) for i in range(L)}, sorted(cst)
+    assert cst[(0, 1)] == pytest.approx(C.BOND_P_C4 / 10.0)
+    assert cst[(1, 2)] == pytest.approx(C.BOND_C4_N / 10.0)
+    assert not hasattr(C, "K_INTRA_PC") and not hasattr(C, "K_INTRA_CN"), (
+        "K_INTRA_PC/K_INTRA_CN are readable again; they were deleted, so that any surviving "
+        "reference raises rather than reading a stiffness that was never calibratable")
 
     # -- angle (*1) and dihedral (*1)
     ang = [f for f in system.getForces() if isinstance(f, openmm.HarmonicAngleForce)]

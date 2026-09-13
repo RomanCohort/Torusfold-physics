@@ -158,6 +158,9 @@ _missing = [n for n in _FINGERPRINT if not hasattr(C, n)]
 if _missing:
     raise RuntimeError(f"fingerprint names missing from module: {_missing}")
 print("field: " + "  ".join(f"{n}={getattr(C, n)}" for n in _FINGERPRINT))
+# P-C4'/C4'-N are rigid constraints, so they have no constant for the list above to name; a
+# constrained run and an unconstrained one print the same fingerprint without this line.
+print(C.constraint_fingerprint())
 import inspect as _inspect
 _cap = _inspect.signature(C.cg_energy_forces).parameters["force_cap"].default
 print(f"force_cap={_cap}  mass=110.0 Da  dt=0.002 ps  friction={FRICTION}/ps")

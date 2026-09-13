@@ -162,6 +162,11 @@ if _missing:
     raise RuntimeError(f"the fingerprint names {_missing}, which this module does not define; a "
                        f"renamed constant would silently drop out of the provenance record")
 print("field: " + "  ".join(f"{n}={getattr(C, n)}" for n in _FINGERPRINT))
+# The list above cannot name P-C4'/C4'-N: they are constraints, and a constraint has no value to
+# print.  Without this line a run with the constraints and one with the two springs that used to
+# hold them produce the SAME provenance record.  Sourced from the module rather than written out
+# here, so it cannot drift from the dynamics the way this file's own duplicated _FINGERPRINT did.
+print(C.constraint_fingerprint())
 import inspect as _inspect
 _cap = _inspect.signature(C.cg_energy_forces).parameters["force_cap"].default
 print(f"force_cap={_cap}  mass=110.0 Da  dt=0.002 ps  friction={FRICTION}/ps")
@@ -267,11 +272,18 @@ clash_below, clash_below_live = _res.clash_below, _res.clash_below_live
 
 print(f"done in {_res.seconds:.0f} s, {_res.steps_per_s:.1f} steps/s")
 if _WRITE:
+    # skip=_res.skip on both: the manifest's J must be computed by the SAME path that printed
+    # one, not merely agree with it. Today they coincide anyway, because a constrained
+    # coordinate's sigma_sim is exactly 0.0 and simref's own `r > 0` guard drops it -- so a
+    # divergence would need the two mechanisms to come apart (a coordinate with a tiny non-zero
+    # sigma, or a skip that is not a constraint), and then the printed J and the recorded one
+    # would differ with nothing in the output saying so.
+    _jscored, _joffered = IC.j_denominator(_res.acc, TAB, skip=_res.skip)
     _bJ = []
     for _b in range(NB):
-        _bv, _bj = IC.simref(_res.b_acc[_b], TAB)
+        _bv, _bj = IC.simref(_res.b_acc[_b], TAB, skip=_res.skip)
         _bJ.append(None if _bj != _bj else round(float(_bj), 6))
-    _wv, _wj = IC.simref(_res.acc, TAB)
+    _wv, _wj = IC.simref(_res.acc, TAB, skip=_res.skip)
     IC.write_round(_WRITE, _res, TAB, meta={
         "cmdline": " ".join(sys.argv),
         "table_file": str(_TABLE_PATH),
@@ -280,7 +292,13 @@ if _WRITE:
         "friction": FRICTION, "seed": SEED, "force_cap": CAP, "dt_ps": 0.002, "mass_amu": 110.0,
         "potentials": {_c: P.describe(_s, _c) for _c, _s, _ in _POTS},
         "fingerprint": {n: getattr(C, n) for n in _FINGERPRINT},
+        # A constraint is not in the fingerprint dict above and never can be: it has no value.
+        # Recorded as its own key so a manifest cannot be read as an unconstrained run's.
+        "constraints": C.constraint_fingerprint(),
         "joint_J": None if _wj != _wj else round(float(_wj), 6),
+        # and the denominator that J was averaged over. Without it a manifest holding 0.1447
+        # cannot be told from one holding a mean over six -- the number alone does not say.
+        "j_coords": [_jscored, _joffered],
         "block_J": _bJ,
         "per_coordinate": {c: {"n": int(_res.n_total[c]), "n_outside": int(_res.n_outside[c]),
                                "sim_ref": (None if v != v else round(float(v), 6))}
@@ -376,7 +394,16 @@ print("=== the correction at the reference mode, and its curvature ===")
 print(f"{'coordinate':10s} {'mode q':>9s} {'dU(mode)':>10s} {'dU at +1 sig':>13s} "
       f"{'dU at -1 sig':>13s}")
 print("-" * 60)
+_omitted = []
 for c in B.COORDS:
+    # `rows` is built with the constraint skip applied, so a constrained coordinate has no row
+    # here. It must be skipped rather than indexed: this loop used to KeyError on intra_pc the
+    # first time a constrained round reached it. Kept in B.COORDS order with the omission named
+    # below, because a table that silently loses rows is the same failure as a J that silently
+    # loses a denominator.
+    if c not in rows:
+        _omitted.append(c)
+        continue
     t = TAB[c]
     m, sig, dU = rows[c]
     i0 = int(np.argmin(t["U"]))
@@ -384,3 +411,6 @@ for c in B.COORDS:
     q0 = float(t["centre"][i0])
     print(f"{c:10s} {q0:9.4f} {dU[i0]:10.2f} {dU[idx(q0 + t['sigma'])]:13.2f} "
           f"{dU[idx(q0 - t['sigma'])]:13.2f}")
+if _omitted:
+    print(f"not shown: {', '.join(_omitted)} -- rigid constraints, not scored coordinates. "
+          f"They have no equilibrium distribution to correct, so there is no dU to plot.")

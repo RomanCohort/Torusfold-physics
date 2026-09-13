@@ -159,8 +159,6 @@ def _write_refined_pdb(
 #
 #                  declared as         factor at use   what OpenMM receives            term
 #   K_BB           kJ/mol/angstrom^2   * 100           1122   kJ/mol/nm^2   HarmonicBondForce,   E = 0.5*k*(r-r0)^2
-#   K_INTRA_PC     kJ/mol/angstrom^2   * 100          22390   kJ/mol/nm^2   HarmonicBondForce,   E = 0.5*k*(r-r0)^2
-#   K_INTRA_CN     kJ/mol/angstrom^2   * 100          37680   kJ/mol/nm^2   HarmonicBondForce,   E = 0.5*k*(r-r0)^2
 #   K_STACK        kJ/mol/angstrom^2   * 100           95.9   kJ/mol/nm^2   CustomBondForce,     E = 0.5*k*(r-r0)^2
 #   K_ANGLE        kJ/mol/rad^2        * 1   (raw)     16.78  kJ/mol/rad^2  HarmonicAngleForce,  E = 0.5*k*(th-th0)^2
 #   K_DIHEDRAL     kJ/mol/rad^2        * 1   (raw)      2.12  kJ/mol/rad^2  CustomTorsionForce,  E = 0.5*k*(th-th0)^2
@@ -176,6 +174,15 @@ def _write_refined_pdb(
 # 0.5 while every row above does, so 3000 there is 6000 in the 0.5*k convention those rows
 # use.  The clash is not softer than the pairing force just because its numeral is smaller.
 #
+# P-C4' AND C4'-N ARE NOT IN THIS TABLE, because they are not forces in this System any more.
+# They are two `System.addConstraint` entries per residue (see _build_3bead_system_gpu), and a
+# constraint has no stiffness and no factor at use: the distance is a holonomic condition, not
+# a term in the energy.  Being absent from a table of per-constant conversions is the correct
+# state for them; a row here with a factor would be a row someone could later "fix".
+# BOND_P_C4 and BOND_C4_N below survive as the constraint targets -- they are the live values.
+# The rest of the pipeline already agrees: torch_cgsim.py's K_INTRA_PC/K_INTRA_CN are deleted
+# and make_intra_constraints holds the same 0.390/0.335 nm (rigid_bonds.py).
+#
 # NO VALUE WAS CHANGED WHEN THIS TABLE WAS WRITTEN.  K_PAIR in particular stays 1500:
 # the base-pair stiffness the database supports is bracketed to roughly [205, 1881], and
 # 1500 lies inside that bracket, so there is nothing to change it to.
@@ -187,16 +194,24 @@ def _write_refined_pdb(
 # number there do not mean the same thing and must not be made to agree by copying numerals.
 #
 # Measured by scripts/measure_cpu_constants.py from D:\torusfold-cgdata\rsRNASP\
-# Training_set through the boltzmann_bonded machinery (126 gap-free chains, 6386-6764
+# Training_set through the boltzmann_bonded machinery (126 gap-free chains, 6386-6638
 # observations per coordinate).  A harmonic whose equilibrium spread is sigma needs
 # k = kBT/sigma^2, with kBT = 2.494 kJ/mol at 300 K.  The sigma quoted below is pooled
 # over every chain, so it folds sequence and conformer variation into the thermal width:
 # kBT/sigma^2 is a LOWER BOUND on the stiffness, not the stiffness.  The mean
 # within-chain sigma is given for scale and gives a stiffer (still bounded) value.
 # tests/test_cpu_force_constants.py locks each constant to its own sigma.
+#
+# K_INTRA_PC = 223.9 and K_INTRA_CN = 376.8 USED TO BE DECLARED HERE AND ARE DELETED, not
+# retired to zero.  Their sigmas are 0.1055 A and 0.0814 A, BELOW the 0.1-0.3 A coordinate
+# error floor of the source structures: what that sigma measures is how tightly refinement
+# restrained those two distances, not how much they move at 300 K.  The criterion kBT/sigma^2
+# is not weak here, it is INAPPLICABLE -- there is no thermal width to invert.  So the two
+# distances became the constraints described above, and the numbers that could not be
+# calibrated are gone.  Deleting rather than zeroing is deliberate: every surviving reference
+# to these names now raises instead of silently reading 0.0, which is what makes the removal
+# checkable at all (tests/test_ff_bonded_targets.py asserts they are not attributes).
 K_BB = 11.22         # P-P;         *100 at use ->  1122 kJ/mol/nm^2;  sigma = 0.4714 A over 6638 bonds (0.4454)
-K_INTRA_PC = 223.9   # P-C4';       *100 at use -> 22390 kJ/mol/nm^2;  sigma = 0.1055 A over 6764       (0.0917)
-K_INTRA_CN = 376.8   # C4'-N;       *100 at use -> 37680 kJ/mol/nm^2;  sigma = 0.0814 A over 6764       (0.0736)
 K_STACK = 0.959      # N(i)-N(i+1); *100 at use ->  95.9 kJ/mol/nm^2;  sigma = 1.6127 A over 6638       (1.4959)
 K_ANGLE = 16.78      # P-P-P angle;   *1 at use -> 16.78 kJ/mol/rad^2; sigma = 0.3855 rad over 6512     (0.3570)
 K_DIHEDRAL = 2.12    # P-P-P-P dih;   *1 at use ->  2.12 kJ/mol/rad^2; sigma = 1.0846 rad over 6386     (1.0249)
@@ -252,6 +267,12 @@ def _build_3bead_system_gpu(
 
     The force field is identical to cg_forcefield.build_3bead_system(), but with a
     simplified interface and no statistical potential (the GPU path prioritizes speed).
+
+    One deliberate difference from that historical model: the two intra-residue distances
+    P-C4' and C4'-N are `System.addConstraint` entries, not HarmonicBondForces.  The caller
+    sees nothing new -- the returned tuple is unchanged and no integrator call site changes,
+    since every integrator here applies constraints natively -- but `system.getNumConstraints()`
+    is 2L, and the reported potential energy no longer contains those two terms.
 
     Args:
         p_coords: (L,3) P coordinates (Angstroms)
@@ -392,13 +413,29 @@ def _build_3bead_system_gpu(
         if n_bpp_soft > 0:
             system.addForce(bpp_soft_force)
 
-    # 2. Intra-residue bonds P-C4', C4'-N.  Separate constants: the measured spreads
-    #    differ by 1.7x (0.1055 A vs 0.0814 A), so one shared value cannot match both.
-    bond_intra = mm.HarmonicBondForce()
+    # 2. Intra-residue distances P-C4' and C4'-N: RIGID CONSTRAINTS, not springs.
+    #    These two used to be two HarmonicBondForces at K_INTRA_PC/K_INTRA_CN = 223.9/376.8,
+    #    which is kBT/sigma^2 over sigmas of 0.1055 A and 0.0814 A -- BELOW the 0.1-0.3 A
+    #    coordinate-error floor of the source structures.  A stiffness is a function of a
+    #    thermal width; below that floor there is no thermal width to invert, so the number
+    #    was not a weak measurement, it was an inapplicable one.  A constraint is the honest
+    #    form: it asserts the distance and claims nothing about its flexibility.
+    #
+    #    Applied by the integrator, not by a force: every integrator in this file is a
+    #    LangevinMiddleIntegrator (or LocalEnergyMinimizer), both of which project onto the
+    #    constraint manifold natively, so no integrator call site changes.  OpenMM projects at
+    #    the first step, so the random C4'/N placement above (sigma 0.3 A per component) does
+    #    NOT have to be pre-projected here -- measured on OpenMM 8.5.2: setPositions accepts a
+    #    0.5 nm violation without raising, and one step lands the distance on 0.3900 nm.
+    #
+    #    CONSEQUENCE FOR ENERGIES: these two terms are no longer in the potential, so every
+    #    energy this file reports or compares (annealing, REMD acceptance, minimizer output)
+    #    drops by their contribution.  Comparisons WITHIN a run are unaffected -- criterion and
+    #    dynamics read the same System -- but an energy compared against a stored number from
+    #    before this change is not comparable.
     for i in range(L):
-        bond_intra.addBond(P(i), C4(i), BOND_P_C4 / 10.0, K_INTRA_PC * 100.0)
-        bond_intra.addBond(C4(i), N(i), BOND_C4_N / 10.0, K_INTRA_CN * 100.0)
-    system.addForce(bond_intra)
+        system.addConstraint(P(i), C4(i), BOND_P_C4 / 10.0)
+        system.addConstraint(C4(i), N(i), BOND_C4_N / 10.0)
 
     # 3. Backbone angle P-P-P
     angle_force = mm.HarmonicAngleForce()

@@ -417,6 +417,33 @@ def test_the_factory_reads_the_constants_at_call_time():
     assert float(C.make_intra_constraints(2, mass_amu=MASS).targets[0]) == saved_pc
 
 
+def test_the_constraint_fingerprint_names_the_live_targets():
+    """The provenance line the constant fingerprint structurally cannot carry.
+
+    A constrained run and a run under the two springs it replaced print the same _FINGERPRINT,
+    because a constraint has no constant.  The plan named this as a risk and it is closed by
+    C.constraint_fingerprint(), which both IBI scripts print and ibi_round0 records in its
+    manifest.  Two things are checkable: it names the current targets, and it moves when they do.
+    """
+    line = C.constraint_fingerprint()
+    assert f"{C.BOND_P_C4}" in line, f"the fingerprint does not name the P-C4' target: {line!r}"
+    assert f"{C.BOND_C4_N}" in line, f"the fingerprint does not name the C4'-N target: {line!r}"
+    assert "no stiffness" in line, (
+        f"the fingerprint reads {line!r}, which does not say that these distances are rigid "
+        f"rather than stiff; the whole point of the line is that there is no k to record")
+
+    saved = C.BOND_P_C4, C.BOND_C4_N
+    try:
+        C.BOND_P_C4, C.BOND_C4_N = 0.401, 0.349
+        moved = C.constraint_fingerprint()
+        assert moved != line, (
+            "the fingerprint did not change when the targets did, so it is a frozen copy and "
+            "would record the wrong constraint set")
+        assert "0.401" in moved and "0.349" in moved, moved
+    finally:
+        C.BOND_P_C4, C.BOND_C4_N = saved
+
+
 # ── what the field no longer does, and who notices ─────────────────────────────────────────
 def test_an_ibi_round_excludes_the_constrained_coordinates():
     """A constrained coordinate has no equilibrium distribution, so it cannot enter J.
