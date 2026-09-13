@@ -148,7 +148,14 @@ print(f"full field as shipped, 300 K, mass 110 Da, friction {FRICTION}/ps, "
 _FINGERPRINT = ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_INTRA_PN",
                 "K_LINK_CP", "K_LINK_NP", "K_LINK_NC",
                 "K_PAIR", "K_ANGLE", "K_DIH", "K_BPP", "K_STACK",
-                "K_CLASH", "CLASH_SIGMA", "K_BSJ", "K_BSJ_GUIDE")
+                "K_CLASH", "CLASH_SIGMA", "K_BSJ", "K_BSJ_GUIDE",
+                # K_BSJ_CONTACT was missing here until an IBI round-0 run patched it to zero
+                # and the manifest recorded three of the four BSJ constants. ibi_remd_residual.py
+                # has had it in its own copy of this tuple all along -- the same duplicated-list
+                # drift the paragraph above complains about. Its absence is exactly the failure
+                # the comment warns of: a run under a patched field printing the fingerprint of
+                # an unpatched one.
+                "K_BSJ_CONTACT")
 _missing = [n for n in _FINGERPRINT if not hasattr(C, n)]
 if _missing:
     raise RuntimeError(f"the fingerprint names {_missing}, which this module does not define; a "

@@ -35,6 +35,8 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "src"))
 import boltzmann_bonded as B          # noqa: E402
 import torusfold.scheme2.torch_cgsim as C   # noqa: E402
+import cg_potentials as P              # noqa: E402
+import ibi_core as IC                  # noqa: E402
 
 THREADS = int(os.environ.get("POOL_THREADS", "0") or 0)
 if THREADS > 0:
@@ -72,15 +74,56 @@ STRIDE = int(_positional[5]) if len(_positional) > 5 else 25
 _burn_arg = int(_positional[6]) if len(_positional) > 6 else 0
 burn = _burn_arg if _burn_arg > 0 else max(NSTEPS // 5, 1)
 
+
+def _opt(name, default=""):
+    """--name=VALUE out of argv as a string, leaving the positional arguments untouched."""
+    pre = f"--{name}="
+    for a in sys.argv[1:]:
+        if a.startswith(pre):
+            return a[len(pre):]
+    return default
+
+
 NPZ = REPO / "results" / "boltzmann_tables_clean.npz"
 SEED = 20260218
+import inspect as _inspect
+_cap = _inspect.signature(C.cg_energy_forces).parameters["force_cap"].default
 
-z = np.load(NPZ)
-TAB = {}
-for name in B.COORDS:
-    TAB[name] = {"centre": z[f"{name}__centre"], "U": z[f"{name}__U"],
-                 "binw": float(z[f"{name}__binw"]), "sigma": float(z[f"{name}__sigma"]),
-                 "lo": float(z[f"{name}__lo"]), "hi": float(z[f"{name}__hi"])}
+# ── optional substitutes for the two backbone angular terms ──
+# Same flags and same construction as ibi_round0.py, because the point of this script is to run
+# the SAME field on several chains: a potential that changes one and not the other would make the
+# pooled comparison measure the difference between two protocols.
+#
+# Note this is the flag a POOLED run needs and --set= is not: --set replaces a CONSTANT's value,
+# while a potential replaces a term's SHAPE and leaves every constant alone -- so --set cannot
+# express it, and the constant fingerprint cannot show it.
+_TABLE_PATH = Path(_opt("table", str(NPZ)))
+P.use_table_file(_TABLE_PATH)
+TAB = IC.load_tables(_TABLE_PATH)
+
+_POTS = []          # [(coord, spec, potential)]
+for _coord in ("angle", "dihedral"):
+    _text = _opt(_coord, "")
+    if _text:
+        _spec = P.resolve_spec(_text, _coord)
+        _POTS.append((_coord, _spec, P.make_potential(_coord, _spec)))
+_POT_KW = {f"{_c}_potential": _pot for _c, _s, _pot in _POTS}
+
+_cap_text = _opt("cap", "auto")
+if _cap_text == "auto":
+    CAP = float(_cap)
+elif _cap_text == "none":
+    CAP = None
+else:
+    CAP = float(_cap_text)
+
+if _POTS:
+    print("potentials: " + "  ".join(f"{_c}={P.describe(_s)}" for _c, _s, _ in _POTS)
+          + f"  cap={'none' if CAP is None else f'{CAP:g}'}")
+    print("            NOTE: the constant fingerprint below does NOT reflect this -- it names "
+          "constants,")
+    print("            and a potential replaces the SHAPE of a term while leaving every "
+          "constant alone.")
 
 pool = [s for s in B.load_structures(limit=400) if len(s["pairs"]) >= 8 and 24 <= len(s["pos"]) <= 34]
 s0 = pool[IDX]
@@ -94,8 +137,6 @@ _FINGERPRINT = ("K_BB", "K_INTRA_PC", "K_INTRA_CN", "K_INTRA_PN",
                 "K_PAIR", "K_ANGLE", "K_DIH", "K_BPP", "K_STACK",
                 "K_CLASH", "CLASH_SIGMA", "K_BSJ", "K_BSJ_GUIDE")
 print("field: " + "  ".join(f"{n}={getattr(C, n)}" for n in _FINGERPRINT))
-import inspect as _inspect
-_cap = _inspect.signature(C.cg_energy_forces).parameters["force_cap"].default
 print(f"force_cap={_cap}  mass=110.0 Da  dt=0.002 ps  friction={FRICTION}/ps  threads={torch.get_num_threads()}")
 
 pos = torch.tensor(s0["pos"].reshape(1, 3 * L, 3), dtype=torch.float64).repeat(NREP, 1, 1)
@@ -104,64 +145,26 @@ ij = torch.tensor(s0["pairs"], dtype=torch.long).reshape(-1, 2)
 pw = torch.ones(len(ij), dtype=torch.float32)
 temps = torch.full((NREP,), 300.0, dtype=torch.float64)
 
-torch.manual_seed(SEED)
+# The loop lives in ibi_core, NOT here. This script used to carry its own copy of it, which is
+# what docs/statistical_potentials_as_forces.md:2754 forbids -- this repository has already
+# drifted three times from duplicated logic, and a second sampling loop means a change to one
+# silently leaves the other behind. The stakes are higher here than usual: the whole point of
+# this script is to run the SAME protocol on several chains, so a divergence between two copies
+# would be measured as a difference between two FIELDS.
+#
+# What stays here is the accumulator's use. sum / sumsq / n are the minimal sufficient statistics
+# for the pooled variance across structures (the pooled variance needs the grand mean, which
+# needs the per-chain sums, so saving sigma alone would be lossy). run_round returns the same
+# accumulator it always did, so this stays a one-line binding.
+_res = IC.run_round(pos=pos, vel=vel, ij=ij, pw=pw, temps=temps, tab=TAB,
+                    nsteps=NSTEPS, burn=burn, stride=STRIDE, blocks=1,
+                    friction=FRICTION, force_cap=CAP, pot_kw=_POT_KW, seed=SEED, nrep=NREP)
+acc = _res.acc
+clash_min = _res.clash_min
+clash_below, clash_below_live = _res.clash_below, _res.clash_below_live
 
-# Whole-window per-coordinate moments. sum / sumsq / n are the minimal sufficient statistics
-# for the pooled variance across structures (pooled var needs the grand mean, which needs the
-# per-chain sums, so saving just sigma would be lossy).
-acc = {c: [0.0, 0.0, 0] for c in B.COORDS}
-
-clash_min = []
-clash_below = 0
-clash_below_live = 0
-
-
-def _forces_at(p):
-    cl2 = C.GPUCellList(cell_size=1.5)
-    cl2.build(p)
-    return C.cg_energy_forces(p, ij, pw, cell_list=cl2)[1]
-
-
-t0 = time.time()
-for step in range(NSTEPS):
-    with torch.no_grad():
-        cl = C.GPUCellList(cell_size=1.5)
-        cl.build(pos)
-        e, f = C.cg_energy_forces(pos, ij, pw, cell_list=cl)
-        pos, vel = C.batch_langevin_step(pos, vel, f, temps,
-                                         dt_ps=0.002, mass_amu=110.0,
-                                         friction=FRICTION, force_fn=_forces_at)
-    if step == 0:
-        print(f"first step {time.time() - t0:.3f} s")
-    if step >= burn and step % STRIDE == 0:
-        with torch.no_grad():
-            for c in B.COORDS:
-                q = B.coords_of(pos, c).reshape(-1).numpy().astype(np.float64)
-                a = acc[c]
-                a[0] += q.sum()
-                a[1] += (q ** 2).sum()
-                a[2] += q.size
-            beads = pos.reshape(NREP, -1, 3)
-            dd = torch.cdist(beads, beads)
-            dd = dd + torch.eye(dd.shape[-1], device=dd.device) * 10.0
-            clash_min.append(float(dd.min()))
-            clash_below += int((dd < C.CLASH_DIST).sum())
-            clash_below_live += int((dd < C.CLASH_SIGMA).sum())
-    if (step + 1) % max(NSTEPS // 10, 1) == 0:
-        el = time.time() - t0
-        parts = []
-        for c in B.COORDS:
-            s1, s2, n = acc[c]
-            if n:
-                mm = s1 / n
-                ss = float(np.sqrt(max(s2 / n - mm * mm, 0.0)))
-                parts.append(f"{c[:5]} {ss / TAB[c]['sigma']:5.3f}")
-            else:
-                parts.append(f"{c[:5]}   --")
-        print(f"  {step + 1:>7d} {el:6.0f}s  " + "  ".join(parts))
-
-el = time.time() - t0
-print(f"done in {el:.0f} s, {NSTEPS / el:.1f} steps/s")
+el = _res.seconds
+print(f"done in {el:.0f} s, {_res.steps_per_s:.1f} steps/s")
 print(f"clash watch: closest bead pair ever {min(clash_min):.4f} nm; "
       f"below live {C.CLASH_SIGMA:.4f}: {clash_below_live}; below old 0.300: {clash_below}")
 
