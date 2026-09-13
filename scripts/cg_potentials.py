@@ -52,6 +52,41 @@ import torusfold.scheme2.torch_cgsim as C     # noqa: E402
 COORDS = ("angle", "dihedral", "bb_bond")
 _FORCE_FN = {"angle": FR.angle_force, "dihedral": FR.dihedral_force, "bb_bond": FR.bond_force}
 
+# coord -> the keyword cg_energy_forces takes for it. This is NOT f"{coord}_potential", and
+# building it that way is a bug that shipped: the coordinate is called `bb_bond` because that is
+# the npz key and the CLI flag, while the field's parameter is `bond_potential`, so
+# f"{_c}_potential" produced `bb_bond_potential` and `--bb_bond=table_wall:200` died with
+# "cg_energy_forces() got an unexpected keyword argument".  angle and dihedral happened to
+# coincide, which is why only the third coordinate exposed it -- and nothing tested the CLI path,
+# only make_potential's return value, so the whole bb_bond track was unreachable from the command
+# line while every unit test passed.
+# tests/test_table_potential_injection.py checks every entry against the real signature.
+POTENTIAL_KWARG = {
+    "angle": "angle_potential",
+    "dihedral": "dihedral_potential",
+    "bb_bond": "bond_potential",
+}
+
+
+def potential_kwargs(pots):
+    """{cg_energy_forces keyword: potential} from [(coord, spec, pot)].
+
+    The one place that turns a coordinate name into the keyword the field accepts. Both samplers
+    call this instead of spelling the f-string themselves; a second copy is how the mismatch
+    above survived, since a copy that is wrong in the same way is not a check.
+    """
+    out = {}
+    for coord, _spec, pot in pots:
+        if coord not in POTENTIAL_KWARG:
+            raise SystemExit(
+                f"no cg_energy_forces keyword is registered for coordinate {coord!r}. Adding a "
+                f"coordinate means adding it to POTENTIAL_KWARG; without that its --{coord}= flag "
+                f"produces a keyword the field rejects, which is a TypeError at the first step of "
+                f"a sampling run rather than at parse time.")
+        out[POTENTIAL_KWARG[coord]] = pot
+    return out
+
+
 # Specs that exist for the cosine coordinates but are meaningless for a distance, refused by
 # name in resolve_spec. Kept here so the refusal text and the capability live together.
 _BOND_ONLY = ("table_wall",)

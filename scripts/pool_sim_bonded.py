@@ -108,7 +108,7 @@ for _coord in ("angle", "dihedral", "bb_bond"):
     if _text:
         _spec = P.resolve_spec(_text, _coord)
         _POTS.append((_coord, _spec, P.make_potential(_coord, _spec)))
-_POT_KW = {f"{_c}_potential": _pot for _c, _s, _pot in _POTS}
+_POT_KW = P.potential_kwargs(_POTS)
 
 _cap_text = _opt("cap", "auto")
 if _cap_text == "auto":

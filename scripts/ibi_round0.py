@@ -112,7 +112,7 @@ for _coord in ("angle", "dihedral", "bb_bond"):
     if _text:
         _spec = P.resolve_spec(_text, _coord)
         _POTS.append((_coord, _spec, P.make_potential(_coord, _spec)))
-_POT_KW = {f"{_c}_potential": _pot for _c, _s, _pot in _POTS}
+_POT_KW = P.potential_kwargs(_POTS)
 
 # --cap=auto|none|NUMBER. "auto" reads force_cap's own default off the signature, which is the
 # shipped behaviour and the default here. force_cap rescales the SUMMED force vector, so a term

@@ -27,9 +27,12 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
+import numpy as np                            # noqa: E402
 import torch                                  # noqa: E402
 import torusfold.scheme2.torch_cgsim as C     # noqa: E402
 import cg_potentials as P                     # noqa: E402
+import force_reference as FR                  # noqa: E402
+import ibi_core as IC                         # noqa: E402
 
 # Deliberately no `import pytest`: this machine has no pytest installed, and the cases are loops
 # inside the test functions rather than @parametrize so that `python tests/test_<name>.py` works
@@ -144,11 +147,11 @@ def test_injection_survives_the_samplers_no_grad_scope():
     assert float(f.abs().amax()) > 0.0
 
 
-def test_the_two_parameters_are_keyword_only():
+def test_the_three_parameters_are_keyword_only():
     """Keyword-only is what keeps the ~20 existing positional call sites unbreakable.
 
     Every caller in scripts/ and src/ passes pos, pairs, w positionally and the rest by keyword.
-    Adding these two after a bare "*" means no future reordering can silently shift an argument
+    Adding these three after a bare "*" means no future reordering can silently shift an argument
     into a potential slot -- which would not raise, it would sample a different field.
     """
     sig = inspect.signature(C.cg_energy_forces)
@@ -158,6 +161,194 @@ def test_the_two_parameters_are_keyword_only():
             f"{name} must be keyword-only; a positional slot can be filled by accident")
         assert sig.parameters[name].default is None, (
             f"{name} must default to None -- a non-None default would change every existing call")
+
+
+def test_every_coordinate_maps_to_a_real_cg_energy_forces_keyword():
+    """The check that was missing, and the reason the whole bb_bond track was unreachable.
+
+    Every test in this file injects `bond_potential=` by hand, so none of them ever exercised the
+    path a user takes: `--bb_bond=table_wall:200`. That flag expanded to the keyword
+    "bb_bond_potential", while the field's parameter is "bond_potential", so a sampling run died
+    with `cg_energy_forces() got an unexpected keyword argument 'bb_bond_potential'` at its first
+    step -- after printing its whole provenance header as though it had started. `angle` and
+    `dihedral` happened to coincide, which is why only the third coordinate exposed it.
+
+    So this test compares the names against the real signature rather than against a list here.
+    A name list would be a third copy of the mapping and could be wrong in the same way.
+    """
+    params = set(inspect.signature(C.cg_energy_forces).parameters)
+    assert set(P.POTENTIAL_KWARG) == set(P.COORDS), (
+        f"POTENTIAL_KWARG covers {sorted(P.POTENTIAL_KWARG)} but the samplers offer "
+        f"--{'/--'.join(P.COORDS)}; a coordinate in one and not the other either has no flag or "
+        f"has a flag with no keyword")
+    for coord, kw in sorted(P.POTENTIAL_KWARG.items()):
+        assert kw in params, (
+            f"coordinate {coord!r} maps to the keyword {kw!r}, which cg_energy_forces does not "
+            f"accept. Its --{coord}= flag would raise TypeError at the first sampling step. "
+            f"The parameters containing 'potential' are "
+            f"{sorted(p for p in params if 'potential' in p)}")
+    # The mapping must survive potential_kwargs, since that is what the samplers actually call.
+    sentinel = object()
+    built = P.potential_kwargs([(c, None, sentinel) for c in P.COORDS])
+    assert set(built) == {P.POTENTIAL_KWARG[c] for c in P.COORDS}
+    assert all(v is sentinel for v in built.values())
+    try:
+        P.potential_kwargs([("bbond", None, sentinel)])
+    except SystemExit as exc:
+        assert "POTENTIAL_KWARG" in str(exc), str(exc)
+    else:
+        raise AssertionError(
+            "an unregistered coordinate was accepted; it would reach cg_energy_forces as an "
+            "unexpected keyword at the first step of a sampling run")
+
+
+def test_a_cli_derived_potential_set_is_accepted_by_a_real_call():
+    """Build the dict the CLI builds, and hand it to cg_energy_forces for real.
+
+    The name test above proves the mapping is right; this proves the call works. The two are
+    separate because a mapping can name a real parameter and still, say, place the potential under
+    the wrong coordinate's keyword -- which samples a different field without raising.
+    """
+    pos = _chain(B=2)
+    pairs, pw = _pairs()
+    # The CLI text forms, exactly as `--angle=..` etc. arrive, so resolve_spec is exercised too.
+    specs = {"angle": "table", "dihedral": "table", "bb_bond": "table_wall:200"}
+    pots = []
+    for c, s in sorted(specs.items()):
+        spec = P.resolve_spec(s, c)
+        pots.append((c, spec, P.make_potential(c, spec)))
+    kw = P.potential_kwargs(pots)
+    assert set(kw) == {"angle_potential", "dihedral_potential", "bond_potential"}, sorted(kw)
+
+    cl = _cell(pos)
+    with torch.no_grad():
+        e_inj, f_inj = C.cg_energy_forces(pos, pairs, pw, cell_list=cl, **kw)
+        e_ref, f_ref = C.cg_energy_forces(pos, pairs, pw, cell_list=cl)
+    assert torch.isfinite(e_inj).all(), f"injected energies are not finite: {e_inj}"
+    assert torch.isfinite(f_inj).all(), "injected forces are not finite"
+    assert not torch.equal(e_inj, e_ref), (
+        "the injected set produced the same energy as the shipped field; the potentials are not "
+        "reaching the terms they name, so the run would be recorded under a field it did not use")
+
+
+def test_the_bond_table_wall_reproduces_boltzmann_bonded_exactly():
+    """The wall is a second implementation of one expression, so it is compared, not asserted.
+
+    "table" alone has no restoring force outside the support: the shipped bb_bond table is flat
+    at both edges (U[0] == U[1] == U[-2] == U[-1] == 15.285851, so the computed slopes are exactly
+    zero), and _interp clamps. So the wall is the only thing that bounds an excursion, and
+    ("table_wall", k) must be the SAME wall boltzmann_bonded.energy applies -- slopes read off the
+    table edges rather than hard-coded to zero, because a table whose edges did slope would then
+    get a discontinuous force there.
+
+    The other five coordinates are neutralised rather than subtracted: their tables are given
+    U = 0 over a support far wider than any coordinate reaches, so their contribution to
+    B.energy is exactly 0.0 for any geometry. Differencing two geometries instead would not work,
+    because stack is N(i)-N(i+1) and moves with the bond.
+    """
+    import boltzmann_bonded as B
+
+    # The loaded tables, prepared the way the samplers prepare them: _sample reads t["Ut"], the
+    # torch cache B.prepare installs, not t["U"].
+    tables = B.prepare(IC.load_tables(str(REPO / "results" / "boltzmann_tables_clean.npz")))
+    tab = tables["bb_bond"]
+    flat = {"lo": -1.0e3, "hi": 1.0e3, "binw": 1.0,
+            "U": np.zeros(4), "centre": np.zeros(4), "sigma": 1.0}
+    L = 3
+    for k in (200.0, 500.0):
+        v = FR._v_fn(("table_wall", k), "bond")
+        for r in (0.300000, tab["lo"], 0.500000, tab["hi"], 1.000000):
+            pos = torch.zeros(1, 3 * L, 3, dtype=torch.float64)
+            for i in range(L):
+                pos[0, 3 * i] = torch.tensor([i * r, 0.0, 0.0], dtype=torch.float64)
+                pos[0, 3 * i + 1] = pos[0, 3 * i] + torch.tensor(
+                    [0.12, 0.37, 0.0], dtype=torch.float64)
+                pos[0, 3 * i + 2] = pos[0, 3 * i] + torch.tensor(
+                    [0.19, 0.67, 0.13], dtype=torch.float64)
+            t6 = {c: dict(flat) for c in B.COORDS}
+            t6["bb_bond"] = tab
+            B.prepare(t6)
+            bb = float(B.energy(pos, t6, k_wall=k))
+            fr = float(v(torch.tensor([[r] * (L - 1)], dtype=torch.float64)).sum())
+            assert abs(fr - bb) < 1e-9, (
+                f"k={k} r={r}: the injected table_wall is {fr}, boltzmann_bonded.energy's own "
+                f"bb_bond term is {bb}, difference {fr - bb:.3e}. These are the same wall "
+                f"expressed twice; a divergence is a force discontinuity outside the support.")
+
+
+def test_every_field_evaluation_in_run_round_takes_the_potentials():
+    """The plan's risk 4, for the sampler IBI actually uses.
+
+    `run_round` evaluates the field twice: once inside `_forces_at`, which is handed to
+    batch_langevin_step as the symplectic tail kick and is therefore part of the DYNAMICS, and
+    once for the step itself. If one of them omitted pot_kw, the round would sample a field
+    that is not the field its criterion and its `dU` describe -- and nothing would raise. The
+    binning would look normal and the J would be a number.
+
+    Structural rather than behavioural on purpose, the same way
+    tests/test_bond_constraints.py checks BatchedREMD2D.run: a divergence of this kind needs no
+    runtime to exist, and an assertion on a sampled distribution cannot distinguish it from an
+    unlucky seed.
+
+    NOT covered here: whether the `harmonic:` spec reproduces the shipped bond to the last bit.
+    It does not, and it is not supposed to -- test_the_wrapped_bond_harmonic_reproduces_the_field
+    _exactly measures the force as one ULP off on 6 of 648 float64 components, because
+    force_reference's harmonic is a second implementation differentiated by autograd. Handing the
+    injection `C._bond_f` itself instead IS bit-identical, which is the plan's Step 1 gate and is
+    checked by test_injected_shipped_harmonic_is_bit_identical.
+    """
+    import ast
+
+    src = pathlib.Path(IC.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    run = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "run_round":
+            run = node
+    assert run is not None, "ibi_core.run_round not found; has it been renamed or moved?"
+
+    def _callee(node):
+        """The called name, whether it is `foo(...)` or `C.foo(...)`.
+
+        Both forms are in play: ibi_core calls `C.cg_energy_forces` (attribute) while
+        torch_cgsim's own tests see the bare name. Matching only ast.Name made this walk find
+        zero calls and pass vacuously -- which the n_field guard below now refuses.
+        """
+        if isinstance(node.func, ast.Name):
+            return node.func.id
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr
+        return None
+
+    no_pot, bare_steps, n_field, n_steps = [], [], 0, 0
+    for node in ast.walk(run):
+        if isinstance(node, ast.Call):
+            name = _callee(node)
+            if name == "cg_energy_forces":
+                n_field += 1
+                if not any(k.arg == "pot_kw" or k.arg is None for k in node.keywords):
+                    no_pot.append(node.lineno)
+            if name == "batch_langevin_step":
+                n_steps += 1
+                if not any(k.arg == "constraints" for k in node.keywords):
+                    bare_steps.append(node.lineno)
+
+    # Without these, a rename or a refactor that moved both calls into a helper would leave the
+    # two assertions below passing on an empty walk -- the check would silently stop checking.
+    assert n_field == 2, (
+        f"expected run_round to evaluate the field at 2 sites (the step, and _forces_at for the "
+        f"symplectic tail kick), found {n_field}. If a site was added or moved, this test's "
+        f"coverage changed and must be re-argued rather than left passing on less.")
+    assert n_steps == 1, (
+        f"expected exactly one batch_langevin_step in run_round, found {n_steps}")
+
+    assert not no_pot, (
+        f"ibi_core.run_round evaluates cg_energy_forces without pot_kw at line(s) {no_pot}. One "
+        f"of those is inside _forces_at, which the integrator uses as its symplectic tail kick, "
+        f"so the round would sample a different field from the one it scores.")
+    assert not bare_steps, (
+        f"ibi_core.run_round calls batch_langevin_step without constraints= at line(s) "
+        f"{bare_steps}; cg_energy_forces has no P-C4' or C4'-N term any more.")
 
 
 def test_the_wrapped_bond_harmonic_reproduces_the_field_exactly():
