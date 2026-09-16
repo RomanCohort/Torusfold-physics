@@ -206,15 +206,89 @@ structure* — and both endpoints for that test now exist on disk
 
 ---
 
+## Part 4 — Round 0 over 867 chains, and the twelve chains that refused it
+
+The closed loop (Part 1) ran on the full pool for the first time: 867 chains, one replica each,
+32500 steps = 65 ps, burn 20000, 33 workers x 1 thread, friction 1.0, wall_k 2000, gain
+bb_bond 1 / angle 0.3 / dihedral 1, reference `results/refit_smooth5.npz`. Round 0 took
+**75461 s (21.0 h)** and wrote `results/ibi_full/tables_r1.npz`.
+
+| coordinate | status | max\|dU\| | kBT | outside support |
+| :-- | :-- | --: | --: | --: |
+| dihedral | applied | 5.6201 | 2.2534 | 0.0000% |
+| angle | applied | 1.1624 | 0.4661 | 0.0028% |
+| bb_bond | **refused** (support_drift) | 3.1204 | 1.2512 | **1.0204%** |
+| stack | carried | -- | -- | 2.5210% |
+
+Joint residual over the 867 chains: median **0.1716**, min 0.0300, p75 0.2154, max 2.0542, and it
+rises with chain length (L<=34 0.157, 34-60 0.139, 60-120 0.162, 120-300 0.181, >300 0.205). All
+three updated coordinates report converged=False, which is what one round should report. Verified
+array by array: `tables_r1.npz` differs from `tables_r0.npz` only where the round said it would
+-- angle 1.1235 and dihedral 5.8016 as stored (the applied values, after smoothing), bb_bond,
+stack, intra_pc and intra_cn bit-identical at 0.0000.
+
+**The refusal is twelve chains, not the field.** 12 of the 867 carry 99.48 percent of every
+out-of-support bb_bond count; without them the pooled fraction is 0.0027 percent, 370x below the 1
+percent the update allows. 41.2 percent of chains never leave the support, and by length band it
+is 0.0015 percent below 60 residues against 1.40 at 60-120 and 2.38 at 120-300. The twelve are
+9JHD_3(60), 8D8K_31(114/162/164), 7OYB_1(138), 7QVP_7(119/713), 9AXT_1(195), 9BH5_7(192),
+8I9W_2(233), 6XU7_62(595), 9J9I_1(440), at J 1.31-2.05 against a pool median of 0.17.
+
+**They do not start broken; they come apart.** Two candidate causes were measured and both are
+dead: the numbering-gap pseudo-bond (the database does contain 17 such chains -- worst 7R6Q_10 at
+7.224 nm -- and none of them is one of the twelve), and a modified-nucleotide base atom (all
+twelve are canonical ACGU). What they have is a deposited configuration the field cannot hold.
+`scripts/diagnose_chain_meltdown.py` ran the loop's own sampling core on the three shortest of
+them and a length-matched clean control each, 65 ps, burn 0, 13 blocks of 5 ps:
+
+| run | L | round-0 outside | E at deposit | max\|F\| | closest approach | outside at 5 ps | outside at 65 ps | sigma_sim/ref at 65 ps | bb_bond max at 65 ps |
+| :-- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| BAD 9JHD_3 | 60 | 99.98% | 186919 | 5000 (cap) | 0.026 | 11.9% | 100.0% | 46.1 | 13.6 nm |
+| control 5XYM_6 | 60 | 0.00% | 46623 | 5000 (cap) | 0.152 | 3.3% | 0.0% | 0.96 | 0.77 nm |
+| BAD 8D8K_31 | 114 | 95.76% | 233206 | 5000 (cap) | 0.021 | 7.4% | 100.0% | 47.0 | 16.5 nm |
+| BAD 7QVP_7 | 119 | 83.16% | 207501 | 5000 (cap) | 0.023 | 6.1% | 95.8% | 42.3 | 13.4 nm |
+| control 7OYB_1 | 114 | 0.00% | 10639 | 4021 | 0.191 | 0.2% | 0.0% | 0.91 | 0.77 nm |
+| control 7OLC_3 | 119 | 0.00% | 7623 | 4780 | 0.249 | 0.1% | 0.0% | 0.95 | 0.77 nm |
+
+(energies in kJ/mol, distances in nm)
+
+The blocks give the mechanism. The deposited state is already at the force cap -- 200000 kJ/mol
+against 10000 for the controls -- the beads interpenetrate to 0.02 nm, deep inside the clash wall
+where the cap makes the restoring force a constant, and the chain melts inside 5-15 ps. The bond
+goes first because the table's edge slopes are exactly 0.0: outside the support the wall is the
+entire restoring force, and a clipped wall does not depend on how much further out the pair goes.
+
+**The loop has no minimization step, and that is the difference.** `ibi_core.run_round` starts
+Langevin at 300 K from the deposited coordinates; nothing screens a start state that is 20x the
+field's energy scale. The twelve melt for a property of the entry point, not of the potential --
+and they contaminate the pooled histograms of every coordinate, not only bb_bond's.
+
+Also new: `ibi_loop.py --start-round=N`. Round 1 was killed at its first task (the log ends at
+the round header, and the process was gone by morning) and the driver could not start from where
+it stopped, so continuing would have cost the 21 hours again. A resume loads `tables_r{N}.npz`,
+keeps p_ref from the reference -- refusing when the two do not share bins, measured: resuming the
+867 run without `IBI_LOOP_REF` is refused, 1000 bins against the table of record's 120 -- and
+rebuilds plan_update's divergence history from round0..N-1.json, because an empty history cannot
+fire the rule at all.
+
 ## What is open
 
-1. **IBI convergence.** Round 1 is one round. Whether J descends over rounds 2-4 is being measured
-   (two chains, `ox_runs/ibi_iterate.sh`); the synthetic test says coupled systems need ~4.
+1. **IBI convergence.** Round 1 of the 867-chain loop is running now (resumed under
+   `tables_r1.npz`; round 0's numbers are in Part 4). Whether J descends over rounds 1-3 is the
+   question, and angle's correction at gain 0.3 is the coordinate being watched -- it oscillated
+   at gain 1.0 (6.21, 8.72, 9.65, 10.46 kJ/mol over four rounds on the 7-chain pool).
 2. **The refinement-from-coarse-structure test.** Materials exist; not run.
 3. **The oxRNA jump's provenance.** Relax artifact or landscape? Needs a run that skips
    `RNA_relax` or equilibrates properly under the real potential first.
 4. **`bb_bond` is still too wide and in the wrong direction** (1.05-1.13 against a single-chain
-   ceiling of 0.998, `§3bb`). Unexplained, and no arm moved it.
+   ceiling of 0.998, `§3bb`). Unexplained, and no arm moved it. Part 4 adds a separate mechanism
+   to keep out of that number: the twelve melting chains are 50-100 percent outside the support on
+   their own, so any pooled bb_bond ratio that includes them is measuring the melt as well.
+5. **The sampling entry point has no relaxation.** `run_round` goes to 300 K Langevin from the
+   deposited coordinates, and twelve chains of 867 start at 20x the field's energy scale with the
+   force cap saturated. Candidate remedies, not yet measured: minimize under the injected
+   Hamiltonian first; or gate on the deposited energy (or on the first block's outside fraction)
+   and drop the chain loudly, the way the loader already drops a run too short to bin.
 5. **The Fourier/tabulated split.** Fourier fixes dihedral but cannot enter the IBI loop (the
    update is defined on a table, and the table's honest max force is 3.3x cap). Whichever way the
    loop goes has to resolve this.
