@@ -67,6 +67,21 @@ COORDS = ("bb_bond", "intra_pc", "intra_cn", "angle", "dihedral", "stack")
 #
 # ibi_update additionally refuses to write a table for them.
 CONSTRAINED = ("intra_pc", "intra_cn")
+
+# The two coordinates whose domain is [-1, 1] rather than the whole line. They are the reason
+# _table_from_values takes a `bounded` flag: everything else gets a sigma window, these get
+# [min, max] because their wall must sit outside the physical domain. See that function.
+COSINE_COORDS = ("angle", "dihedral")
+
+# Histogram resolution. 120 was the default until 2026-09-14; on the sigma-window support above
+# it left the peak covered by only ~30 bins for bb_bond (sigma 0.0539 nm over a 0.42 nm window
+# is ~8 bins per sigma, and the distribution's core is narrow), which is coarse for a potential
+# that IBI then differentiates. 1000 bins costs 8 KB per coordinate in the npz.
+DEFAULT_NBINS = 1000
+
+# Half-width of the sigma window the support is built from, in robust sigmas. 4 reproduces the
+# table of record's bb_bond support to 0.3 percent; see _table_from_values.
+SUPPORT_SIGMA = 4.0
 # The deposited-structure database. It lives OUTSIDE this repository (191 PDB files, 686.7 MB), so
 # a checkout on another machine has to be told where it is. TORUSFOLD_RSRNASP overrides; the
 # Windows default is kept so nothing here changes on the machine it was measured on.
@@ -187,27 +202,44 @@ def _chain_residues(pdb, with_names=False):
         if cur:
             runs.append(cur)
 
-        lst = None
-        for run in runs:
-            if MIN_L < len(run) <= MAX_L:
-                lst = run
-                break
-        if lst is None:
-            continue
-        # gly must be recomputed per residue; reusing the outer loop variable here silently
-        # indexed every residue with the last one's base atom
-        beads = np.array([[at["P"], at["C4'"],
-                           at["N9" if r in ("A", "G") else "N1"]] for r, at in lst]) / 10.0
-        pairs = []
-        for a in range(len(lst)):   # noqa: E501  (unchanged below)
-            for b in range(a + 3, len(lst)):
-                if (lst[a][0], lst[b][0]) not in WCP:
-                    continue
-                d = np.linalg.norm(np.array(lst[a][1]["C1'"]) - np.array(lst[b][1]["C1'"]))
-                if 9.0 <= d <= 11.5:
-                    pairs.append((a, b))
-        out.append((beads, pairs, [r for r, _ in lst]) if with_names
-                   else (beads, pairs))
+        # Every run, at its FULL length. There were two rejections here and both are gone:
+        # an upper cap (MIN_L < len <= MAX_L, i.e. 20..120) and a `break` that kept only the
+        # FIRST qualifying run per chain.
+        #
+        # What the two did together, measured on _cgdata/combined (439 files, 2026-09-14):
+        # 166 files yielded NOTHING. A clean 3000-residue chain is a single run, and
+        # `3000 <= 120` is false -- it was REJECTED, not truncated. The 294 chains that
+        # survived were the broken-up ones, i.e. fragments, topping out at exactly 120. So the
+        # "expanded" database contributed fragments and no length coverage at all, which is why
+        # the 439 fit's bb_bond sigma moved (0.0471 -> 0.0531) while its chain lengths did not.
+        #
+        # MAX_L stays defined because check_loader_ordering.py and measure_pair_weight_quality.py
+        # read B.MAX_L; the loader just no longer uses it. The one rejection left is a run too
+        # short to carry a distribution -- a run of <= MIN_L cannot support a 120-bin histogram,
+        # and that is a statement about statistics, not about length.
+        #
+        # THE WEIGHTING CONSEQUENCE, stated because it is large and not obvious: the pooled
+        # histogram is now dominated by the longest chains. A 3611-residue ribosome contributes
+        # 3611 observations of every local coordinate against roughly 50 from a small fragment.
+        # That is the point of removing the cap, and it is also the caveat -- these long chains
+        # are protein-held cryo-EM complexes, not free RNA.
+        for lst in runs:
+            if len(lst) <= MIN_L:
+                continue
+            # gly must be recomputed per residue; reusing the outer loop variable here silently
+            # indexed every residue with the last one's base atom
+            beads = np.array([[at["P"], at["C4'"],
+                               at["N9" if r in ("A", "G") else "N1"]] for r, at in lst]) / 10.0
+            pairs = []
+            for a in range(len(lst)):
+                for b in range(a + 3, len(lst)):
+                    if (lst[a][0], lst[b][0]) not in WCP:
+                        continue
+                    d = np.linalg.norm(np.array(lst[a][1]["C1'"]) - np.array(lst[b][1]["C1'"]))
+                    if 9.0 <= d <= 11.5:
+                        pairs.append((a, b))
+            out.append((beads, pairs, [r for r, _ in lst]) if with_names
+                       else (beads, pairs))
     return out
 
 
@@ -235,16 +267,84 @@ def load_structures(limit=None, with_names=False):
 
 
 # --------------------------------------------------------------------- tables
-def _table_from_values(v, nbins=120, pseudo=0.5, support=None):
+# Moving-average width, in BINS, applied to a fitted table's U before it is used as a potential.
+# NOT the same convention as ibi_bonded.smooth_correction(dU, bins), which averages over +-bins;
+# the conversion is bins = (SMOOTH_WIDTH - 1) // 2 and getting it wrong smooths one path twice as
+# hard as the other.
+#
+# WHY A TABLE HAS TO BE SMOOTHED AT ALL, measured 2026-09-14 on 1L2X, 16 replicas, 40 ps, the
+# fitted table injected, friction 1.0, kinetic temperature after eight 5 ps blocks:
+#
+#     table                 T settles at    bb_bond outside support    bb_bond sd
+#     none (shipped field)     313 K               0.00%                 0.057
+#     fitted, unsmoothed       588 K               1.68%                 0.080
+#     fitted, width 5          301 K               0.00%                 0.060
+#     fitted, width 21         296 K               0.00%                 0.058
+#
+# U = -kBT ln p is a log of a histogram, so it carries Poisson noise of order kBT*sqrt(1/n) --
+# about 0.06-0.1 kBT per bin at a few hundred counts. The interpolant is piecewise linear, so that
+# noise IS a random force field, and a symplectic integrator pumps energy on a discontinuous
+# force. At width 1 the mean |dU| between neighbouring bins is 0.588 kJ/mol over a 0.000436 nm
+# bin, i.e. force jumps of 1349 kJ/mol/nm -- larger than K_BB itself. Smoothing removes the noise
+# and the heating with it: the injected system then runs at the 300 K target and bb_bond's
+# sampled spread comes out 0.060 against a reference of 0.0633, sim/ref = 0.95.
+SMOOTH_WIDTH = 5
+
+
+def smooth_U(U, width=SMOOTH_WIDTH):
+    """Uniform moving average of a table's U over `width` bins, edges padded.
+
+    width=1 returns a copy, bit-identical, so a caller can turn this off without a branch.
+    """
+    U = np.asarray(U, dtype=float)
+    if width <= 1:
+        return U.copy()
+    w = int(width)
+    pad = w // 2
+    k = np.ones(w) / w
+    return np.convolve(np.pad(U, pad, mode="edge"), k, mode="valid")[:len(U)]
+
+
+def _table_from_values(v, nbins=DEFAULT_NBINS, pseudo=0.5, support=None, bounded=False):
     """Bin one coordinate's observations and invert to U = -kBT ln P.
 
     support=None fits the range to v, which is what the pooled fit has always done.
     support=(lo, hi) bins on an existing range instead, so a subgroup table shares the
     pooled bin edges and can be compared with, or substituted for, the pooled table
     without a jump in either edge.
+
+    support=None now means a SIGMA WINDOW, not [min, max] plus a pad, for every unbounded
+    coordinate. Why it had to change: on the expanded 867-chain database bb_bond runs
+    0.3161 .. 7.2240 nm, and 44 observations out of 132,695 are above 0.8 nm. A P-P bond of
+    7 nm does not exist -- those are the few adjacent-numbered pairs that a cryo-EM ribosome
+    still has after the numbering-gap split. Taking [min, max] let those 44 set the axis, so
+    the table spanned [0.178, 7.362] and 88 of 120 bins were empty: the whole distribution
+    lived in three or four bins. Percentiles do not fix it either -- the tail is sparse but
+    long, so clipping 1e-4 still leaves the support at about 1.5 nm and clipping 1e-5 leaves
+    it at 7.
+
+    So the support is the median plus and minus SUPPORT_SIGMA robust sigmas, with the sigma
+    taken from the [0.1, 99.9] percentile span (6.58 sigma for a normal). At SUPPORT_SIGMA=4
+    this reproduces the table of record's own bb_bond support almost exactly -- 0.382..0.801
+    against its 0.3837..0.7958 -- which is the check that the window is not an invention.
+
+    bounded=True keeps [min, max] and is for the two COSINE coordinates. Their domain is
+    [-1, 1] and the wall that table_wall puts outside the support is what stops the sampler
+    leaving it, so shrinking the support to a sigma window would move that wall INSIDE the
+    coordinate's physical domain. The data has values at exactly -1.0000, so their [min, max]
+    is already the domain, and it is the one case where the extremes are the right answer.
     """
     if support is None:
-        lo, hi = float(v.min()), float(v.max())
+        if bounded:
+            lo, hi = float(v.min()), float(v.max())
+        else:
+            med = float(np.median(v))
+            q_lo, q_hi = np.quantile(v, [0.001, 0.999])
+            sigma = float(q_hi - q_lo) / 6.58
+            half = SUPPORT_SIGMA * sigma
+            lo, hi = med - half, med + half
+            # never invent range the data does not have: a narrow coordinate keeps its own edges
+            lo, hi = max(lo, float(v.min())), min(hi, float(v.max()))
         pad = 0.02 * (hi - lo)
         lo, hi = lo - pad, hi + pad
     else:
@@ -303,7 +403,7 @@ DEFAULT_SCHEME = {
     "stack":    "skip",
 }
 
-# Support floor for a group table. At nbins=120 and pseudo=0.5 the pseudo-count carries
+# Support floor for a group table. At nbins=DEFAULT_NBINS and pseudo=0.5 the pseudo-count carries
 # 0.5*120/(n + 0.5*120) of the probability mass: 23 percent at n=200, 11 percent at 500.
 # 200 is chosen to be permissive -- it is the smallest floor at which every pair-labelled
 # scheme stays fully supported on the whole 191-file database, so stratification is
@@ -338,7 +438,7 @@ def labels_for(names, coord, scheme=None):
     return np.array(["".join(row) for row in zip(*parts)])
 
 
-def fit(structs, nbins=120, pseudo=0.5, stratify=False, min_obs=MIN_OBS, coords=None):
+def fit(structs, nbins=DEFAULT_NBINS, pseudo=0.5, stratify=False, min_obs=MIN_OBS, coords=None):
     """Per coordinate: (lo, hi, binw, U) with U = -kBT ln P over [lo, hi].
 
     stratify=False (the default, and what every existing caller gets) returns exactly the
@@ -356,11 +456,11 @@ def fit(structs, nbins=120, pseudo=0.5, stratify=False, min_obs=MIN_OBS, coords=
             pos = torch.tensor(s["pos"].reshape(1, -1, 3), dtype=torch.float64)
             vals.append(coords_of(pos, name).reshape(-1).numpy())
         v = np.concatenate(vals)
-        tables[name] = _table_from_values(v, nbins, pseudo)
+        tables[name] = _table_from_values(v, nbins, pseudo, bounded=(name in COSINE_COORDS))
     return tables
 
 
-def stratify_values(v, lab, pooled, nbins=120, pseudo=0.5, min_obs=MIN_OBS):
+def stratify_values(v, lab, pooled, nbins=DEFAULT_NBINS, pseudo=0.5, min_obs=MIN_OBS):
     """Group tables for one coordinate's observations, on the pooled support.
 
     Split out of fit_stratified() so the null control in refit_tables_stratified.py runs
@@ -389,7 +489,7 @@ def stratify_values(v, lab, pooled, nbins=120, pseudo=0.5, min_obs=MIN_OBS):
     return groups, counts, fallback
 
 
-def fit_stratified(structs, nbins=120, pseudo=0.5, min_obs=MIN_OBS, coords=None):
+def fit_stratified(structs, nbins=DEFAULT_NBINS, pseudo=0.5, min_obs=MIN_OBS, coords=None):
     """One table per base-identity group, alongside the pooled table it would replace.
 
     structs must come from load_structures(..., with_names=True).

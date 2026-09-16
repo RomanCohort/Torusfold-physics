@@ -17,6 +17,7 @@ Saves results/boltzmann_tables_clean.npz so the sampler does not refit each run.
 
 Run: python scripts/refit_tables_clean.py [n_structs]
 """
+import os
 import sys
 from pathlib import Path
 
@@ -29,7 +30,13 @@ import boltzmann_bonded as B
 import torusfold.scheme2.torch_cgsim as C
 
 N = int(sys.argv[1]) if len(sys.argv) > 1 else 96
-OUT = Path(__file__).resolve().parent.parent / "results" / "boltzmann_tables_clean.npz"
+# OUT used to be a bare literal pointing at the table of record, so merely running this script
+# destroyed it -- and it did, once, which is how three tests went red for a reason that had
+# nothing to do with the change under test. TORUSFOLD_REFIT_OUT now redirects it; the default is
+# unchanged so an existing command line keeps writing where it always did.
+OUT = Path(os.environ.get(
+    "TORUSFOLD_REFIT_OUT",
+    str(Path(__file__).resolve().parent.parent / "results" / "boltzmann_tables_clean.npz")))
 KBT = B.KBT
 
 # intra_pc and intra_cn are absent on purpose. They are rigid constraints now and both
@@ -95,6 +102,16 @@ print("   no harmonic form left to propose for them.)")
 print()
 
 tables = B.prepare(B.fit(structs))
+# Smoothed BEFORE anything below reads it, so every number printed describes the table that is
+# actually saved and injected. U = -kBT ln p carries the histogram's Poisson noise, the
+# interpolant is piecewise linear, and noise in a piecewise-linear potential is a random force
+# field that heats the sampler -- measured at 588 K against a 300 K target, against 301 K once
+# smoothed. See boltzmann_bonded.SMOOTH_WIDTH for the arms and the widths.
+for _t in tables.values():
+    _t["U"] = B.smooth_U(_t["U"])
+print(f"U smoothed with a {B.SMOOTH_WIDTH}-bin moving average "
+      f"(matching ibi_bonded.smooth_correction bins={(B.SMOOTH_WIDTH - 1) // 2})")
+print()
 print(f"{'coordinate':12s} {'argmin U':>10s} {'data mode':>10s} {'U range':>9s} "
       f"{'empty bins':>11s}")
 print("-" * 58)
