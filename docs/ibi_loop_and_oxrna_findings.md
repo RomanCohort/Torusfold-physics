@@ -271,6 +271,45 @@ keeps p_ref from the reference -- refusing when the two do not share bins, measu
 rebuilds plan_update's divergence history from round0..N-1.json, because an empty history cannot
 fire the rule at all.
 
+### The entry relaxation, measured
+
+`ibi_core.relax_positions` descends the injected Hamiltonian before the sampler's first step --
+same field, same cap, normalised direction, halving line search, SHAKE after every accepted step,
+and deterministic, so a seed's trajectory is unchanged. Two arms, same chain, same seed, same
+32500 steps, burn 0, 13 blocks of 5 ps (`scripts/diagnose_chain_meltdown.py 32500 13 1 {0,1500}`):
+
+| arm | E at deposit | E after relaxation | max\|F\| after | whole-run outside | closest approach | sigma_sim/ref, blocks 1-12 | bb_bond max |
+| :-- | --: | --: | --: | --: | --: | --: | --: |
+| **9JHD_3, no relaxation** | 186919 | -- | 5000 (cap) | **70.71%** | **0.026 nm** | 4.7 -> 46.1 | 13.6 nm |
+| **9JHD_3, relax 1500** | 186901 | **92512** | 5000 (cap) | **0.85%** | **0.193 nm** | 0.86 - 1.05 | 0.79 nm |
+| control 5XYM_6, no relaxation | 46623 | -- | 5000 | 0.254% | 0.152 nm | 0.88 - 0.96 | 0.77 nm |
+| control 5XYM_6, relax 1500 | 46619 | 14648 | 4545 (left the cap) | 0.254% | 0.297 nm | 0.84 - 0.99 | 0.77 nm |
+
+**The melt is gone.** The bad chain samples a normal bb_bond afterwards (median 0.615 nm, max 0.79,
+sigma ratio about 1.0), and its FIRST block is the only one outside the support: 11.0 percent over
+0-5 ps and 0.000 percent in every block from 5 to 65 ps. The loop's own protocol burns 40 ps before
+it bins, so that transient would not reach the histogram at all; the number that matters for the 1
+percent refusal is the whole-run 0.85 percent against round 0's 1.0204 percent, which the update
+accepts.
+
+**The relaxation is not converged, and that is the number to carry forward.** All 1500 steps were
+accepted, not one rejected; E only halved; max|F| never left the cap, so the descent was still
+going when it ran out of steps. The chain ends at 92512 kJ/mol against the control's 14648 -- the
+deposited state of 9JHD_3 is genuinely far from anything this field's capped descent reaches
+quickly. 1500 steps cost about 1500 field evaluations, roughly 5 percent of one chain's round;
+10000 would cost about 30 percent and might leave the cap. What the length should be is a cost
+decision, and these arms bound it from below: 1500 is already enough to stop the melt.
+
+**A chain that was fine is unaffected.** The control's sampled distribution is the same with and
+without the relaxation (0.2542 percent in both arms, identical block table), so this is a repair
+of the twelve, not a change of protocol for the 855.
+
+The entry state is recorded for every chain now: `_sample_one` returns `entry = {energy_0,
+max_force_0, at_cap_0}` and `relax`, and the loop's parent copies both into the round json. The
+rounds after this one will therefore carry the distribution a gate would be set from -- how many
+of the 867 start with the force already clipped -- which round 0 could not answer and which had to
+be re-derived by hand from the out-of-support counts.
+
 ## What is open
 
 1. **IBI convergence.** Round 1 of the 867-chain loop is running now (resumed under
@@ -284,11 +323,13 @@ fire the rule at all.
    ceiling of 0.998, `§3bb`). Unexplained, and no arm moved it. Part 4 adds a separate mechanism
    to keep out of that number: the twelve melting chains are 50-100 percent outside the support on
    their own, so any pooled bb_bond ratio that includes them is measuring the melt as well.
-5. **The sampling entry point has no relaxation.** `run_round` goes to 300 K Langevin from the
-   deposited coordinates, and twelve chains of 867 start at 20x the field's energy scale with the
-   force cap saturated. Candidate remedies, not yet measured: minimize under the injected
-   Hamiltonian first; or gate on the deposited energy (or on the first block's outside fraction)
-   and drop the chain loudly, the way the loader already drops a run too short to bin.
+5. **The entry relaxation exists and is measured, but its length is not settled.** 1500 steps on
+   the worst chain stops the melt and does not touch a clean chain; it also does not converge (E
+   186901 -> 92512 kJ/mol, max|F| still at the cap). Whether to spend 30 percent of a round on
+   10000 steps to leave the cap, and whether to pair it with a gate on `at_cap_0` that drops a
+   chain loudly instead, are open. What is NOT open any more: round 0's pooled histograms were
+   sampled from starts that melt twelve chains, so a run whose tables are meant to be the table
+   has to redo round 0 under the relaxation.
 5. **The Fourier/tabulated split.** Fourier fixes dihedral but cannot enter the IBI loop (the
    update is defined on a table, and the table's honest max force is 3.3x cap). Whichever way the
    loop goes has to resolve this.
