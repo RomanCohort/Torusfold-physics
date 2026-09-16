@@ -222,6 +222,22 @@ def _sample_one(task):
     ij = torch.tensor(pairs, dtype=torch.long).reshape(-1, 2)
     pw = torch.ones(len(pairs), dtype=torch.float32)
     con = C.make_intra_constraints(L)
+    # THE ENTRY STATE, recorded before anything moves. Round 0 carried no such record, so finding
+    # the twelve melting chains afterwards took a re-derivation from the per-structure
+    # out-of-support counts; one field evaluation per chain per round buys the distribution of
+    # E and max|F| under THIS round's injected potential, which is the number a gate would use and
+    # the number that says how many starts are already sitting on the force cap.
+    #
+    # It is a new KEY in the returned dict and not a new element in the task tuple: the parent
+    # passes every key it does not recognize straight into the round json, while the tuple's shape
+    # is fixed by whichever code built it -- see RELAX_STEPS above.
+    with torch.no_grad():
+        _cl0 = C.GPUCellList(cell_size=1.5)
+        _cl0.build(pos)
+        _e0, _f0 = C.cg_energy_forces(pos, ij, pw, cell_list=_cl0, force_cap=5000.0, **pot_kw)
+        _fmax0 = float(torch.linalg.norm(_f0.reshape(-1, 3), dim=-1).max())
+    entry = {"energy_0": float(_e0.mean()), "max_force_0": _fmax0,
+             "at_cap_0": bool(_fmax0 >= 5000.0)}
     t0 = time.time()
     res = IC.run_round(pos=pos, vel=vel, ij=ij, pw=pw, temps=temps, tab=tab,
                        nsteps=nsteps, burn=burn, stride=stride, blocks=blocks, friction=friction,
@@ -230,6 +246,8 @@ def _sample_one(task):
     _wv, _wj = IC.simref(res.acc, tab, skip=res.skip)
     _u, _o = IC.j_denominator(res.acc, tab, skip=res.skip)
     return {
+        "entry": entry,
+        "relax": res.relax,
         "counts": {c: np.asarray(res.counts[c], dtype=np.int64) for c in B.COORDS},
         "n_outside": {c: int(res.n_outside[c]) for c in B.COORDS},
         "n_total": {c: int(res.n_total[c]) for c in B.COORDS},
