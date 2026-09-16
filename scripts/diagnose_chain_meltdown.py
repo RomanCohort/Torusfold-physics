@@ -39,9 +39,18 @@ table, collecting three things the aggregated round json cannot show:
      deposited geometry, which is the other candidate: an initial clash the 5000 kJ/mol/nm cap
      turns into a constant force and a heating source.
 
-Run: python scripts/diagnose_chain_meltdown.py [nsteps] [blocks] [n_pairs]
-     python scripts/diagnose_chain_meltdown.py 32500 13 3        # full window
-     python scripts/diagnose_chain_meltdown.py 6000 6 1          # one pair, quick
+The fourth argument is the entry-relaxation arm: 0 reproduces the meltdown exactly as the
+867-chain round 0 sampled it, nonzero descends the injected Hamiltonian first
+(ibi_core.relax_positions). Both arms share the seed and the protocol, so the difference between
+them is the relaxation and nothing else -- which is the only way to say whether the fix works.
+
+Run: python scripts/diagnose_chain_meltdown.py [nsteps] [blocks] [n_pairs] [relax_steps]
+     python scripts/diagnose_chain_meltdown.py 32500 13 3 0      # as round 0 saw it
+     python scripts/diagnose_chain_meltdown.py 32500 13 3 1500   # with the entry relaxation
+     python scripts/diagnose_chain_meltdown.py 6000 6 1 1500     # one pair, quick
+
+MELTDOWN_SERIAL=1 runs the chains in this process instead of an mp.Pool. A sandbox that denies
+named pipes cannot build a Pool at all, and a one-chain arm should not need one.
 """
 import json
 import multiprocessing as mp
@@ -81,6 +90,14 @@ STRIDE = 5
 NSTEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 32500
 BLOCKS = int(sys.argv[2]) if len(sys.argv) > 2 else 13
 N_PAIRS = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+# Entry-relaxation arm: 0 reproduces the meltdown as the 867-chain round 0 sampled it, nonzero
+# descends the injected Hamiltonian first (ibi_core.relax_positions). The two arms share a seed
+# and a protocol, so the difference between them is the relaxation and nothing else.
+RELAX = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+# MELTDOWN_SERIAL=1 runs the tasks in this process instead of an mp.Pool. It exists because a
+# sandbox that denies named pipes cannot build a Pool at all (WinError 5 in
+# multiprocessing.connection.Pipe), and a one-chain arm should not need a process pool anyway.
+SERIAL = os.environ.get("MELTDOWN_SERIAL", "") == "1"
 
 
 def _round0():
@@ -177,7 +194,7 @@ def _one(task):
     res = IC.run_round(pos=pos, vel=vel, ij=ij, pw=pw, temps=temps, tab=tab,
                        nsteps=nsteps, burn=0, stride=STRIDE, blocks=blocks, friction=FRICTION,
                        force_cap=FORCE_CAP, pot_kw=pot_kw, seed=seed, nrep=1,
-                       progress=False, collect_values=True,
+                       progress=False, collect_values=True, relax=RELAX,
                        constraints=C.make_intra_constraints(L),
                        log=lambda *a, **k: None)
     vals = res.values["bb_bond"].reshape(blocks, -1) if res.values is not None else None
@@ -195,12 +212,40 @@ def _one(task):
                           "min": float(obs.min()), "max": float(obs.max()),
                           "median": float(np.median(obs)), "mean": float(obs.mean())})
     return {"label": label, "L": L, "seed": seed, "seconds": time.time() - t0,
-            "geometry": geo, "max_force_0": f0, "energy_0": e0,
+            "geometry": geo, "max_force_0": f0, "energy_0": e0, "relax": res.relax,
             "clash_min": min(res.clash_min) if res.clash_min else float("nan"),
             "steps_per_s": res.steps_per_s,
             "n_outside_total": int(res.n_outside["bb_bond"]),
             "n_total": int(res.n_total["bb_bond"]),
             "per_block": per_block}
+
+
+def _report(r):
+    """One run's block table. Shared by the serial and pooled paths so the two cannot diverge."""
+    print(f"== {r['label']}")
+    g = r["geometry"]
+    print(f"   deposited: P-P {g['pp_min']:.3f}-{g['pp_max']:.3f} nm   "
+          f"non-bonded min {g['nonbonded_min']:.3f}   paired min {g['paired_min']:.3f}   "
+          f"E {r['energy_0']:.1f} kJ/mol   max|F| {r['max_force_0']:.1f}")
+    x = r.get("relax")
+    if x:
+        print(f"   relaxed first: {x['accepted']} accepted / {x['rejected']} rejected of "
+              f"{x['steps']} steps, {x['evals']} field evaluations   "
+              f"E {x['energy_start']:.1f} -> {x['energy_end']:.1f} kJ/mol   "
+              f"max|F| {x['max_force_start']:.1f} -> {x['max_force_end']:.1f}"
+              + ("   LEFT THE CAP" if x["hit_cap"] and x["left_cap"] else ""))
+    print(f"   sampled {NSTEPS} steps in {r['seconds']:.0f} s "
+          f"({r['steps_per_s']:.3f} steps/s), whole-run outside "
+          f"{r['n_outside_total']}/{r['n_total']} = "
+          f"{100 * r['n_outside_total'] / max(1, r['n_total']):.4f}%, "
+          f"closest bead approach {r['clash_min']:.3f} nm")
+    print(f"   {'block':>5} {'ps':>6} {'outside%':>9} {'sigma_sim/ref':>14} "
+          f"{'bb min':>8} {'bb median':>10} {'bb max':>8}")
+    for b in r["per_block"]:
+        print(f"   {b['block']:>5} {b['ps']:>6.1f} {100 * b['outside_frac']:>8.3f}% "
+              f"{b['sigma_ratio']:>14.3f} {b['min']:>8.3f} {b['median']:>10.3f} "
+              f"{b['max']:>8.3f}")
+    print()
 
 
 def main():
@@ -222,26 +267,15 @@ def main():
                           np.asarray(s["pos"], dtype=np.float64), s["pairs"], NSTEPS, BLOCKS))
     print(f"{len(tasks)} runs: {NSTEPS} steps = {NSTEPS * DT_PS:.0f} ps, burn 0, {BLOCKS} blocks "
           f"of {NSTEPS / BLOCKS * DT_PS:.1f} ps, friction {FRICTION}, wall {WALL_K:g}, "
-          f"constraints ON\n")
-    with mp.get_context("spawn").Pool(processes=min(len(tasks), os.cpu_count() or 1)) as procs:
-        for r in procs.imap_unordered(_one, tasks):
-            print(f"== {r['label']}")
-            g = r["geometry"]
-            print(f"   deposited: P-P {g['pp_min']:.3f}-{g['pp_max']:.3f} nm   "
-                  f"non-bonded min {g['nonbonded_min']:.3f}   paired min {g['paired_min']:.3f}   "
-                  f"E {r['energy_0']:.1f} kJ/mol   max|F| {r['max_force_0']:.1f}")
-            print(f"   sampled {NSTEPS} steps in {r['seconds']:.0f} s "
-                  f"({r['steps_per_s']:.3f} steps/s), whole-run outside "
-                  f"{r['n_outside_total']}/{r['n_total']} = "
-                  f"{100 * r['n_outside_total'] / max(1, r['n_total']):.4f}%, "
-                  f"closest bead approach {r['clash_min']:.3f} nm")
-            print(f"   {'block':>5} {'ps':>6} {'outside%':>9} {'sigma_sim/ref':>14} "
-                  f"{'bb min':>8} {'bb median':>10} {'bb max':>8}")
-            for b in r["per_block"]:
-                print(f"   {b['block']:>5} {b['ps']:>6.1f} {100 * b['outside_frac']:>8.3f}% "
-                      f"{b['sigma_ratio']:>14.3f} {b['min']:>8.3f} {b['median']:>10.3f} "
-                      f"{b['max']:>8.3f}")
-            print()
+          f"constraints ON, entry relaxation {RELAX} steps"
+          + ("   [serial]\n" if SERIAL else "\n"))
+    if SERIAL or len(tasks) == 1:
+        for t in tasks:
+            _report(_one(t))
+    else:
+        with mp.get_context("spawn").Pool(processes=min(len(tasks), os.cpu_count() or 1)) as procs:
+            for r in procs.imap_unordered(_one, tasks):
+                _report(r)
     print("done")
 
 

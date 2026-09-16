@@ -157,6 +157,94 @@ def j_denominator(acc, tab, skip=()):
     return len(scored), len(offered)
 
 
+def relax_positions(pos, ij, pw, pot_kw=None, constraints=None, n_steps=1500, step_nm=0.005,
+                    force_cap=5000.0, tol=50.0, cell_size=1.5, report=250, log=None):
+    """Descend the injected Hamiltonian before the sampler's first step. Returns (pos, info).
+
+    WHY THIS EXISTS. run_round goes straight to 300 K Langevin from whatever coordinates it is
+    handed, and on the 867-chain pool that is fine for 855 chains and catastrophic for twelve.
+    Measured with the round-0 table injected, 65 ps, burn 0 (scripts/diagnose_chain_meltdown.py):
+
+        chain       E at deposit   max|F|        closest approach   bb_bond outside at 65 ps
+        9JHD_3         186919      5000 (cap)        0.026 nm              100.0%
+        8D8K_31        233206      5000 (cap)        0.021 nm              100.0%
+        7QVP_7         207501      5000 (cap)        0.023 nm               95.8%
+        controls     7623-46623   4021-5000         0.152-0.249 nm          0.0%
+
+    The twelve are not a bond that is a little too wide; they interpenetrate to 0.02 nm inside the
+    clash wall, where the cap turns the restoring force into a constant, and they melt in 5-15 ps.
+    Their joint residual is 1.31-2.05 against a pool median of 0.17, and they carried 99.48 percent
+    of the bb_bond excursion that refused round 0's update (docs/ibi_loop_and_oxrna_findings.md,
+    Part 4). That is a property of the entry point, not of the potential.
+
+    WHAT IT DOES. Steepest descent on the SAME field and the SAME cap the sampler will integrate --
+    not on the uncapped potential check_minimizer_method.py reports on -- with the direction
+    NORMALISED, because a capped force's magnitude carries no information while its direction
+    still points downhill. The step is accepted only when the energy falls and halved when it does
+    not, which is the line search diagnose_wall_penetration.py already uses. SHAKE is applied
+    after every accepted step, so the constrained distances stay on their manifold; unlike
+    torch_gpu_refine's Adam there is no momentum to carry a step through the projection.
+
+    Deterministic: no RNG is touched, so it does not shift the dynamics a seed produces. info
+    carries E and max|F| at both ends, the accept/reject counts, the number of field evaluations,
+    and the cap flags -- a caller that would rather DROP a chain than relax it needs the start
+    numbers, and a caller that keeps it needs to see max|F| leave the cap.
+
+    ONE TRAP, stated because it is easy to read as a bug: the start is projected onto the
+    constraint manifold BEFORE it is measured, so info["energy_start"] is not a field evaluation
+    of the array the caller passed. On a strained fixture that is not a small difference --
+    121167.8 kJ/mol in, 37804.2 out, because the clash that carried the energy is partly the
+    constrained distances being off their targets. Compare end to start WITHIN info, not against
+    your own evaluation of the raw input.
+    """
+    pot_kw = pot_kw or {}
+    x = torch.as_tensor(pos, dtype=torch.float64).clone()
+    if constraints is not None:
+        x = constraints.shake(x)
+
+    def ef(p):
+        cl = C.GPUCellList(cell_size=cell_size)
+        cl.build(p)
+        _e, _f = C.cg_energy_forces(p, ij, pw, cell_list=cl, force_cap=force_cap, **pot_kw)
+        return (float(_e.sum()), _f,
+                float(torch.linalg.norm(_f.reshape(-1, 3), dim=-1).max()))
+
+    info = {"steps": int(n_steps), "accepted": 0, "rejected": 0, "evals": 0,
+            "energy_start": float("nan"), "energy_end": float("nan"),
+            "max_force_start": float("nan"), "max_force_end": float("nan"),
+            "hit_cap": False, "left_cap": False}
+
+    with torch.no_grad():
+        e, f, fmax = ef(x)
+        info["evals"] = 1
+        info.update(energy_start=e, max_force_start=fmax,
+                    hit_cap=bool(force_cap is not None and fmax >= force_cap))
+        s = float(step_nm)
+        for _ in range(int(n_steps)):
+            if not (fmax > tol):
+                break
+            trial = x + (s / fmax) * f
+            if constraints is not None:
+                trial = constraints.shake(trial)
+            e_t, f_t, fmax_t = ef(trial)
+            info["evals"] += 1
+            if e_t < e:
+                x, e, f, fmax = trial, e_t, f_t, fmax_t
+                info["accepted"] += 1
+                s = min(s * 1.2, float(step_nm))
+                if report and log and info["accepted"] % report == 0:
+                    log(f"  relax {info['accepted']:6d} accepted  E {e:12.1f} kJ/mol  "
+                        f"max|F| {fmax:9.2f}  step {s:.2e} nm")
+            else:
+                info["rejected"] += 1
+                s *= 0.5
+                if s < 1e-9:
+                    break
+    info["energy_end"], info["max_force_end"] = e, fmax
+    info["left_cap"] = bool(force_cap is not None and fmax < force_cap)
+    return x.detach(), info
+
+
 class RoundResult:
     """What run_round produces. Reporting lives in the caller, so this is plain state."""
 
@@ -181,11 +269,12 @@ class RoundResult:
         self.vel = None
         self.seconds = 0.0
         self.steps_per_s = 0.0
+        self.relax = None         # relax_positions' diagnostics, only when relax > 0
 
 
 def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, friction,
               force_cap, pot_kw=None, seed=None, collect_values=False, nrep=None,
-              progress=True, log=print, constraints=None, skip=None):
+              progress=True, log=print, constraints=None, skip=None, relax=0):
     """Sample, binning into `blocks` disjoint equal-time blocks. Returns a RoundResult.
 
     The accumulators are per block on purpose. A cumulative J over [burn, t] cannot separate
@@ -207,6 +296,12 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
     means B.CONSTRAINED whenever constraints are active and () otherwise. Pass () explicitly to
     score the constrained coordinates anyway, which is a thing to do once, deliberately, to see
     what the exclusion is worth.
+
+    relax: descent steps on the injected Hamiltonian before the first Langevin step, 0 by default.
+    Zero is the historical behaviour with nothing evaluated and no coordinate touched -- that
+    matters, because round 0 of the 867-chain run was sampled under it and a path that quietly
+    moved a bead would make the two incomparable. A nonzero value calls relax_positions and leaves
+    its diagnostics on res.relax; see there for what a deposited start can be, and what it costs.
     """
     pot_kw = pot_kw or {}
     nb = max(blocks, 1)
@@ -237,6 +332,19 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
         torch.manual_seed(seed)
 
     _skip_set = set(skip)
+
+    if relax:
+        # Before t0 and before the seed is used for anything: the descent is deterministic, so it
+        # belongs to neither the stochastics nor the timing this run records.
+        pos, res.relax = relax_positions(pos, ij, pw, pot_kw=pot_kw, constraints=con,
+                                         n_steps=relax, force_cap=force_cap, log=log)
+        if log:
+            log(f"  relaxed {res.relax['accepted']} accepted / "
+                f"{res.relax['rejected']} rejected of {res.relax['steps']} steps: "
+                f"E {res.relax['energy_start']:.1f} -> {res.relax['energy_end']:.1f} kJ/mol, "
+                f"max|F| {res.relax['max_force_start']:.1f} -> "
+                f"{res.relax['max_force_end']:.1f}"
+                + ("  (left the cap)" if res.relax["hit_cap"] and res.relax["left_cap"] else ""))
 
     def _forces_at(p):
         """Fresh forces at the post-update coordinates, for the symplectic tail kick.

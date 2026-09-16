@@ -146,6 +146,18 @@ GAIN_BY_COORD = {c: float(os.environ.get(f"IBI_LOOP_GAIN_{c.upper()}", GAIN)) fo
 # rather than distorting the distribution. 800 and 200 are statistically indistinguishable.
 WALL_K = float(os.environ.get("IBI_LOOP_WALL", 2000.0))
 
+# Entry relaxation: descent steps on the injected Hamiltonian before the first Langevin step.
+# 0 -- the default -- is the historical protocol, straight to 300 K from the deposited
+# coordinates, which is what round 0 of the 867-chain run sampled under. See
+# ibi_core.relax_positions for what the twelve melting chains look like without it.
+#
+# READ PER WORKER, NOT PASSED THROUGH A TASK TUPLE, and that is deliberate. A spawn worker
+# imports this file again at every round, so an edit here reaches a run that is already in
+# flight while its parent keeps the old code in memory. What makes that safe is the task tuple's
+# SHAPE: adding an element to it would make the workers unpack something the parent never built
+# and kill every round after the edit, while reading the environment is invisible to them.
+RELAX_STEPS = int(os.environ.get("IBI_LOOP_RELAX", 0))
+
 # 1 THREAD PER WORKER, AND ONE WORKER PER CPU. Measured aggregate throughput over the machine,
 # 32 logical CPUs, L=29, 16 replicas, the real step (2026-09-14):
 #
@@ -214,7 +226,7 @@ def _sample_one(task):
     res = IC.run_round(pos=pos, vel=vel, ij=ij, pw=pw, temps=temps, tab=tab,
                        nsteps=nsteps, burn=burn, stride=stride, blocks=blocks, friction=friction,
                        force_cap=5000.0, pot_kw=pot_kw, seed=seed, nrep=nrep, progress=False,
-                       constraints=con, log=lambda *a, **k: None)
+                       constraints=con, relax=RELAX_STEPS, log=lambda *a, **k: None)
     _wv, _wj = IC.simref(res.acc, tab, skip=res.skip)
     _u, _o = IC.j_denominator(res.acc, tab, skip=res.skip)
     return {
@@ -363,7 +375,8 @@ def main():
           f"= {_N_WORKERS * _N_THREADS} of {os.cpu_count()} logical CPUs")
     print(f"  {nrep} replicas, {nsteps} steps = {nsteps * 0.002:.0f} ps, burn {burn} = "
           f"{burn * 0.002:.0f} ps, window {(nsteps - burn) * 0.002:.0f} ps at stride {stride}")
-    print(f"  friction {friction}/ps, 300 K, constraints ON, wall_k {WALL_K:g}, gain " + " ".join(f"{c}={GAIN_BY_COORD[c]:g}" for c in UPDATED))
+    print(f"  friction {friction}/ps, 300 K, constraints ON, wall_k {WALL_K:g}, gain " + " ".join(f"{c}={GAIN_BY_COORD[c]:g}" for c in UPDATED)
+          + (f", relax {RELAX_STEPS} steps" if RELAX_STEPS else ""))
     # Truncated: the all-chains pool is 867 names, which buries the rest of the header. The full
     # list is recoverable from the round json's per_structure entries.
     _ls = [len(s["pos"]) for s in structs]
