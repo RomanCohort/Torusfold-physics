@@ -310,6 +310,15 @@ rounds after this one will therefore carry the distribution a gate would be set 
 of the 867 start with the force already clipped -- which round 0 could not answer and which had to
 be re-derived by hand from the out-of-support counts.
 
+**Decision, 2026-09-16.** Round 0 is to be redone under the relaxation. The run that is meant to
+produce the table is `results/ibi_relax` -- 867 chains, 33 workers, `IBI_LOOP_RELAX=1500`, the
+same reference (`refit_smooth5.npz`) and the same gains -- and `results/ibi_full` stays as the
+record of what round 0 looked like WITHOUT it. The loop was stopped for this, so the round-1
+sampling that was in flight is abandoned rather than finished: its bb_bond column could only have
+been refused again, and the twelve melting chains contaminate every coordinate's pooled
+histogram, not just the bond's. The suite after the relaxation, the entry record and the resume
+path: 190 passed.
+
 ## What is open
 
 1. **IBI convergence.** Round 1 of the 867-chain loop is running now (resumed under
