@@ -157,6 +157,43 @@ def j_denominator(acc, tab, skip=()):
     return len(scored), len(offered)
 
 
+def closest_bead_pair(pos, chunk=512):
+    """(closest bead-bead distance, pairs below CLASH_DIST, pairs below CLASH_SIGMA), chunked.
+
+    WHY THIS FUNCTION EXISTS, measured. The obvious implementation -- torch.cdist(beads, beads),
+    then a copy that adds the diagonal -- materialises an N x N float64 matrix PER SAMPLED FRAME.
+    A 2929-residue chain is 8787 beads, so that is 617 MB, twice, 2500 times per chain. On the
+    round of 2026-09-16 a single worker was holding 25 GB of commit because of it, the machine hit
+    its commit limit (llama-server.exe held 68.5 GB of the same limit, and Windows popped "virtual
+    memory insufficient"), three workers died with access violations inside VCRUNTIME140 at
+    23:04:12, multiprocessing.Pool replaced them without a word, and the round hung at 98 percent
+    for 29.7 h. Killed the run: commit free went 1.2 GB -> 29.7 GB.
+
+    The work is the same O(N^2); what changes is that nothing bigger than chunk x N is ever alive.
+    A chunk of 512 over 8787 beads is 36 MB against 1234 MB, and the min and the two counts are
+    accumulated exactly as before. Replicas are still independent systems -- the loop runs per
+    replica, so a batch does not acquire inter-replica contacts it never had.
+
+    One deliberate difference: a coordinate with no distinct pair at all returns inf, where the
+    N x N version returned the 10.0 it had just written onto its own diagonal. That 10.0 was the
+    artefact of the hack that excluded self-pairs, not a measurement, and a one-bead chain is the
+    only way to see it.
+    """
+    n_rep = pos.shape[0]
+    best, below, below_live = float("inf"), 0, 0
+    for r in range(n_rep):
+        b = pos[r]
+        n = b.shape[0]
+        for i in range(0, n, chunk):
+            d = torch.cdist(b[i:i + chunk], b)                  # (chunk, n), never (n, n)
+            rows = torch.arange(i, min(i + chunk, n), device=d.device)
+            d[torch.arange(d.shape[0], device=d.device), rows] = float("inf")
+            best = min(best, float(d.min()))
+            below += int((d < C.CLASH_DIST).sum())
+            below_live += int((d < C.CLASH_SIGMA).sum())
+    return best, below, below_live
+
+
 def relax_positions(pos, ij, pw, pot_kw=None, constraints=None, n_steps=1500, step_nm=0.005,
                     force_cap=5000.0, tol=50.0, cell_size=1.5, report=250, log=None):
     """Descend the injected Hamiltonian before the sampler's first step. Returns (pos, info).
@@ -387,12 +424,10 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
                     res.b_counts[blk][c] += np.bincount(k[ok], minlength=len(t["U"]))
                     res.n_total[c] += int(q.size)
                     res.n_outside[c] += int((~ok).sum())
-                beads = pos.reshape(nrep, -1, 3)
-                dd = torch.cdist(beads, beads)
-                dd = dd + torch.eye(dd.shape[-1], device=dd.device) * 10.0
-                res.clash_min.append(float(dd.min()))
-                res.clash_below += int((dd < C.CLASH_DIST).sum())
-                res.clash_below_live += int((dd < C.CLASH_SIGMA).sum())
+                _cm, _cb, _cbl = closest_bead_pair(pos.reshape(nrep, -1, 3))
+                res.clash_min.append(_cm)
+                res.clash_below += _cb
+                res.clash_below_live += _cbl
         if progress and (step + 1) % max(nsteps // 10, 1) == 0:
             el = time.time() - t0
             _ct, _ac = summed(res.b_counts, res.b_acc, nb)

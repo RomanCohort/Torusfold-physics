@@ -47,6 +47,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "src"))
 import boltzmann_bonded as B          # noqa: E402
+import ibi_core as IC                 # noqa: E402  (closest_bead_pair, chunked in one place)
 import torusfold.scheme2.torch_cgsim as C   # noqa: E402
 
 
@@ -232,11 +233,12 @@ for step in range(NSTEPS):
                 b_counts[blk][c] += np.bincount(k[ok], minlength=len(t["U"]))
             b_rg[blk].extend(rg(pos).tolist())
             b_rmsd[blk].extend(p_rmsd(pos).tolist())
-            beads = pos.reshape(NREP, -1, 3)
-            dd = torch.cdist(beads, beads)
-            dd = dd + torch.eye(dd.shape[-1], device=dd.device) * 10.0
-            clash_min.append(float(dd.min()))
-            clash_below_live += int((dd < C.CLASH_SIGMA).sum())
+            # Chunked, for the same reason ibi_core's is: a full N x N float64 matrix per sampled
+            # frame is 617 MB for a 2929-residue chain, which is what put a worker at 25 GB of
+            # commit and took the machine's commit limit down on 2026-09-16.
+            _cm, _cb, _cbl = IC.closest_bead_pair(pos.reshape(NREP, -1, 3))
+            clash_min.append(_cm)
+            clash_below_live += _cbl
     if (step + 1) % max(NSTEPS // 10, 1) == 0:
         el = time.time() - t0
         parts, _joint = [], []
