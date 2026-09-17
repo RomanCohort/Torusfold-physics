@@ -70,6 +70,15 @@ Two things a resumed process has to get right, and both are deliberate here:
     middle of: it would need two more rounds before the rule has anything to compare against,
     and every round in between is one a continuous run would have refused.
 
+EVERY TASK'S RESULT IS WRITTEN TO DISK AS IT ARRIVES, under OUT_ROOT/tasks_r<N>/<idx>.npz,
+with a heartbeat file beside it. Two reasons, both measured: four workers of round 0 died on
+2026-09-16 (VCRUNTIME140.dll and ucrtbase.dll 0xc0000409), the Pool respawned them at the same
+seconds so the run LOOKED healthy, and the tasks they held were lost forever while pool.map
+waited for results that could never arrive -- 29.7 h in, with every finished chain's histogram in
+the parent's memory. Now a dead worker is visible (nothing is beating), its tasks are re-run in a
+fresh pool, and a round that is killed resumes from the results already on disk instead of
+starting over.
+
 Run: python scripts/ibi_loop.py <n_structures> <n_rounds> [nrep] [nsteps] [stride]
                                   [--start-round=N]
      python scripts/ibi_loop.py 7 4 16 32500 25
@@ -79,6 +88,7 @@ import json
 import multiprocessing as mp
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -158,6 +168,37 @@ WALL_K = float(os.environ.get("IBI_LOOP_WALL", 2000.0))
 # and kill every round after the edit, while reading the environment is invisible to them.
 RELAX_STEPS = int(os.environ.get("IBI_LOOP_RELAX", 0))
 
+# --- task checkpointing, and the watchdog that reads it --------------------------------------
+#
+# WHY THIS EXISTS, measured. On 2026-09-16 four pool workers of this loop died (four AppCrash
+# reports, VCRUNTIME140.dll at 23:04:18 x3 and ucrtbase.dll 0xc0000409 at 23:08:32) and the Pool
+# respawned four replacements AT THOSE SAME SECONDS -- which is why the run looked healthy. The
+# tasks the dead workers were holding went with them: multiprocessing.Pool does NOT replay a task
+# whose worker died, and pool.map blocks on a result that will never arrive. Round 0 sat there
+# until it was killed, 29.7 h in, with every completed chain's histogram held in the parent's
+# memory where nothing could reach it.
+#
+# So: each task's result is written to disk the moment it arrives (done_dir/<idx>.npz), a round
+# RESUMES by skipping the indices already on disk, and each worker touches a heartbeat file every
+# HEARTBEAT_S so the parent can tell "still integrating" from "dead". A worker that dies is not
+# invisible any more: the parent notices that nothing anywhere is beating, and re-runs the
+# outstanding tasks in a fresh pool.
+HEARTBEAT_S = float(os.environ.get("IBI_LOOP_HEARTBEAT", 15.0))
+# How often the parent looks at the heartbeats while it waits for results.
+POLL_S = float(os.environ.get("IBI_LOOP_POLL", 60.0))
+# A task that HAS beaten and then gone silent for this long is dead: its worker crashed holding
+# it, and Pool's replacement is idle because the task was already handed out. A task that has
+# never beaten is not evidence of anything -- with 867 tasks and 33 workers, most are still in the
+# queue -- which is why the predicate reads mtimes instead of counting missing files.
+STALE_S = float(os.environ.get("IBI_LOOP_STALE", 420.0))
+# A chain that crashes its worker every attempt is a finding, not something to loop on forever.
+MAX_ATTEMPTS = int(os.environ.get("IBI_LOOP_ATTEMPTS", 4))
+# TEST HOOK, and the only reason it is in a production path: IBI_LOOP_CRASH_ONCE=<idx[,idx]> makes
+# that task's worker die with no traceback the first time it runs -- exactly how the four workers
+# of round 0 died -- so the DEAD WORKER path can be exercised instead of hoped for. The marker file
+# it leaves is what makes it fire once, so the retry then succeeds. Never set outside a test.
+_CRASH_ONCE = os.environ.get("IBI_LOOP_CRASH_ONCE", "")
+
 # 1 THREAD PER WORKER, AND ONE WORKER PER CPU. Measured aggregate throughput over the machine,
 # 32 logical CPUs, L=29, 16 replicas, the real step (2026-09-14):
 #
@@ -192,6 +233,104 @@ def _flag_int(name, default):
     return default
 
 
+def keep_awake():
+    """Ask Windows not to suspend while the loop runs. Returns True when it took effect.
+
+    WHY. The 2026-09-16 round spent 29.7 h of wall clock on what is about 21 h of work, because
+    the machine kept entering Modern Standby -- twelve "exiting Modern Standby" events between
+    13:56 and 17:40 alone. A suspend does not kill the sampling (the processes freeze and resume,
+    and the watchdog now knows the difference), but the round takes half again as long, and an
+    idle machine is indistinguishable from a dead run to anybody watching.
+
+    ES_CONTINUOUS | ES_SYSTEM_REQUIRED holds the system awake until this process exits or clears
+    it, and it is opt-in (IBI_LOOP_KEEP_AWAKE=1): it changes how the machine behaves for hours, so
+    it is the caller's decision and not a default.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        return bool(ctypes.windll.kernel32.SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED))
+    except Exception:
+        return False
+
+
+# --------------------------------------------------------------------- task checkpoints
+def task_npz(done_dir, idx):
+    """Where task `idx`'s result lives. Its existence IS the resume condition."""
+    return Path(done_dir) / f"{idx}.npz"
+
+
+def save_task_result(done_dir, idx, r):
+    """Write one chain-round's counts and scalars, and its entry/relax metadata beside them."""
+    counts = {f"counts__{c}": np.asarray(r["counts"][c], dtype=np.int64) for c in B.COORDS}
+    scalars = {}
+    for c in B.COORDS:
+        scalars[f"n_outside__{c}"] = int(r["n_outside"][c])
+        scalars[f"n_total__{c}"] = int(r["n_total"][c])
+    np.savez(task_npz(done_dir, idx),
+             joint_J=np.float64(np.nan if r["joint_J"] is None else r["joint_J"]),
+             residues=int(r["residues"]), seconds=float(r["seconds"]),
+             j_coords=np.asarray(r["j_coords"], dtype=np.int64), **counts, **scalars)
+    task_npz(done_dir, idx).with_suffix(".json").write_text(
+        json.dumps({"entry": r.get("entry"), "relax": r.get("relax")}, indent=1, default=float),
+        encoding="utf-8")
+
+
+def load_task_result(done_dir, idx):
+    """The exact dict _sample_one returned, as far as the update half reads it."""
+    z = np.load(task_npz(done_dir, idx))
+    meta_path = task_npz(done_dir, idx).with_suffix(".json")
+    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    j = float(z["joint_J"])
+    return {"counts": {c: z[f"counts__{c}"] for c in B.COORDS},
+            "n_outside": {c: int(z[f"n_outside__{c}"]) for c in B.COORDS},
+            "n_total": {c: int(z[f"n_total__{c}"]) for c in B.COORDS},
+            "joint_J": None if j != j else j,
+            "j_coords": [int(v) for v in z["j_coords"]],
+            "residues": int(z["residues"]), "seconds": float(z["seconds"]),
+            "entry": meta.get("entry"), "relax": meta.get("relax")}
+
+
+def dead_tasks(outstanding, stale_s, now=None):
+    """The outstanding tasks that started beating and then stopped. Returns their tuple list.
+
+    A task with NO heartbeat file is not returned: it has not been handed to a worker yet, and
+    with 867 tasks over 33 workers that is most of them at any moment. A task that beat and then
+    went quiet is the signature of a worker that crashed while holding it -- the Pool respawns the
+    worker, and the task it was holding is never re-issued by anybody.
+    """
+    now = time.time() if now is None else now
+    out = []
+    for t in outstanding:
+        try:
+            age = now - Path(t[1]).stat().st_mtime
+        except OSError:
+            continue
+        if age > stale_s:
+            out.append(t)
+    return out
+
+
+def touch_heartbeats(outstanding, now=None):
+    """Call after a wall-clock jump: silence across a suspend is not a crash.
+
+    A machine that sleeps freezes the parent too, so on wake every heartbeat looks hours old. The
+    honest repair is to move them all to now and let the next window speak, rather than to kill
+    and re-run a pool whose workers were never dead.
+    """
+    now = time.time() if now is None else now
+    for t in outstanding:
+        p = Path(t[1])
+        if p.exists():
+            try:
+                os.utime(p, (now, now))
+            except OSError:
+                pass
+
+
 # --------------------------------------------------------------------------- worker
 def _build_potentials(round_npz):
     """use_table_file FIRST, then make_potential: the potential closes over the current table.
@@ -210,8 +349,15 @@ def _build_potentials(round_npz):
 
 
 def _sample_one(task):
-    """One chain, one round, in its own process. Returns counts, not samples."""
-    (round_npz, pos_np, pairs, nrep, nsteps, burn, stride, blocks, friction, seed, threads) = task
+    """One chain, one round, in its own process. Returns (task index, counts -- not samples).
+
+    The index comes back because the PARENT writes the result to disk the moment it arrives. A
+    result that only exists in the parent's memory is a result a crash throws away, and that is
+    exactly what happened to round 0 on 2026-09-16: 29.7 h of sampling, four workers dead, every
+    completed histogram unreachable.
+    """
+    (idx, hb_path, round_npz, pos_np, pairs, nrep, nsteps, burn, stride, blocks, friction, seed,
+     threads) = task
     torch.set_num_threads(threads)
     L = pos_np.shape[0]
     _pots, pot_kw = _build_potentials(round_npz)
@@ -238,14 +384,43 @@ def _sample_one(task):
         _fmax0 = float(torch.linalg.norm(_f0.reshape(-1, 3), dim=-1).max())
     entry = {"energy_0": float(_e0.mean()), "max_force_0": _fmax0,
              "at_cap_0": bool(_fmax0 >= 5000.0)}
+
+    # A beat every HEARTBEAT_S of WALL time, not every N steps: "no beat for four minutes" has to
+    # mean the same thing for a 21-residue chain and a 2929-residue one, and in steps it does not.
+    # The parent reads these files to tell a slow task from a dead one.
+    stop_hb = threading.Event()
+
+    def _beat():
+        while not stop_hb.wait(HEARTBEAT_S):
+            try:
+                Path(hb_path).write_text(f"{time.time():.0f}\n", encoding="utf-8")
+            except OSError:
+                pass
+
+    try:
+        Path(hb_path).write_text(f"{time.time():.0f}\n", encoding="utf-8")
+    except OSError:
+        pass
+    threading.Thread(target=_beat, daemon=True).start()
+
+    if _CRASH_ONCE and str(idx) in _CRASH_ONCE.split(","):
+        marker = Path(hb_path).with_suffix(".crashed")
+        if not marker.exists():
+            marker.write_text("first attempt died here\n", encoding="utf-8")
+            os._exit(1)      # no traceback, no cleanup: the way a real worker death looks
+
     t0 = time.time()
-    res = IC.run_round(pos=pos, vel=vel, ij=ij, pw=pw, temps=temps, tab=tab,
-                       nsteps=nsteps, burn=burn, stride=stride, blocks=blocks, friction=friction,
-                       force_cap=5000.0, pot_kw=pot_kw, seed=seed, nrep=nrep, progress=False,
-                       constraints=con, relax=RELAX_STEPS, log=lambda *a, **k: None)
+    try:
+        res = IC.run_round(pos=pos, vel=vel, ij=ij, pw=pw, temps=temps, tab=tab,
+                           nsteps=nsteps, burn=burn, stride=stride, blocks=blocks,
+                           friction=friction, force_cap=5000.0, pot_kw=pot_kw, seed=seed,
+                           nrep=nrep, progress=False, constraints=con, relax=RELAX_STEPS,
+                           log=lambda *a, **k: None)
+    finally:
+        stop_hb.set()
     _wv, _wj = IC.simref(res.acc, tab, skip=res.skip)
     _u, _o = IC.j_denominator(res.acc, tab, skip=res.skip)
-    return {
+    return idx, {
         "entry": entry,
         "relax": res.relax,
         "counts": {c: np.asarray(res.counts[c], dtype=np.int64) for c in B.COORDS},
@@ -401,7 +576,10 @@ def main():
     _names = ", ".join(f"{s['name']}(L={len(s['pos'])})" for s in structs[:6])
     print(f"  {len(structs)} structures, L {min(_ls)}-{max(_ls)}: {_names}"
           + (f", ... +{len(structs) - 6} more" if len(structs) > 6 else ""))
-    print(f"  updated {UPDATED}; carried {CARRIED}; excluded {tuple(B.CONSTRAINED)} (rigid)\n")
+    print(f"  updated {UPDATED}; carried {CARRIED}; excluded {tuple(B.CONSTRAINED)} (rigid)")
+    if os.environ.get("IBI_LOOP_KEEP_AWAKE", "") not in ("", "0"):
+        print("  keep-awake: " + ("held (ES_SYSTEM_REQUIRED)" if keep_awake() else "NOT held"))
+    print()
 
     ref_tables = I.load_clean_tables(REF_NPZ)
     # The target is the reference file's, in a resume exactly as in a fresh run: what changed
@@ -456,6 +634,8 @@ def main():
         # sampling, not the estimator. The chunks land on the SAME chain, so the batch within one
         # worker is just smaller; that is why per-worker throughput drops and the sum does not.
         per_chain_chunks = max(1, _N_WORKERS // max(1, len(structs)))
+        done_dir = OUT_ROOT / f"tasks_r{rnd}"
+        done_dir.mkdir(parents=True, exist_ok=True)
         tasks, task_owner = [], []
         for i, s in enumerate(structs):
             base, extra = divmod(nrep, per_chain_chunks)
@@ -463,15 +643,68 @@ def main():
                 rep = base + (1 if k < extra else 0)
                 if rep <= 0:
                     continue
-                tasks.append((str(round_npz), np.asarray(s["pos"], dtype=np.float64),
-                              list(s["pairs"]), rep, nsteps, burn, stride, 8, friction,
-                              seed + 1000 * k + i, _N_THREADS))
+                idx = len(tasks)
+                tasks.append((idx, str(done_dir / f"{idx}.hb"), str(round_npz),
+                              np.asarray(s["pos"], dtype=np.float64), list(s["pairs"]),
+                              rep, nsteps, burn, stride, 8, friction, seed + 1000 * k + i,
+                              _N_THREADS))
                 task_owner.append(i)
+
+        # RESUME INSIDE A ROUND: a task whose result is already on disk is not re-run, so a round
+        # killed at hour 20 costs the chains that were in flight and nothing else.
+        remaining = [t for t in tasks if not task_npz(done_dir, t[0]).exists()]
         print(f"  {len(tasks)} tasks over {len(structs)} chains "
-              f"({per_chain_chunks} replica-chunks each) on {_N_WORKERS} workers")
-        ctx = mp.get_context("spawn")
-        with ctx.Pool(processes=min(_N_WORKERS, len(tasks))) as pool_procs:
-            results = pool_procs.map(_sample_one, tasks)
+              f"({per_chain_chunks} replica-chunks each) on {_N_WORKERS} workers"
+              + (f"; {len(tasks) - len(remaining)} already on disk, {len(remaining)} to run"
+                 if len(remaining) != len(tasks) else ""))
+
+        # A POOL WHOSE WORKER DIED HOLDS ENTRIES THAT WILL NEVER ARRIVE, so the wait is bounded by
+        # the heartbeats rather than by patience: every outstanding task silent for QUIET_S means
+        # the workers are gone, and the outstanding ones are re-run in a fresh pool. Re-running is
+        # exact -- a task is a pure function of the table, the chain and the seed.
+        attempt = 0
+        while remaining and attempt < MAX_ATTEMPTS:
+            attempt += 1
+            if attempt > 1:
+                print(f"  attempt {attempt}: {len(remaining)} task(s) to run")
+            ctx = mp.get_context("spawn")
+            with ctx.Pool(processes=min(_N_WORKERS, len(remaining))) as pool_procs:
+                it = pool_procs.imap_unordered(_sample_one, remaining)
+                last_check = time.time()
+                while remaining:
+                    try:
+                        idx, r = it.next(timeout=POLL_S)
+                    except mp.TimeoutError:
+                        now = time.time()
+                        if now - last_check > 3 * POLL_S:
+                            print(f"  note: {now - last_check:.0f} s passed without a check -- "
+                                  f"the machine was suspended. Heartbeats refreshed; this is not a "
+                                  f"crash.")
+                            touch_heartbeats(remaining, now)
+                        last_check = now
+                        dead = dead_tasks(remaining, STALE_S, now)
+                        if dead:
+                            print(f"  DEAD WORKER: {len(dead)} task(s) stopped beating "
+                                  f"{STALE_S:.0f} s ago "
+                                  f"({', '.join(str(t[0]) for t in dead[:10])}"
+                                  + (f", +{len(dead) - 10} more" if len(dead) > 10 else "")
+                                  + f") -- this is what multiprocessing.Pool does not tell "
+                                  f"anybody: it respawns the worker and the task it held is never "
+                                  f"re-issued. Restarting the {len(remaining)} outstanding "
+                                  f"task(s); the ones already on disk are untouched.")
+                            break
+                        continue
+                    save_task_result(done_dir, idx, r)
+                    remaining = [t for t in remaining if t[0] != idx]
+        if remaining:
+            raise SystemExit(
+                f"{len(remaining)} task(s) did not complete in {MAX_ATTEMPTS} attempts: "
+                + ", ".join(str(t[0]) for t in remaining[:20])
+                + (f" (+{len(remaining) - 20} more)" if len(remaining) > 20 else "")
+                + ". Nothing is on disk for them, the round cannot finish, and a chain that "
+                  "crashes its worker on every attempt is a finding -- look at the chain, not at "
+                  "the retry count.")
+        results = [load_task_result(done_dir, i) for i in range(len(tasks))]
 
         # Per-chain line: every chunk of a chain reported its own J, so the chain's line names the
         # spread across its chunks rather than pretending they are one number.
