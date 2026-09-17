@@ -348,6 +348,56 @@ def _build_potentials(round_npz):
     return pots, P.potential_kwargs(pots)
 
 
+def process_memory_mb():
+    """(working set, commit) of THIS process in MB, or (nan, nan) if the API is not there.
+
+    The heartbeat carries it because the round that died on 2026-09-16 died of memory exhaustion,
+    and nothing recorded which process grew, on which chain, or how fast: it had to be
+    reconstructed afterwards from Windows' Resource-Exhaustion events.
+    """
+    if os.name != "nt":
+        return float("nan"), float("nan")
+    try:
+        import ctypes
+        import ctypes.wintypes as wt
+        global _PMC, _K32
+        try:
+            _PMC
+        except NameError:
+            class _PMC(ctypes.Structure):
+                _fields_ = [("cb", wt.DWORD), ("PageFaultCount", wt.DWORD),
+                            ("PeakWorkingSetSize", ctypes.c_size_t),
+                            ("WorkingSetSize", ctypes.c_size_t),
+                            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                            ("PagefileUsage", ctypes.c_size_t),
+                            ("PeakPagefileUsage", ctypes.c_size_t)]
+            _K32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            _K32.K32GetProcessMemoryInfo.argtypes = [wt.HANDLE, ctypes.POINTER(_PMC), wt.DWORD]
+            _K32.K32GetProcessMemoryInfo.restype = wt.BOOL
+        c = _PMC()
+        c.cb = ctypes.sizeof(c)
+        if not _K32.K32GetProcessMemoryInfo(_K32.GetCurrentProcess(), ctypes.byref(c),
+                                            ctypes.sizeof(c)):
+            return float("nan"), float("nan")
+        return c.WorkingSetSize / 1e6, c.PagefileUsage / 1e6
+    except Exception:
+        return float("nan"), float("nan")
+
+
+def _beat_write(path):
+    """Timestamp, pid and memory.
+
+    The pid maps a growing process to the chain in the file name beside it; the memory says
+    whether it is growing at all. Without both, a memory death is invisible until Windows says so.
+    """
+    ws, commit = process_memory_mb()
+    Path(path).write_text(f"{time.time():.0f} pid={os.getpid()} ws_mb={ws:.0f} "
+                          f"commit_mb={commit:.0f}\n", encoding="utf-8")
+
+
 def _sample_one(task):
     """One chain, one round, in its own process. Returns (task index, counts -- not samples).
 
@@ -393,12 +443,12 @@ def _sample_one(task):
     def _beat():
         while not stop_hb.wait(HEARTBEAT_S):
             try:
-                Path(hb_path).write_text(f"{time.time():.0f}\n", encoding="utf-8")
+                _beat_write(hb_path)
             except OSError:
                 pass
 
     try:
-        Path(hb_path).write_text(f"{time.time():.0f}\n", encoding="utf-8")
+        _beat_write(hb_path)
     except OSError:
         pass
     threading.Thread(target=_beat, daemon=True).start()
