@@ -88,6 +88,13 @@ def test_dead_tasks_separates_never_started_from_crashed():
         dead = L.dead_tasks(tasks, 420.0)
         assert [t[0] for t in dead] == [1], "only the task that beat and stopped is dead"
         assert L.dead_tasks([], 420.0) == []
+        # A beat from BEFORE this attempt is not evidence. On a resume every file on disk is older
+        # than STALE_S, and reading those as dead burned a pool cycle at every restart (measured
+        # 2026-09-17: "DEAD WORKER: 25 task(s)" printed before a single step of the new attempt).
+        assert L.dead_tasks(tasks, 420.0, since=time.time()) == [], (
+            "heartbeats from a previous attempt must not kill this attempt's tasks")
+        assert [t[0] for t in L.dead_tasks(tasks, 420.0, since=0.0)] == [1], (
+            "with no cutoff the stale beat is still found")
         # a suspend freezes the parent too, so on wake nothing is dead -- it is all just old
         L.touch_heartbeats(tasks)
         assert L.dead_tasks(tasks, 420.0) == [], "a refreshed heartbeat must not read as death"

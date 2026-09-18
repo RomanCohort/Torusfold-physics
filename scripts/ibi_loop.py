@@ -294,22 +294,30 @@ def load_task_result(done_dir, idx):
             "entry": meta.get("entry"), "relax": meta.get("relax")}
 
 
-def dead_tasks(outstanding, stale_s, now=None):
+def dead_tasks(outstanding, stale_s, now=None, since=None):
     """The outstanding tasks that started beating and then stopped. Returns their tuple list.
 
     A task with NO heartbeat file is not returned: it has not been handed to a worker yet, and
     with 867 tasks over 33 workers that is most of them at any moment. A task that beat and then
     went quiet is the signature of a worker that crashed while holding it -- the Pool respawns the
     worker, and the task it was holding is never re-issued by anybody.
+
+    `since` is the moment this attempt started, and a beat older than it is not evidence: on a
+    RESUME the disk is full of heartbeats from the attempt that died, and without this the first
+    check of the new attempt declares all of them dead. Measured on 2026-09-17: every restart
+    burned a pool cycle on that false verdict and printed "DEAD WORKER: 25 task(s)" before a
+    single step had been taken.
     """
     now = time.time() if now is None else now
     out = []
     for t in outstanding:
         try:
-            age = now - Path(t[1]).stat().st_mtime
+            mtime = Path(t[1]).stat().st_mtime
         except OSError:
             continue
-        if age > stale_s:
+        if since is not None and mtime < since:
+            continue
+        if now - mtime > stale_s:
             out.append(t)
     return out
 
@@ -717,6 +725,16 @@ def main():
             attempt += 1
             if attempt > 1:
                 print(f"  attempt {attempt}: {len(remaining)} task(s) to run")
+            # Clear the heartbeats this attempt is about to write: left alone, the files from the
+            # attempt that died are all older than STALE_S and the first check reads them as
+            # hundreds of dead workers. attempt_started is the other half of that guard, for files
+            # an unlink could not reach.
+            attempt_started = time.time()
+            for t in remaining:
+                try:
+                    Path(t[1]).unlink()
+                except OSError:
+                    pass
             ctx = mp.get_context("spawn")
             with ctx.Pool(processes=min(_N_WORKERS, len(remaining))) as pool_procs:
                 it = pool_procs.imap_unordered(_sample_one, remaining)
@@ -732,7 +750,7 @@ def main():
                                   f"crash.")
                             touch_heartbeats(remaining, now)
                         last_check = now
-                        dead = dead_tasks(remaining, STALE_S, now)
+                        dead = dead_tasks(remaining, STALE_S, now, since=attempt_started)
                         if dead:
                             print(f"  DEAD WORKER: {len(dead)} task(s) stopped beating "
                                   f"{STALE_S:.0f} s ago "
