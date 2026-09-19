@@ -116,3 +116,21 @@ def test_an_existing_result_is_skipped():
         assert [t[0] for t in remaining] == [0, 2]
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def test_dispatch_is_longest_first_and_keeps_the_indices():
+    """LPT scheduling, and the task index still names the checkpoint file.
+
+    Measured on 2026-09-19: with the loader's alphabetical order, round 0's largest chain
+    (8FMW_24, 2929 residues) was task 536 of 867, started late, and finished last -- the final
+    stretch of the round ran on one core while thirty-one sat idle (19.9 CPU-seconds per 20 s of
+    wall). Longest first puts that chain in the first wave instead.
+    """
+    tasks = [(0, "a"), (1, "b"), (2, "c"), (3, "d")]
+    size = {0: 50, 1: 2000, 2: 7, 3: 300}
+    order = L.longest_first(tasks, lambda i: size[i])
+    assert [t[0] for t in order] == [1, 3, 0, 2], "longest chain first"
+    assert [t[0] for t in tasks] == [0, 1, 2, 3], (
+        "the input list must not be reordered: a renumbering would make a resume read one chain's "
+        "result as another's, silently, because the files would still be valid")
+    assert L.longest_first([], lambda i: 0) == []

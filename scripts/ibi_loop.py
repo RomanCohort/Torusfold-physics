@@ -263,6 +263,25 @@ def task_npz(done_dir, idx):
     return Path(done_dir) / f"{idx}.npz"
 
 
+def longest_first(tasks, length_of):
+    """The dispatch order: the longest chain goes first.
+
+    WHY. A round's wall clock is the longest chain's own cost PLUS whatever the schedule adds to
+    it, and the loader's order is alphabetical. On round 0 of the 867-chain pool the largest chain
+    (8FMW_24, 2929 residues) was task 536 of 867, so it started near the end and the last stretch
+    of the round ran on ONE core while thirty-one sat idle -- measured on 2026-09-19: 19.9
+    CPU-seconds per 20 s of wall, 3 percent of the box. LPT, longest processing time first, is the
+    standard answer: the long chains enter the first wave, so the tail overlaps with them instead
+    of trailing them.
+
+    `length_of(idx)` returns the chain's size. The task INDEX is deliberately not touched by the
+    sort: it names the checkpoint file, and a dispatch order that renumbered the tasks would make
+    a resume read one chain's result as another's -- silently, because the files would still be
+    valid, just for the wrong chain. So this returns a new order and leaves the indices alone.
+    """
+    return sorted(tasks, key=lambda t: -length_of(t[0]))
+
+
 def save_task_result(done_dir, idx, r):
     """Write one chain-round's counts and scalars, and its entry/relax metadata beside them."""
     counts = {f"counts__{c}": np.asarray(r["counts"][c], dtype=np.int64) for c in B.COORDS}
@@ -711,6 +730,7 @@ def main():
         # RESUME INSIDE A ROUND: a task whose result is already on disk is not re-run, so a round
         # killed at hour 20 costs the chains that were in flight and nothing else.
         remaining = [t for t in tasks if not task_npz(done_dir, t[0]).exists()]
+        remaining = longest_first(remaining, lambda i: len(structs[task_owner[i]]["pos"]))
         print(f"  {len(tasks)} tasks over {len(structs)} chains "
               f"({per_chain_chunks} replica-chunks each) on {_N_WORKERS} workers"
               + (f"; {len(tasks) - len(remaining)} already on disk, {len(remaining)} to run"
@@ -752,9 +772,18 @@ def main():
                         last_check = now
                         dead = dead_tasks(remaining, STALE_S, now, since=attempt_started)
                         if dead:
+                            # NAME THE CHAINS, not just the task indices: the only way to tell a
+                            # random machine-level death from a chain that kills its worker every
+                            # time is to see whether the same names come back.
+                            who = []
+                            for t in dead[:10]:
+                                ci = task_owner[t[0]] if t[0] < len(task_owner) else None
+                                who.append(str(t[0]) if ci is None else
+                                           f"{t[0]}({structs[ci]['name']} "
+                                           f"L={len(structs[ci]['pos'])})")
                             print(f"  DEAD WORKER: {len(dead)} task(s) stopped beating "
                                   f"{STALE_S:.0f} s ago "
-                                  f"({', '.join(str(t[0]) for t in dead[:10])}"
+                                  f"({', '.join(who)}"
                                   + (f", +{len(dead) - 10} more" if len(dead) > 10 else "")
                                   + f") -- this is what multiprocessing.Pool does not tell "
                                   f"anybody: it respawns the worker and the task it held is never "
