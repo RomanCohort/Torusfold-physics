@@ -302,6 +302,7 @@ class RoundResult:
         self.skip = ()            # the coordinates excluded from J, by name
         self.j_coords = (0, 0)    # (averaged over, offered), as j_denominator returns
         self.values = None        # {coord: (frames, M)} raw q, only when collect_values
+        self.positions = None     # [(B, 3L, 3)] sampled frames, only when collect_positions
         self.pos = None           # final coordinates
         self.vel = None
         self.seconds = 0.0
@@ -311,6 +312,7 @@ class RoundResult:
 
 def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, friction,
               force_cap, pot_kw=None, seed=None, collect_values=False, nrep=None,
+              collect_positions=False,
               progress=True, log=print, constraints=None, skip=None, relax=0):
     """Sample, binning into `blocks` disjoint equal-time blocks. Returns a RoundResult.
 
@@ -364,6 +366,8 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
     res.skip = skip
     if collect_values:
         res.values = {c: [] for c in B.COORDS}
+    if collect_positions:
+        res.positions = []
 
     if seed is not None:
         torch.manual_seed(seed)
@@ -428,6 +432,13 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
                 res.clash_min.append(_cm)
                 res.clash_below += _cb
                 res.clash_below_live += _cbl
+                if res.positions is not None:
+                    # ONE FRAME'S GEOMETRY, kept so a caller can ask a question the histograms
+                    # cannot answer: did this chain stay near the geometry it was started from?
+                    # Size is frames x 3L x 3 x 8 B -- 17 MB for the largest chain at stride 25
+                    # and a 2000-step run, which is why it is off by default and why no round of
+                    # the production loop pays for it.
+                    res.positions.append(pos.detach().clone())
         if progress and (step + 1) % max(nsteps // 10, 1) == 0:
             el = time.time() - t0
             _ct, _ac = summed(res.b_counts, res.b_acc, nb)
@@ -446,6 +457,9 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
         res.values = {c: (np.asarray(v, dtype=np.float64) if v
                           else np.zeros((0, 1), dtype=np.float64))
                       for c, v in res.values.items()}
+    if res.positions is not None:
+        res.positions = (torch.stack(res.positions) if res.positions
+                         else torch.zeros((0, pos.shape[0], pos.shape[1], 3)))
     return res
 
 
