@@ -397,10 +397,35 @@ moment difference pooled over the chains, computed offline from the stored histo
 | 4 | 0.0859 | 0.0450 | 1.205 | 1.141 |
 | 5 | 0.0861 | **0.0351** | 1.242 | **1.135** |
 
-The inversion stalls and rings at 0.082-0.086; the moment operator falls monotonically to 0.035 and
-angle walks from 1.259 to 1.135. Dihedral reaches about 1.0 under both. bb_bond plateaus at
-0.853-0.856 under BOTH, which 5.1 explains: the two operators agree because both are already at the
-table's own distribution.
+Both arms ran all six rounds (exit 0). The same two arms, with every coordinate measured against
+the table's OWN sigma -- the fair number, since 5.1 showed the stored sigma is inflated for bb_bond
+and stack:
+
+| arm | round | bb_bond | angle | dihedral | stack |
+| :-- | --: | --: | --: | --: | --: |
+| table | 0 | 1.101 | 1.253 | 1.240 | 1.242 |
+| table | 3 | 1.004 | 1.219 | 1.009 | 1.171 |
+| table | 5 | **1.004** | **1.199** | **1.015** | 1.158 |
+| moments | 0 | 1.101 | 1.253 | 1.240 | 1.242 |
+| moments | 3 | 0.998 | 1.172 | 0.994 | 1.137 |
+| moments | 5 | **1.000** | **1.130** | **0.970** | 1.110 |
+
+Read off it:
+
+- **bb_bond ends on target under both** (1.004 and 1.000) -- the two operators agree there because
+  both are already at the table's own distribution, which is what 5.1 says and what the stalled
+  correction (0.48 -> 0.35 kJ/mol) says.
+- **dihedral is on target under both** (1.015 and 0.970); the moment operator drifts slightly PAST
+  the reference where the inversion settles on it.
+- **angle is where they separate**: the inversion stalls at 1.199 with a ringing correction
+  (0.082-0.086), the moment operator walks it to **1.130** and is still falling at round 5.
+- **stack, which neither arm updates, improves under both** (1.242 -> 1.158 / 1.110), i.e. the
+  coupling is doing part of the work and the moment operator's step is a little easier on it.
+
+The verdict against the pre-registered acceptance ("angle's correction series becomes monotone") is
+that **the moment operator passes and the marginal inversion does not**. The same evidence says the
+operators are equivalent on the two coordinates that were never broken, so this is a change to make
+for one coordinate, not a different theory of the field.
 
 ### 5.3 What this changes
 
