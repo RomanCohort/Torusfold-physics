@@ -115,3 +115,39 @@ That check is free and it is the first thing to do.
   table got; the moments make the objective measurable per round, which is what makes that cheap.
 - **It does not fix the target.** If the reference is itself the wrong thing to chase (Plan C's
   position), a better operator converges to the wrong place faster. Run both.
+
+## First free check — done 2026-09-21, and it revises the plan
+
+Before any sampling, the obvious question: can a short Chebyshev basis in the coordinate represent
+the reference tables at all? Fit by weighted least squares (weights = the reference probability),
+on `refit_smooth5.npz`:
+
+| coordinate | K=2 | K=4 | K=8 | K=12 | max \|ΔU\| inside 2 sigma (best K) |
+| :-- | --: | --: | --: | --: | --: |
+| bb_bond | 0.721 | 0.687 | 0.323 | **0.112** | 0.61 |
+| angle | 0.944 | 0.681 | 0.325 | **0.261** | **15.5** |
+| dihedral | 0.906 | 0.556 | 0.510 | **0.502** | **21.6** (and it gets WORSE with K) |
+| stack | 1.487 | 0.765 | 0.255 | **0.164** | 1.19 |
+
+(kJ/mol; 0.1 kBT = 0.25 kJ/mol. Two numbers matter and they say different things.)
+
+1. **In the region where samples live, a short basis is enough.** The probability-weighted residual
+   at K=12 is 0.11-0.50 kJ/mol = **0.04-0.20 kBT** for all four coordinates — smaller than the
+   Poisson noise the tables already carry (`SMOOTH_WIDTH` exists for exactly that noise).
+2. **Between the peaks it is not.** The unweighted maximum inside the 2 sigma window reaches 15-22
+   kJ/mol (6-9 kBT) for angle and dihedral, and for dihedral it GROWS with K — the signature of a
+   polynomial chasing a kink. The tables are piecewise linear by construction, and the coordinates
+   are bimodal (a narrow cis peak against a broad trans basin), so the barrier region is a feature
+   no low-order polynomial resolves. It is also the region the marginal constrains least.
+
+**So the plan changes to B': keep the table's shape and make the CORRECTION low-order.**
+
+    U_c(q) = table_c(q) + sum_k d_k * phi_k(q)
+    d_k   <- d_k + eta_k * ( <phi_k>_sim - <phi_k>_ref )        (relative-entropy gradient)
+
+The table keeps the peaks and the barrier (its 1000 bins buy shape, which is why the table path
+currently reaches dihedral 1.005 while the hand-built Fourier N=2 arm reached 1.060); the correction
+is a handful of coefficients, so the update is a moment-matching step with no binning noise and the
+step size has a measurable objective. The free check above is what selects this variant: fitting the
+whole potential with a basis throws away the shape that is already working.
+

@@ -103,3 +103,47 @@ target; C asks whether the current target is the wrong thing to chase. B's resul
 if C is right (a coupled update is still what one wants on any target), and C's is meaningful even
 if B works (a self-consistent target plus a better operator is the combination both plans are
 ultimately aiming at).
+
+## First free check — done 2026-09-21, and it says where the acceptance test has to come from
+
+The plan's acceptance is native retention, so the first question is whether the *existing* artifacts
+can already tell which chains fail to stay: 867 round-0 tasks carry `joint_J` and the entry state
+(`energy_0`, `max_force_0`, `at_cap_0`, and the relaxation's end state).
+
+| comparison | Spearman with J |
+| :-- | --: |
+| chain length L | +0.144 |
+| deposited energy E0 | +0.043 |
+| deposited max\|F\| F0 | +0.039 |
+| relaxed energy E1 | +0.093 |
+| relaxed max\|F\| F1 | +0.044 |
+| accepted relaxation steps | -0.093 |
+
+and by group:
+
+| group | n | median J | p90 | max |
+| :-- | --: | --: | --: | --: |
+| started AT the 5000 cap | 566 | 0.1746 | 0.2434 | 1.636 |
+| started below the cap | 301 | 0.1735 | 0.2432 | 0.558 |
+| cap start that LEFT the cap | 368 | 0.1640 | 0.2500 | 0.421 |
+| still at the cap after 1500 steps | 211 | 0.1900 | 0.2332 | 1.636 |
+
+**The entry state does not predict the residual.** Starting with clipped forces is the norm (566 of
+867) and it costs nothing measurable on average; clearing the cap buys a little (0.1640 against
+0.1746). The only chain whose entry state is spectacular is the worst one (J=1.636, L=595,
+E0 = 321686 kJ/mol, still capped after 1500 steps at E1 = 191890) — and even that one is a single
+data point, not a group.
+
+The tail is **chain-specific, not start-specific**, and the next seven worst are L=21-27 chains with
+modest entry energies (E0 = 2.5k-26k): short chains are the ones a length-pooled reference fits
+worst. Two consequences for this plan:
+
+- **The acceptance test cannot be read off the entry diagnostics.** Native retention needs
+  coordinates, and the sampler does not store positions in its task results — so the first real step
+  of Plan C is a small run that RECORDS the geometry (deposited vs relaxed vs sampled mean, per
+  chain), on ~20 chains, minutes of CPU. That is the missing instrument, and it is cheap.
+- **Do not expect the tail to fall out of a better start.** 1500 -> 5000 relaxation steps will
+  shrink the "still capped" group, and this table says that group's median J is 0.1900 against
+  0.1735 for everyone else — a real but small effect. The residual lives in the field and the
+  reference, which is what this plan is about.
+
