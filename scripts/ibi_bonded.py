@@ -673,3 +673,131 @@ def advance_from_samples(table, values, p_ref, **policy):
     """
     return plan_update(table, bin_samples(values, table), p_ref, **policy)
 
+
+# --------------------------------------------------------------------- the moment operator (B')
+#
+# WHAT THIS IS FOR. Four rounds of the marginal-inversion operator left two signatures
+# (docs/plan_b_coupled_update.md): angle's correction oscillated without trend (3.00 -> 3.94 ->
+# 3.02 kJ/mol) and bb_bond's collapsed to a fixed point that is not the reference (ratio frozen at
+# 0.856). Both are what a coupled 1-D inversion is expected to do. The fix proposed there keeps the
+# table's SHAPE and makes the CORRECTION low-order:
+#
+#     U_new(q) = U_table(q) + sum_k d_k * T_k(x(q)),      x = the support mapped to [-1, 1]
+#     d_k      = eta_k * ( <T_k>_sim - <T_k>_ref )
+#
+# That difference of expectations IS the gradient of the relative entropy S = int p ln(p/p_ref)
+# with respect to d_k, so this is gradient descent on the quantity the loop is trying to reduce
+# rather than a per-bin ratio.
+#
+# WHY A CORRECTION AND NOT THE WHOLE POTENTIAL. The first free check in the plan measured it: a
+# K=12 Chebyshev basis cannot represent the tables (max |dU| of 15-22 kJ/mol = 6-9 kBT inside the
+# 2 sigma window for angle and dihedral, and for dihedral it gets WORSE with K -- a polynomial
+# chasing the kink of a piecewise-linear, bimodal target). In the region where samples live the
+# weighted residual is 0.04-0.20 kBT, which is the right size for a short basis to carry as a
+# correction and the wrong size for it to carry the potential.
+#
+# WHY THE MOMENTS COME FROM THE HISTOGRAM. <T_k> over 1000 bins carries a binning error of
+# O(binw^2) for a smooth basis, and it needs no new sampler plumbing: every round already stores the
+# per-chain counts. The smoothness that matters is in the correction (a few coefficients cannot
+# inject Poisson noise into the potential), not in the expectation.
+DEFAULT_CORRECTION_K = 8
+
+
+def _chebyshev_design(centre, lo, hi, K):
+    """T_k(x) for k=1..K on the table's own bins, with x the support mapped to [-1, 1].
+
+    k=0 is deliberately absent: a constant offset has no force and cannot change a distribution, so
+    a coefficient for it would be a number that never means anything.
+    """
+    x = (np.asarray(centre, dtype=float) - lo) / (hi - lo) * 2.0 - 1.0
+    return np.polynomial.chebyshev.chebvander(x, K)[:, 1:], x
+
+
+def moment_correction(table, counts, n, n_outside, p_ref, K=DEFAULT_CORRECTION_K, gain=1.0,
+                      max_outside_frac=DEFAULT_MAX_OUTSIDE_FRAC,
+                      max_step_kbt=DEFAULT_MAX_STEP_KBT, tol_kbt=DEFAULT_TOL_KBT):
+    """One round of the relative-entropy (moment-matching) operator. Returns an UpdateResult.
+
+    The returned object is the SAME type plan_update returns, with the same statuses and the same
+    refusal reasons wherever they still mean something, so a caller can swap the two operators
+    without a second set of guards:
+
+      no_samples       no in-support observations at all
+      support_drift    more than max_outside_frac of the observations fell outside the support, so
+                       the moments would be a truncated view of the simulation
+      step_too_large   the correction exceeds max_step_kbt
+      ok / converged   as in plan_update: converged is a statement about the size of the step
+
+    diagnostics carries max_abs_dU, the per-k moment differences, the estimated relative-entropy
+    drop in kBT (the objective this operator descends, measurable every round), and K.
+    """
+    U, lo, hi, binw, nbins, centre = _table_arrays(table)
+    counts = np.asarray(counts, dtype=float)
+    if counts.shape != (nbins,):
+        raise ValueError(f"counts has {counts.shape}, the table has {nbins} bins")
+    n = int(n)
+    n_outside = int(n_outside)
+    diag = {"method": "moments", "K": int(K), "gain": float(gain), "n": n,
+            "n_outside": n_outside, "outside_frac": (n_outside / n) if n else float("nan"),
+            "max_abs_dU": 0.0, "rel_entropy_drop_kbt": 0.0}
+
+    if n - n_outside <= 0:
+        diag["message"] = "no in-support observations, so there are no moments to match"
+        return UpdateResult(table=None, dU=np.zeros(nbins), diagnostics=diag,
+                            status=STATUS_REFUSED, reason=REFUSE_NO_SAMPLES)
+    outside_frac = (n_outside / n) if n else 0.0
+    if outside_frac > max_outside_frac:
+        diag["message"] = (f"{n_outside} of {n} observations ({outside_frac:.4f}) fell outside the "
+                           f"support [{lo:.6f}, {hi:.6f}], above the {max_outside_frac} allowed; "
+                           f"the moments would be a truncated view of the simulation")
+        return UpdateResult(table=None, dU=np.zeros(nbins), diagnostics=diag,
+                            status=STATUS_REFUSED, reason=REFUSE_SUPPORT_DRIFT)
+
+    A, _x = _chebyshev_design(centre, lo, hi, int(K))
+    p = np.asarray(p_ref, dtype=float)
+    p = p / p.sum()
+    w_sim = counts / counts.sum()
+    sim = w_sim @ A
+    ref = p @ A
+    delta = sim - ref
+    # THE STEP IS A NEWTON STEP, AND ITS JACOBIAN IS THE COVARIANCE UNDER THE SIMULATION.
+    # Linear response says d<T_k>_sim / d c_j = -Cov_sim(T_k, T_j) / kBT, so zeroing the moment
+    # differences wants d_c = kBT * Cov_sim^-1 * delta. A DIAGONAL version of that (the reference's
+    # own variances) was tried and it DIVERGES on the toy test in tests/test_moment_correction.py:
+    # the moment norm went 0.083 -> 0.064 -> 0.154 over twelve rounds, because Chebyshev functions
+    # are strongly correlated under a peaked distribution and a diagonal preconditioner does not see
+    # it. The ridge keeps the solve finite when the basis is nearly dependent (a narrow peak makes
+    # T_2 and T_4 nearly collinear); it is scaled to the covariance's own trace, so it does not
+    # depend on the coordinate's units.
+    cov = (w_sim[:, None] * A).T @ A - np.outer(sim, sim)
+    # THE RIDGE IS RELATIVE AND NOT TINY, and the size is a measured consequence: a 1e-8 ridge let
+    # the solve amplify the rounding-level moment difference of a MATCHING simulation (delta ~ 1e-6)
+    # by the reciprocal of a near-null eigenvalue -- Chebyshev components above T_4 are nearly
+    # collinear under a narrow peak -- into a correction of order 1 kJ/mol. At 1e-3 of the mean
+    # diagonal the same case returns a correction below 0.01 kJ/mol while the informative directions
+    # keep their Newton step. This is the standard trade: the ridge is what says "do not act on a
+    # direction the ensemble has no information about".
+    ridge = 1e-3 * float(np.trace(cov)) / max(len(cov), 1)
+    cov = cov + ridge * np.eye(len(cov))
+    d_k = gain * KBT * np.linalg.solve(cov, delta)
+    diag["step"] = "covariance (Newton)"
+    dU = A @ d_k
+    # The estimated objective drop, in kBT: the quadratic form the step is about to cancel,
+    # 1/2 * delta^T Cov^-1 delta, on the same (pre-ridge) covariance the step is solved against.
+    drop = float(0.5 * delta @ np.linalg.solve(cov, delta))
+    diag.update({"max_abs_dU": float(np.abs(dU).max()),
+                 "moments_sim": [float(v) for v in sim], "moments_ref": [float(v) for v in ref],
+                 "moment_delta": [float(v) for v in delta], "coefficients_kJ": [float(v) for v in d_k],
+                 "moment_norm": float(np.abs(delta).max()),
+                 "rel_entropy_drop_kbt": drop})
+    if diag["max_abs_dU"] > max_step_kbt * KBT:
+        diag["message"] = (f"the correction's largest value is {diag['max_abs_dU']:.4f} kJ/mol = "
+                           f"{diag['max_abs_dU'] / KBT:.4f} kBT, above the {max_step_kbt} kBT step")
+        return UpdateResult(table=None, dU=dU, diagnostics=diag,
+                            status=STATUS_REFUSED, reason=REFUSE_STEP_TOO_LARGE)
+    new_table = dict(table, U=np.asarray(U, dtype=float) + dU)
+    converged = diag["max_abs_dU"] <= tol_kbt * KBT
+    return UpdateResult(table=new_table, dU=dU, diagnostics=diag,
+                        status=STATUS_CONVERGED if converged else STATUS_OK)
+
+

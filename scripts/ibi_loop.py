@@ -168,6 +168,13 @@ WALL_K = float(os.environ.get("IBI_LOOP_WALL", 2000.0))
 # and kill every round after the edit, while reading the environment is invisible to them.
 RELAX_STEPS = int(os.environ.get("IBI_LOOP_RELAX", 0))
 
+# WHICH UPDATE OPERATOR. "table" is the per-bin marginal inversion every round so far has used;
+# "moments" is the relative-entropy step on a low-order correction (Plan B', docs/
+# plan_b_coupled_update.md). Default is "table" so that a run already in flight keeps its protocol
+# when this file changes under it -- the same reason RELAX_STEPS is read per worker.
+OPERATOR = os.environ.get("IBI_LOOP_OPERATOR", "table")
+CORRECTION_K = int(os.environ.get("IBI_LOOP_CORRECTION_K", "8"))
+
 # --- task checkpointing, and the watchdog that reads it --------------------------------------
 #
 # WHY THIS EXISTS, measured. On 2026-09-16 four pool workers of this loop died (four AppCrash
@@ -677,6 +684,9 @@ def main():
     else:
         tables = ref_tables
     hist_by_coord = history_from_rounds(OUT_ROOT, start_round)
+    # The moment operator's divergence guard needs its own history: it is fed |d<T>|max rather than
+    # max|dU|, and mixing the two units in one list would compare nothing to nothing.
+    hist_norm = {c: [] for c in B.COORDS}
 
     def write_round_file(path, tabs):
         """A file use_table_file and ibi_core.load_tables can BOTH read.
@@ -840,8 +850,25 @@ def main():
             # piecewise linear, so an unsmoothed correction re-injects exactly the random force
             # field that heats the sampler. See boltzmann_bonded.SMOOTH_WIDTH: the bin convention
             # there is a WINDOW WIDTH while smooth_correction's is +-bins, hence the conversion.
-            res = I.plan_update(tables[c], hist, p_ref[c], history=hist_by_coord[c], gain=GAIN_BY_COORD[c],
-                                smooth_bins=(B.SMOOTH_WIDTH - 1) // 2)
+            if OPERATOR == "moments":
+                # Plan B' (docs/plan_b_coupled_update.md): the table keeps its shape and the
+                # correction is low-order -- d_k = eta_k (<T_k>_sim - <T_k>_ref), the relative
+                # entropy's gradient. The divergence guard is the SAME rule plan_update applies,
+                # fed the moment norm instead of max|dU|, so a coupled step that starts growing is
+                # caught by the same instrument rather than by a second opinion.
+                res = I.moment_correction(tables[c], counts, n_tot, n_out, p_ref[c],
+                                          K=CORRECTION_K, gain=GAIN_BY_COORD[c])
+                _norm = float(res.diagnostics.get("moment_norm", float("nan")))
+                if _norm == _norm:
+                    _div, _msg = I.divergence_check(hist_norm[c], _norm)
+                    if _div:
+                        res = I.UpdateResult(table=None, dU=np.zeros(len(tables[c]["U"])),
+                                             diagnostics=dict(res.diagnostics, message=_msg),
+                                             status=I.STATUS_REFUSED, reason=I.REFUSE_DIVERGENCE)
+                    hist_norm[c].append(_norm)
+            else:
+                res = I.plan_update(tables[c], hist, p_ref[c], history=hist_by_coord[c],
+                                    gain=GAIN_BY_COORD[c], smooth_bins=(B.SMOOTH_WIDTH - 1) // 2)
             entry = {"ok": bool(res.ok), "converged": bool(res.converged),
                      "max_abs_dU": float(res.max_abs_dU), "n_samples": int(n_tot),
                      "n_outside": int(n_out)}
@@ -858,6 +885,10 @@ def main():
                   f"kBT={entry['max_abs_dU'] / B.KBT:.4f}  n={entry['n_samples']} "
                   f"outside={entry['n_outside']}"
                   + ("" if entry["status"] == "applied" else f"\n      {entry.get('reason','')}"))
+            if OPERATOR == "moments":
+                print(f"      moments  |d<T>|max={res.diagnostics['moment_norm']:.4f}  "
+                      f"estimated dS = -{res.diagnostics['rel_entropy_drop_kbt']:.4f} kBT  "
+                      f"K={CORRECTION_K}")
             if new_table is not None:
                 tables[c] = dict(tables[c], U=np.asarray(new_table["U"], dtype=float))
         for c in CARRIED:
