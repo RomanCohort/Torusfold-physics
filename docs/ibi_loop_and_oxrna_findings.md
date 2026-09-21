@@ -319,6 +319,101 @@ been refused again, and the twelve melting chains contaminate every coordinate's
 histogram, not just the bond's. The suite after the relaxation, the entry record and the resume
 path: 190 passed.
 
+## Part 5 — Four rounds on the full pool, and a metric that was flooring itself
+
+The closed loop ran rounds 0-3 on all 867 chains (32 workers, longest-first dispatch after round 2,
+entry relaxation 1500 steps, reference `refit_smooth5.npz`). Round timings: 21.0, 9.2 and 18.3 h for
+rounds 0-2, and round 3 closed at 21:23 on 2026-09-21; the driver then relaunched itself to eight
+rounds.
+
+| round | bb_bond | angle | dihedral | stack | pooled J | per-chain median J |
+| --: | --: | --: | --: | --: | --: | --: |
+| 0 | 0.957 | 1.299 | 1.233 | 1.164 | 0.167 | 0.1745 |
+| 1 | 0.862 | 1.265 | 1.072 | 1.107 | 0.139 | 0.1567 |
+| 2 | 0.855 | 1.248 | 1.023 | 1.094 | 0.123 | 0.1536 |
+| 3 | 0.856 | 1.228 | 1.005 | 1.083 | 0.112 | 0.1498 |
+
+and the corrections, all applied, all three coordinates every round:
+
+| round | bb_bond | angle | dihedral |
+| --: | --: | --: | --: |
+| 0 | 2.84 | 3.00 | 5.62 |
+| 1 | 1.70 | 3.94 | 1.82 |
+| 2 | 0.48 | 3.02 | 0.77 |
+| 3 | **0.35** | **4.27** | **0.38** |
+
+Two coordinates converge monotonically; **angle does not** -- 3.00, 3.94, 3.02, 4.27 with no trend,
+and by round 3 it is the largest correction in the loop.
+
+### 5.1 More than half of that J is a denominator artefact
+
+`sim_ref_ratio` divides the simulated sigma by `table["sigma"]`, and that sigma is
+`float(v.std())` -- the PLAIN standard deviation of every observation in the database
+(boltzmann_bonded.py:485). The table's support, however, is built from a ROBUST sigma,
+`(q99.9 - q0.1) / 6.58`, times `SUPPORT_SIGMA = 4` -- a window that excludes exactly the
+non-physical tail the loader describes: "44 observations of 132695 are above 0.8 nm; a P-P bond of
+7 nm does not exist".
+
+Normalise `exp(-U/kBT)` on each table's own bins and compare that distribution's sigma with the
+stored one:
+
+| coordinate | sigma_data (J's denominator) | sigma implied by the table | ratio |
+| :-- | --: | --: | --: |
+| bb_bond | 0.0633 | **0.0540** | **0.853** |
+| angle | 0.3203 | 0.3218 | 1.005 |
+| dihedral | 0.6299 | 0.6247 | 0.992 |
+| stack | 0.1390 | 0.1268 | 0.913 |
+
+**So sim/ref for bb_bond cannot exceed 0.853 whatever the field does** -- and that is where both
+operators settle: round 3 measures 0.856 against the data's sigma, a 0.4 percent error against the
+table's. `|ln 0.853| = 0.159` is a floor inside every J this project has quoted for the bond, stack
+adds 0.091, and the four-coordinate J therefore cannot go below **0.0659** by construction.
+
+Measured against the target the loop is actually aiming at, round 3 is:
+
+| coordinate | sim/ref (data sigma) | sim/ref (table sigma) | verdict |
+| :-- | --: | --: | :-- |
+| **bb_bond** | 0.856 | **1.004** | **at its target** |
+| angle | 1.232 | **1.226** | **+23 percent off its table -- the one real gap** |
+| **dihedral** | 1.006 | **1.015** | **at its target** |
+| stack | 1.085 | 1.189 | +19 percent, and it has no injection path |
+
+Round 3's J of 0.112 is therefore about 0.066 of artefact and 0.046 of physics, and the physics is
+one coordinate.
+
+### 5.2 The moment operator fixes the one that is broken
+
+`docs/plan_b_coupled_update.md`'s operator ran head to head against the marginal inversion on the
+seven-chain pool: six rounds, same seed, same 16 replicas, same reference, only the operator
+different (8 workers per arm, K=8). The comparison metric is operator-independent -- the Chebyshev
+moment difference pooled over the chains, computed offline from the stored histograms:
+
+| round | angle \|dT\|max, table | angle \|dT\|max, moments | angle sim/ref, table | angle sim/ref, moments |
+| --: | --: | --: | --: | --: |
+| 0 | 0.1335 | 0.1335 | 1.259 | 1.259 |
+| 1 | 0.1090 | 0.0780 | 1.221 | 1.246 |
+| 2 | 0.1069 | 0.0565 | 1.222 | 1.188 |
+| 3 | 0.0820 | 0.0483 | 1.225 | 1.178 |
+| 4 | 0.0859 | 0.0450 | 1.205 | 1.141 |
+| 5 | 0.0861 | **0.0351** | 1.242 | **1.135** |
+
+The inversion stalls and rings at 0.082-0.086; the moment operator falls monotonically to 0.035 and
+angle walks from 1.259 to 1.135. Dihedral reaches about 1.0 under both. bb_bond plateaus at
+0.853-0.856 under BOTH, which 5.1 explains: the two operators agree because both are already at the
+table's own distribution.
+
+### 5.3 What this changes
+
+- **The metric first.** `sim_ref_ratio` should report against the table's implied sigma (a second
+  key beside `sigma`), or the fit should use the same robust scale it builds the support from.
+  Every J this project has quoted for bb_bond and stack carries the floor.
+- **The field is closer to converged than J said**: bb_bond and dihedral are within 1.5 percent of
+  their targets, and the residual is angle.
+- **Angle's fix is demonstrated and it is the operator, not more rounds**: six rounds of the
+  marginal inversion moved it 0.1335 -> 0.0861; six rounds of the moment operator, 0.1335 -> 0.0351.
+- **The reference's outliers belong at the loader**, where they are described: a 7 nm distance is
+  not a bond, and letting it into `v.std()` inflates the denominator the whole loop is judged by.
+
 ## What is open
 
 1. **IBI convergence.** Round 1 of the 867-chain loop is running now (resumed under
