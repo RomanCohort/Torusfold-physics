@@ -147,3 +147,31 @@ worst. Two consequences for this plan:
   0.1735 for everyone else — a real but small effect. The residual lives in the field and the
   reference, which is what this plan is about.
 
+## Baseline measured — 2026-09-21 (the number C1 and C2 have to beat)
+
+`scripts/measure_native_retention.py`, 24 length-stratified chains (L 21-662), 12 ps each under
+`tables_r3.npz` with 5000 relaxation steps, Kabsch-aligned RMSD against the deposited geometry
+(`results/native_retention/retention_tables_r3.json`):
+
+| quantity | value |
+| :-- | --: |
+| median deposited -> sampled-mean RMSD | **0.83 A** |
+| median ensemble spread (frames against their own mean) | 0.22 A |
+| chains that moved more than 10 A | **0 of 24** |
+| worst two | 9AXT_1 (L=89) 1.92 A, 7QVP_7 (L=662) 1.29 A |
+| closest bead approach | 0.243-0.322 nm, no interpenetration |
+| per-chain J | 0.028-0.251 (median about 0.12) |
+
+**The acceptance baseline is a high bar, and it is not where the four rounds' J said the problem
+was.** The field already holds deposited geometry to under an Angstrom over 12 ps, with an ensemble
+spread five times smaller than its own displacement from the deposit: the relaxation moves a chain
+by about 0.8 A and then it sits still. So C1 and C2 do not have to *fix* retention — they have to
+not lose it while changing what the loop targets, and a J-based criterion would have hidden that
+the field is already usable for the architecture claim (refinement from a coarse start), which is
+the same conclusion `force_field_comparison.md` reaches from the other side: the published fields
+are judged by melting thermodynamics or native discrimination, not by a pooled marginal.
+
+**Launch note for the same instrument on 24 chains:** the pool worker reserves 950 MB of commit if
+the launcher does not pin `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 KMP_BLOCKTIME=0` (measured; the
+production launcher has carried that pin since 2026-09-18, this one did not).
+
