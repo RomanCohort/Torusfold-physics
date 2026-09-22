@@ -113,6 +113,63 @@ def sim_ref_ratio(acc, coord, tab, samples=None):
     return ss / sig if sig > 0 else float("nan")
 
 
+def implied_sigma(tab_coord):
+    """The sigma of the distribution a table IMPLIES: normalise exp(-U/kBT) on its own bins.
+
+    WHY THIS EXISTS, measured 2026-09-21 (docs/ibi_loop_and_oxrna_findings.md Part 5). The
+    denominator every sim/ref has used is `table["sigma"]`, which boltzmann_bonded sets to the
+    PLAIN standard deviation of every observation in the database -- while the table's support is
+    built from a ROBUST sigma, (q99.9 - q0.1) / 6.58 times SUPPORT_SIGMA = 4, which excludes the
+    non-physical tail ("44 observations of 132695 are above 0.8 nm; a P-P bond of 7 nm does not
+    exist"). For bb_bond the stored sigma is 0.0633 and the table's own distribution has 0.0540:
+    a ratio of 0.853. sim/ref for the bond therefore cannot exceed 0.853 whatever the field does,
+    both operators of the A/B settled exactly there, and |ln 0.853| = 0.159 is a floor inside every
+    J this project has quoted for it; stack adds 0.091. The four-coordinate J cannot go below
+    0.0659 by construction.
+
+    This function is the second denominator. It is a REPORTING quantity: nothing in the update path
+    reads it, and adding it cannot change a table.
+    """
+    U = np.asarray(tab_coord["U"], dtype=float)
+    centre = np.asarray(tab_coord["centre"], dtype=float)
+    p = np.exp(-(U - U.min()) / B.KBT)
+    total = p.sum()
+    if not np.isfinite(total) or total <= 0:
+        return float("nan")
+    p = p / total
+    mean = float((p * centre).sum())
+    var = float((p * centre ** 2).sum()) - mean * mean
+    return float(np.sqrt(max(var, 0.0)))
+
+
+def sim_ref_ratio_table(acc, coord, tab, samples=None):
+    """sim_ref_ratio, but against the table's OWN implied sigma. See implied_sigma."""
+    sig = implied_sigma(tab[coord])
+    if not (sig > 0):
+        return float("nan")
+    s1, s2, n = acc[coord]
+    if samples is not None:
+        n = samples
+    if not n:
+        return float("nan")
+    mm = s1 / n
+    ss = float(np.sqrt(max(s2 / n - mm * mm, 0.0)))
+    return ss / sig
+
+
+def simref_table(acc, tab, skip=()):
+    """(per-coordinate sim/ref against the table's own sigma, that joint J).
+
+    Same shape as simref so a caller can report both. The two agree for a coordinate whose stored
+    sigma is not outlier-inflated (angle 1.005, dihedral 0.992) and differ by a constant factor for
+    the ones that are (bb_bond 0.853, stack 0.913), which is exactly the point of carrying both.
+    """
+    skip = set(skip)
+    vals = [float("nan") if c in skip else sim_ref_ratio_table(acc, c, tab) for c in B.COORDS]
+    js = [abs(float(np.log(r))) for r in vals if r == r and r > 0]
+    return vals, (float(np.mean(js)) if js else float("nan"))
+
+
 def simref(acc, tab, skip=()):
     """(per-coordinate sim/ref values, joint J) from a moments accumulator.
 

@@ -298,6 +298,11 @@ def save_task_result(done_dir, idx, r):
         scalars[f"n_total__{c}"] = int(r["n_total"][c])
     np.savez(task_npz(done_dir, idx),
              joint_J=np.float64(np.nan if r["joint_J"] is None else r["joint_J"]),
+             joint_J_table=np.float64(np.nan if r.get("joint_J_table") is None
+                                      else r["joint_J_table"]),
+             sim_ref_table=np.asarray([np.nan if v is None else v
+                                       for v in (r.get("sim_ref_table") or [np.nan] * len(B.COORDS))],
+                                      dtype=float),
              residues=int(r["residues"]), seconds=float(r["seconds"]),
              j_coords=np.asarray(r["j_coords"], dtype=np.int64), **counts, **scalars)
     task_npz(done_dir, idx).with_suffix(".json").write_text(
@@ -311,7 +316,15 @@ def load_task_result(done_dir, idx):
     meta_path = task_npz(done_dir, idx).with_suffix(".json")
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     j = float(z["joint_J"])
+    # Both keys are optional on read: tasks written before 2026-09-21 do not carry them, and a
+    # replay of those rounds must not invent a number (None, not nan, so the round json says
+    # "not measured" rather than "measured as nan").
+    jt = float(z["joint_J_table"]) if "joint_J_table" in z.files else float("nan")
+    srt = (list(np.asarray(z["sim_ref_table"], dtype=float)) if "sim_ref_table" in z.files
+           else [float("nan")] * len(B.COORDS))
     return {"counts": {c: z[f"counts__{c}"] for c in B.COORDS},
+            "joint_J_table": None if jt != jt else jt,
+            "sim_ref_table": [None if v != v else float(v) for v in srt],
             "n_outside": {c: int(z[f"n_outside__{c}"]) for c in B.COORDS},
             "n_total": {c: int(z[f"n_total__{c}"]) for c in B.COORDS},
             "joint_J": None if j != j else j,
@@ -504,9 +517,17 @@ def _sample_one(task):
         stop_hb.set()
     _wv, _wj = IC.simref(res.acc, tab, skip=res.skip)
     _u, _o = IC.j_denominator(res.acc, tab, skip=res.skip)
+    # THE SAME RESIDUAL AGAINST THE TABLE'S OWN DISTRIBUTION, reported beside the old one and read
+    # by nothing in the update path (ibi_core.implied_sigma, Part 5 of the IBI findings). Both are
+    # carried because the stored sigma is outlier-inflated for bb_bond and stack, so the old number
+    # has a floor for those and the new one does not; keeping both is what makes rounds before and
+    # after this change comparable instead of silently re-based.
+    _tv, _tj = IC.simref_table(res.acc, tab, skip=res.skip)
     return idx, {
         "entry": entry,
         "relax": res.relax,
+        "sim_ref_table": [None if v != v else float(v) for v in _tv],
+        "joint_J_table": None if _tj != _tj else float(_tj),
         "counts": {c: np.asarray(res.counts[c], dtype=np.int64) for c in B.COORDS},
         "n_outside": {c: int(res.n_outside[c]) for c in B.COORDS},
         "n_total": {c: int(res.n_total[c]) for c in B.COORDS},
@@ -653,7 +674,8 @@ def main():
     print(f"  {nrep} replicas, {nsteps} steps = {nsteps * 0.002:.0f} ps, burn {burn} = "
           f"{burn * 0.002:.0f} ps, window {(nsteps - burn) * 0.002:.0f} ps at stride {stride}")
     print(f"  friction {friction}/ps, 300 K, constraints ON, wall_k {WALL_K:g}, gain " + " ".join(f"{c}={GAIN_BY_COORD[c]:g}" for c in UPDATED)
-          + (f", relax {RELAX_STEPS} steps" if RELAX_STEPS else ""))
+          + (f", relax {RELAX_STEPS} steps" if RELAX_STEPS else "")
+          + (f", operator {OPERATOR}" + (f" (K={CORRECTION_K})" if OPERATOR == "moments" else "")))
     # Truncated: the all-chains pool is 867 names, which buries the rest of the header. The full
     # list is recoverable from the round json's per_structure entries.
     _ls = [len(s["pos"]) for s in structs]
