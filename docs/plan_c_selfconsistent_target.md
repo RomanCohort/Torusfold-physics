@@ -175,3 +175,46 @@ are judged by melting thermodynamics or native discrimination, not by a pooled m
 the launcher does not pin `OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 KMP_BLOCKTIME=0` (measured; the
 production launcher has carried that pin since 2026-09-18, this one did not).
 
+## Three arms, one pool — measured 2026-09-22 (`scripts/plan_c_loop.py`)
+
+The implementation of the section at the top of this file. Pool 7 chains (L=26-34), holdout 4
+(L=25-33), 4 rounds per arm, 8 replicas x 5000 steps (10 ps), burn 1000 (2 ps), stride 5, relax
+5000, retention measured over 6000 steps (12 ps) from the deposited geometry, 6 worker processes x
+1 torch thread, seed 20260922, K=8. Record: `results/plan_c/plan_c_run1.json`, `plan_c_run1.log`,
+fields under `results/plan_c/fields/run1/`.
+
+| field | pool median / spread / moved>10 A | holdout |
+| :-- | --: | --: |
+| the shared start field every arm begins from | 0.40 / 0.21 / 0 | 0.50 / 0.20 / 0 |
+| `tables_r3.npz` — the field the 0.83 A number was measured under | 0.41 / 0.20 / 0 | 0.49 / 0.20 / 0 |
+| C0: deposited target, `plan_update` (what rounds 0-4 did) | 0.42 / 0.20 / 0 | 0.49-0.51 / 0.21 / 0 |
+| C1: the field's own ensemble as target, smoothed-table fit | 0.39-0.41 / 0.19-0.20 / 0 | 0.48-0.50 / 0.20-0.21 / 0 |
+| C2: same target, Chebyshev T_1..T_8 | no number — round 1 diverged | |
+
+**Changing the target did not move retention.** C1's 0.02-0.03 A is smaller than the 0.19-0.21 A
+spread of a single arm on a single round, and every arm — the control included — sits in the same
+0.39-0.51 A band as the two baselines it has to beat. On this pool the score is already at its
+ceiling: four rounds of *any* of these updates neither gain nor lose geometry, which is the same
+statement `measure_native_retention.py` makes at 24 chains. Note that the absolute numbers are not
+comparable to the 0.83 A baseline of the section above: that pool is 24 chains spanning L=21-662 and
+this one is seven chains of L=26-34, which retain better. Only the comparison inside this table
+carries.
+
+**C1's deposited residual rises by construction, not by failure**: J_dep 0.1371 -> 0.1775 -> 0.1820
+-> 0.1971 against C0's 0.1371 -> 0.0901 -> 0.0974 -> 0.1070. Once the reference is the ensemble the
+field itself produced, the deposited pooled marginal is no longer the quantity being minimised, so
+its residual is free to grow; reading that as a regression would be reading the wrong number. It is
+the reason this plan fixed retention as the verdict before running anything.
+
+**The parametric fit is what breaks.** C2's first round produced max|dU| = 52.6 / 44.6 / 45.7 kJ/mol
+(bb_bond / angle / dihedral) against C0's 8.0 / 2.9 / 5.6 at the same seed, pool and round. A
+Chebyshev projection of -kBT ln p onto T_1..T_8 is unbounded where the empirical density is thin, and
+the loop injects that correction into the sampler before anything checks it. The stabilisation rerun
+(`plan_c_run1_c2`) produced no data — its ensemble file is empty — so the K-and-damping question is
+open, and it is now the only live question this plan has.
+
+Two things this run does not settle: the pool is 7 short chains, and a 12 ps window at n=7 cannot see
+a 0.03 A effect; and no arm was ever compared against the 24-chain, L=21-662 instrument the 0.83 A
+number lives in. Both are cheap and both use the same recorder.
+
+
