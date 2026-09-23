@@ -462,3 +462,70 @@ for one coordinate, not a different theory of the field.
 5. **The Fourier/tabulated split.** Fourier fixes dihedral but cannot enter the IBI loop (the
    update is defined on a table, and the table's honest max force is 3.3x cap). Whichever way the
    loop goes has to resolve this.
+
+
+## Part 6 — The operator switch that did not happen, and how it was caught (2026-09-23)
+
+`results/ibi_relax/switch_when_round4_done.ps1` fired on schedule at 16:42 on 2026-09-22: it
+archived rounds 0-4, killed the python tree, ran `schtasks /run /tn ibi_relax_loop` and logged
+"relaunched: rounds 0-4 replay under the moment operator". Seventeen hours later the banner of the
+process it had "relaunched" reads
+
+    gain bb_bond=1 angle=0.3 dihedral=1, relax 5000 steps, operator table
+
+so rounds 5 and 6 were sampled AND updated by the table operator with the old 0.3 angle gain, and
+the moment operator never ran at full pool. The process table says what happened:
+
+| process | pid | started |
+| :-- | --: | :-- |
+| driver (python, `ibi_loop.py`) | 38044 | 2026-09-22 16:42:02 — 20 s BEFORE the switch's own `schtasks /run` |
+| its parent, `cmd.exe` | 9068 | **2026-09-21 21:23:24** — the launcher instance of the PREVIOUS run |
+| its parent, `svchost.exe` | 3876 | Task Scheduler |
+
+`taskkill /PID <python> /T /F` kills the target and its CHILDREN. The `cmd.exe` running
+run_task.cmd is the PARENT, so it survived; when its python child died, cmd resumed reading the
+batch file from the byte offset it had saved — in a file that had been edited since (the moment
+block was added at 10:56 that morning, changing its length) — and re-executed the python line from
+the environment it had built at 21:23 the day before. That environment is the tell: the banner's
+`angle=0.3` is not the default (the default follows `IBI_LOOP_GAIN=1.0`), it is the value the OLD
+launcher carried, and `operator` fell back to its `table` default because the old environment had no
+`IBI_LOOP_OPERATOR` at all.
+
+Two rules follow, and both are cheap:
+
+1. **STOP THE TASK, NOT THE PYTHON.** Kill the `cmd.exe` parent (`taskkill /PID <cmd> /T /F`),
+   verify no python running `ibi_loop.py` is left, and wait for
+   `Get-ScheduledTask ibi_relax_loop` to read Ready before `schtasks /run`. A launcher killed at the
+   python level comes back with yesterday's environment, which is worse than not restarting at all.
+2. **READ THE BANNER AFTER EVERY RESTART.** `operator table` against a launcher that sets
+   `IBI_LOOP_OPERATOR=moments` is the entire symptom; nothing else in the log names the operator
+   unless it is moments (each coordinate prints `moments |d<T>|max=...` when it is).
+
+Also fixed while diagnosing: run_task.cmd was written with bare LF line endings, which cmd.exe
+tolerates in a short file but is exactly the condition under which its byte-offset resume is unsafe.
+It is now CRLF, and a probe of the real layout confirms what a fresh cmd reads out of it:
+`OPERATOR=moments GAIN_ANGLE=1.0 K=8 RELAX=5000 ATTEMPTS=60 POOL=all`.
+
+**What the restart bought, beyond the fix.** The relaunched run (2026-09-23 23:30:38, nine rounds)
+replays rounds 0-5 under the moment operator from the SAME task files the table operator consumed, so
+the two operators are compared on identical evidence and no sampling:
+
+| round | table: bb_bond / angle / dihedral | moments: bb_bond / angle / dihedral |
+| --: | --: | --: |
+| 0 | 2.84 / 3.00 / 5.62 | 2.63 / 2.56 / 3.74 |
+| 1 | 1.70 / 3.94 / 1.82 | 1.06 / 2.69 / 0.83 |
+| 2 | 0.48 / 3.02 / 0.77 | 0.15 / 2.44 / 0.39 |
+| 3 | 0.35 / 4.27 / 0.38 | 0.15 / 2.08 / 0.39 |
+| 4 | 0.72 / 4.31 / 0.34 | 0.31 / 1.89 / 0.38 |
+| 5 | 0.62 / 3.72 / 0.27 | 0.22 / 1.63 / 0.34 |
+
+(max|dU| in kJ/mol; `scripts/ibi_round_report.py` prints this table plus the per-chain residuals.)
+The table operator's angle rings between 3.0 and 4.3 for six rounds with no trend; the moment
+operator walks it down monotonically, 2.56 -> 2.69 -> 2.44 -> 2.08 -> 1.89 -> 1.63, which is the
+seven-chain A/B's finding reproduced at 867 chains. TWO CAVEATS, both load-bearing: the replayed
+rounds 1-5 are retrospective — their histograms were sampled under the TABLE operator's fields, so
+the moments sequence is a counterfactual one — and only rounds 6-8, which sample under the
+moments-rebuilt tables, are moments rounds in the full sense. The 548 round-6 chains sampled under
+the table operator's `tables_r6.npz` were moved to `results/ibi_relax/tasks_r6_tableop_discarded/`
+rather than mixed into a round whose field had changed.
+
