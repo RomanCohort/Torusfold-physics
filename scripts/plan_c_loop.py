@@ -108,6 +108,45 @@ DEFAULT_K = 8
 # the smallest ensemble here (2 chains x 1 replica x 4 frames in the smoke run) that is far inside
 # the pseudo-count's own scale, and on the full pool it is two orders below one frame per bin.
 LN_RATIO_FLOOR = 1e-6
+# Plan C's second task: make the parametrised fit stable, or have a rule stop it and say so.
+# RIDGE_REL is moment_correction's own relative ridge -- 1e-3 x trace/K on the same Chebyshev design
+# (ibi_bonded, docs/plan_b_coupled_update.md) -- so C2s and Plan B's operator are fitted the same
+# way and can be read beside each other. SUPPORT_FRAC drops the bins whose ensemble probability is
+# below 1e-3 of the mode, which is where the target -kBT ln p is the logarithm of a pseudo-count.
+# MEASURED, not assumed (scripts, 2026-09-22, on the real round-1 ensembles of the c2stab run).
+# With moment_correction's own relative ridge of 1e-3 the refit's tail oscillates: the weighted
+# Gram matrix has condition 25-347, so the small eigenvalues are barely determined, and a
+# max|dU| of 61 kJ/mol (bb_bond) sat in bins the ensemble visits rarely. Sweeping the ridge at K=8:
+#
+#     ridge   lambda   U_fit min..max     max|dU|   applied std (bb/ang/dih)
+#     1e-3    4.7e-4   -44.1 .. 11.1       60.6     1.69 / 1.09 / 4.63
+#     1e-2    4.7e-3   -26.4 ..  6.5       42.9     1.98 / 1.28 / 4.53
+#     1e-1    4.7e-2    -5.5 ..  5.3       23.2     2.58 / 2.09 / 4.08
+#     1e+0    4.7e-1     0.8 ..  7.9       16.9     3.07 / 2.86 / 3.94
+#
+# The force-relevant size of the step (the mass-weighted std) barely moves across the sweep -- the
+# ensemble really does disagree with the current field by 1-5 kJ/mol in the first round -- while
+# max|dU| shrinks by a factor of 3.5 as the tail stops oscillating. 1e-1 is the knee: it is the
+# smallest ridge whose U_fit stays within the range of the target it is fitting (the target's own
+# span is 0-22 kJ/mol), so the fit is a fit rather than an extrapolation.
+RIDGE_REL = 1e-1
+SUPPORT_FRAC = 1e-3
+# How far below the support cut the fitted correction is tapered to zero, in decades of p. 2 means
+# the fit has full authority where the ensemble's probability is above the cut, none two decades
+# below it, and a smoothstep in between.
+TAPER_DECADES = 2.0
+
+
+def _is_stable_c2(arm):
+    """True for the stabilised Chebyshev arms: C2s, C2s2, C2s4, C2s8."""
+    return arm == "C2s" or (arm.startswith("C2s") and arm[3:].isdigit())
+
+
+def _arm_K(arm, default):
+    """C2s4 means the stabilised fit at K=4; every other arm takes --K."""
+    if arm.startswith("C2s") and arm[3:].isdigit():
+        return int(arm[3:])
+    return int(default)
 
 
 # --------------------------------------------------------------------------- field files
@@ -275,7 +314,90 @@ def _chebyshev_fit(table, U_target, counts, K):
     return U_fit, {"fit": "chebyshev", "K": int(K), "coef": [float(v) for v in coef]}
 
 
-def _fit_coord(arm, table, counts, n_total, n_outside, p_ref, K):
+def _chebyshev_fit_stable(table, U_target, counts, K, ridge=RIDGE_REL,
+                          support_frac=SUPPORT_FRAC, gain=1.0, taper_decades=TAPER_DECADES):
+    """The same projection with the three things the plain one does not have.
+
+    WHAT BROKE, measured 2026-09-22 on the plain fit's first round: max|dU| came back 52.6 / 44.6 /
+    45.7 kJ/mol against the control's 8.0 / 2.9 / 5.6, and the diagnosis (docs, and the
+    mass-weighted columns this file records) was that the projection had put its MINIMUM outside
+    the region the chains visit: over the occupied bins U_new - U_old was very nearly a constant,
+    +49 kJ/mol with a spread of 1.5 (1.1 angle, 4.7 dihedral). max|dU| was reporting a gauge choice,
+    not a force. Three fixes, each with a precedent in this repository rather than invented here:
+
+    1. SUPPORT. The target is -kBT ln p and p at a bin the ensemble visited twice is a pseudo-count:
+       its U is tens of kJ/mol tall, and those bins are everywhere outside the mass region. Rows
+       whose p is below support_frac x max(p) are dropped from the fit entirely (weight 0), which is
+       the same reasoning as the sqrt(p) weighting above, taken to its limit. The BASIS IS NOT
+       MASKED: the fitted polynomial is still evaluated on every bin, because masking the correction
+       would put a step in U and a delta in its force.
+
+    2. RIDGE. lambda = ridge x trace(A^T W A) / K, the relative form ibi_bonded.moment_correction
+       uses on the same Chebyshev design (Plan B, docs/plan_b_coupled_update.md). Relative, because
+       the absolute size of A^T W A follows the ensemble's total weight, which is a property of the
+       run (nrep x frames) rather than of the problem.
+
+    3. THE GAUGE IS FIXED UNDER THE ENSEMBLE'S OWN MASS, not at the global minimum: U_fit -=
+     <U_fit>_p. A constant has no force anywhere, so removing it changes nothing the sampler does
+       and makes max|dU| comparable with the other arms' instead of reporting where the polynomial
+       happened to bottom out.
+
+    gain damps the step, the loop's own remedy for a coupled fixed-point iteration (ibi_loop:862).
+    """
+    A, _x = I._chebyshev_design(table["centre"], table["lo"], table["hi"], K)
+    p = I.probability_from_counts(np.asarray(counts, dtype=float), pseudo=I.DEFAULT_PSEUDO)
+    support = p > support_frac * max(p.max(), 1e-300)
+    w = np.sqrt(np.where(support, p, 0.0))
+    Aw = A * w[:, None]
+    AtWA = Aw.T @ Aw
+    # THE RIGHT-HAND SIDE CARRIES w ONCE MORE, and getting that wrong is what the first version of
+    # this function did. Minimising ||Aw c - w*U_target||_2 -- the plain fit's lstsq, and the
+    # weighting its docstring describes -- has the normal equations (A^T W^2 A) c = A^T W^2 U_target
+    # with W = diag(w). Aw.T @ U_target is A^T W U_target: one factor of w short, which puts the
+    # pseudo-count bins back in at sqrt(p) instead of p. Measured 2026-09-22 on the real round-1
+    # ensembles: that version returned coefficients of -720..+122 with the weighted Gram matrix's
+    # eigenvalues at 0.005..1.73 (condition 25-347, perfectly regular), and the field it produced
+    # wanted a 2167-4078 kJ/mol step -- refused as unrepresentable on all three coordinates. The
+    # spectrum was never the problem; the residual was.
+    rhs = Aw.T @ (np.asarray(U_target, dtype=float) * w)
+    lam = ridge * float(np.trace(AtWA)) / max(K, 1)
+    coef = np.linalg.solve(AtWA + lam * np.eye(K), rhs)
+    U_fit = A @ coef
+    U_old = np.asarray(table["U"], dtype=float)
+    # WHERE THE ENSEMBLE HAS NO MASS, THE OLD FIELD STANDS. A refit is only defined where there is
+    # data; outside it the polynomial is an extrapolation, and measured on the real round-1
+    # ensembles it dives -- bb_bond's fit reaches -49 kJ/mol against a stored table whose own
+    # minimum is 0.2 -- i.e. it digs a well nobody asked for in a tail the sampler can still reach.
+    # The taper is a smoothstep in ln p over taper_decades decades below the support cut, so the
+    # correction goes to zero outside the data with a continuous first derivative. A hard mask would
+    # put a step in U and a delta function in its force instead.
+    logp = np.log(np.clip(p, 1e-300, None))
+    log_cut = float(np.log(max(support_frac * p.max(), 1e-300)))
+    _width = max(taper_decades * float(np.log(10.0)), 1e-9)
+    _t = np.clip((logp - (log_cut - _width)) / _width, 0.0, 1.0)
+    taper = 0.5 * (1.0 - np.cos(np.pi * _t))
+    dU = gain * taper * (U_fit - U_old)
+    # THE GAUGE, UNDER THE ENSEMBLE'S OWN MASS: a constant added to U has no force anywhere, so
+    # removing it changes nothing the sampler does and makes max|dU| mean the same thing in every
+    # arm instead of reporting where the polynomial happened to bottom out.
+    psum = float(p.sum())
+    offset = float((p * dU).sum() / psum) if psum > 0 else 0.0
+    dU = dU - offset
+    U_new = U_old + dU
+    _eig = np.linalg.eigvalsh(AtWA)[::-1]
+    return U_new, {"fit": "chebyshev_ridge", "K": int(K), "ridge_rel": float(ridge),
+                   "eig_max": float(_eig[0]), "eig_min": float(_eig[-1]),
+                   "cond": float(_eig[0] / max(_eig[-1], 1e-300)),
+                   "taper_decades": float(taper_decades),
+                   "taper_below_one": int((taper < 1.0).sum()),
+                   "support_frac": float(support_frac), "support_bins": int(support.sum()),
+                   "n_bins": int(p.size), "gain": float(gain),
+                   "ridge_lambda": float(lam), "mass_offset_removed": float(offset),
+                   "coef": [float(v) for v in coef]}
+
+
+def _fit_coord(arm, table, counts, n_total, n_outside, p_ref, K, ridge=RIDGE_REL,
+               support_frac=SUPPORT_FRAC, gain=1.0, taper_decades=TAPER_DECADES):
     """(U_new, diagnostics) for one coordinate under one arm. Raises on a refused C0 update.
 
     A refusal is not caught here: plan_update refuses when the simulation left the support or the
@@ -311,6 +433,12 @@ def _fit_coord(arm, table, counts, n_total, n_outside, p_ref, K):
         diag = {"fit": "table", "smooth_width": int(B.SMOOTH_WIDTH)}
     elif arm == "C2":
         U_new, diag = _chebyshev_fit(table, U_target, counts, K)
+    elif _is_stable_c2(arm):
+        # C2s / C2s4 / C2s2: the same target and the same Chebyshev design, fitted with the
+        # support cut, the relative ridge and the mass gauge (see _chebyshev_fit_stable).
+        U_new, diag = _chebyshev_fit_stable(table, U_target, counts, K, ridge=ridge,
+                                            support_frac=support_frac, gain=gain,
+                                            taper_decades=taper_decades)
     else:
         raise ValueError(f"unknown arm {arm!r}")
 
@@ -319,7 +447,21 @@ def _fit_coord(arm, table, counts, n_total, n_outside, p_ref, K):
     # agree only in the small-binw limit, and bin_probabilities_from_U is the convention-consistent
     # one -- so the difference is measured here instead of being assumed small.
     p_target = I.probability_from_counts(counts, pseudo=I.DEFAULT_PSEUDO)
-    p_implied = I.bin_probabilities_from_U(dict(table, U=np.asarray(U_new, dtype=float)))
+    try:
+        p_implied = I.bin_probabilities_from_U(dict(table, U=np.asarray(U_new, dtype=float)))
+    except ValueError as exc:
+        # A FITTED FIELD CAN LEAVE THE REPRESENTABLE RANGE, and that is a refusal rather than a
+        # crash. Measured 2026-09-22 on the smoke protocol with the C2s gain at 30: the fitted U
+        # spanned more than exp(-U/kBT) can hold and ibi_bonded raised from bin_probabilities_from_U,
+        # which took the whole run down before any record was written. The same can happen to a
+        # fit at gain 1 whose basis dives in a tail, so the check is converted here into the
+        # refusal path every arm already has: the previous table is kept, the round is recorded
+        # with the step that was wanted, and a C2s arm stops there (run_arm).
+        raise I.IBIRefusal(
+            "unrepresentable",
+            f"the fitted U cannot be normalised ({exc}); the fit wanted "
+            f"max|dU| = {np.abs(np.asarray(U_new, dtype=float) - np.asarray(table['U'], dtype=float)).max():.1f} "
+            f"kJ/mol at K={K}", {}) from exc
     m = p_target > LN_RATIO_FLOOR
     ratios = np.abs(np.log(np.clip(p_implied[m], 1e-300, None) / p_target[m])) if m.any() \
         else np.zeros(1)
@@ -361,8 +503,14 @@ def _stationarity(p_prev, p_now):
     if not m.any():
         return {"mass_weighted_mean": float("nan"), "max": float("nan"), "n_bins": 0}
     lr = np.abs(np.log(np.clip(b[m], 1e-300, None) / np.clip(a[m], 1e-300, None)))
+    # A second, unit-free reading of the same distance: total variation between the two rounds'
+    # ensembles restricted to the mass-bearing bins and renormalised. The ln-ratio mean is the
+    # instrument the doc's convergence criterion is written in; TV says how much probability moved,
+    # which is what "the distributions stop moving" means when a single bin's ratio is large.
+    aa, bb = a[m], b[m]
+    tv = 0.5 * float(np.abs(bb - aa).sum() / max(0.5 * (aa.sum() + bb.sum()), 1e-300))
     return {"mass_weighted_mean": float((w[m] * lr).sum() / w[m].sum()),
-            "max": float(lr.max()), "n_bins": int(m.sum())}
+            "max": float(lr.max()), "n_bins": int(m.sum()), "total_variation": tv}
 
 
 def summarize_retention(rows):
@@ -425,6 +573,9 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
     rec.clear()
     rec.update({"arm": arm, "rounds": [], "fields": [], "refusals": [], "n_holdout": len(holdout)})
     p_prev = {c: None for c in B.COORDS}
+    # The applied step norm per coordinate, for the divergence guard on the fitted arms: the same
+    # history ibi_loop keeps for Plan B's moment operator (ibi_loop:885) and rebuilt per arm.
+    norm_hist = {c: [] for c in UPDATED}
     field_path = write_field(field_dir / f"{arm}_r0.npz", tables)
     rec["fields"].append(str(field_path))
 
@@ -463,7 +614,9 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
                 continue
             try:
                 U_new, diag = _fit_coord(arm, tab, counts[c], n_total[c], n_outside[c],
-                                         p_ref[c], args.K)
+                                         p_ref[c], _arm_K(arm, args.K), ridge=args.ridge,
+                                         support_frac=args.support_frac, gain=args.c2_gain,
+                                         taper_decades=args.taper_decades)
             except I.IBIRefusal as exc:
                 refused = f"{c}: {exc}"
                 diag = {"status": "refused", "reason": str(exc)}
@@ -485,6 +638,24 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
             diag["mass_weighted_std_dU"] = float(
                 np.sqrt((p_mass * (dU - dU_mean) ** 2).sum()))
             diag["dU_offset_under_mass"] = dU_mean
+            # THE GUARD ON THE FITTED ARMS. Plan B's coupled step is checked by
+            # ibi_bonded.divergence_check on the moment norm before it is injected (ibi_loop:885),
+            # and a fitted correction gets the same instrument on the FORCE-RELEVANT size of its
+            # step -- the mass-weighted std, not max|dU|, which is blind to exactly the constant the
+            # plain fit's first round was made of. div == True means the step has grown for
+            # PATIENCE consecutive rounds AND is GROWTH times its value at the start of that
+            # window, i.e. a fixed-point iteration walking away: the previous table is kept for
+            # that coordinate, the step that was refused is still recorded in the diagnostics, and
+            # the arm stops after this round rather than reporting rounds that changed nothing.
+            if _is_stable_c2(arm):
+                _div, _msg = I.divergence_check(norm_hist[c], diag["mass_weighted_std_dU"])
+                if _div:
+                    refused = f"{c}: {_msg}"
+                    diag["status"] = "refused"
+                    diag["reason"] = _msg
+                    U_new = np.asarray(tab["U"], dtype=float)
+                else:
+                    norm_hist[c].append(diag["mass_weighted_std_dU"])
             per_coord[c] = diag
             new_tables[c] = dict(tab, U=np.asarray(U_new, dtype=float))
         tables = new_tables
@@ -541,12 +712,33 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
                          for c in UPDATED)
               + f"  J_dep={_jv:.4f}"
               + (f"  REFUSED {refused}" if refused else ""))
+        # The force-relevant size of the step beside the raw maximum: the two disagree by a factor
+        # of thirty on the plain fit's first round (52 kJ/mol of max against 1.5 of mass-weighted
+        # std), and the second column is the one a sampler can feel.
+        print("      mass-weighted dU (sum / std, kJ/mol): "
+              + " ".join(f"{c} {per_coord[c].get('mass_weighted_abs_dU', float('nan')):.2f}/"
+                         f"{per_coord[c].get('mass_weighted_std_dU', float('nan')):.2f}"
+                         for c in UPDATED))
+        if stat.get("bb_bond"):
+            # The self-consistency reading: how far this round's ensemble moved from the previous
+            # one, per coordinate, in the ln-ratio the plan's convergence criterion is written in
+            # plus the total-variation distance between the same two histograms.
+            print("      stationarity |ln p_r/p_{r-1}| mean/max/TV: " + " ".join(
+                f"{c} {stat[c]['mass_weighted_mean']:.3f}/{stat[c]['max']:.2f}/"
+                f"{stat[c].get('total_variation', float('nan')):.3f}"
+                if stat.get(c) else f"{c} n/a" for c in UPDATED))
         if r["retention"]:
             for grp in ("pool", "holdout"):
                 sm = r["retention"][grp]["summary"]
                 print(f"      retention {grp:7s} n={sm['n']} median {sm['median_dep_mean']:.2f} A "
                       f"spread {sm['median_spread']:.2f} A moved>10A {sm['n_moved_over_10A']}")
         flush()
+        if refused and _is_stable_c2(arm):
+            # A fitted arm stops on its first refusal. The step it wanted is already in the record
+            # (the diagnostics above are of the REFUSED step, not of the table that was kept), and
+            # carrying on would run the remaining rounds under a field the guard just rejected.
+            print(f"      arm {arm} stops: the fitted step was refused at round {rnd}")
+            break
     return rec
 
 
@@ -573,6 +765,17 @@ def main(argv=None):
                     help="hard cap 6: the production 867-chain run owns the rest of the box")
     ap.add_argument("--arms", default="C0,C1,C2")
     ap.add_argument("--K", type=int, default=DEFAULT_K)
+    ap.add_argument("--ridge", type=float, default=RIDGE_REL,
+                    help="relative ridge for the C2s arms: lambda = ridge x trace(A^T W A) / K, "
+                         "the same relative form ibi_bonded.moment_correction uses")
+    ap.add_argument("--support-frac", type=float, default=SUPPORT_FRAC,
+                    help="bins below this fraction of the modal ensemble probability are dropped "
+                         "from the C2s fit (their target is a pseudo-count's logarithm)")
+    ap.add_argument("--c2-gain", type=float, default=1.0,
+                    help="damping on the C2s step; 1.0 is the undamped fit")
+    ap.add_argument("--taper-decades", type=float, default=TAPER_DECADES,
+                    help="decades of p below the support cut over which the C2s correction is "
+                         "tapered to zero, so the refit cannot act where the ensemble has no mass")
     ap.add_argument("--seed", type=int, default=20260922)
     ap.add_argument("--ref", default=str(DEFAULT_REF))
     ap.add_argument("--baseline-tables", default=str(DEFAULT_BASELINE),
@@ -603,13 +806,17 @@ def main(argv=None):
           f"burn {args.burn} ({args.burn * 0.002:.0f} ps), stride {args.stride}, "
           f"relax {args.relax}; retention {args.retention_steps} steps "
           f"({args.retention_steps * 0.002:.0f} ps), relax {args.retention_relax}")
-    print(f"  {args.workers} worker processes x 1 torch thread; seed base {args.seed}; K={args.K}")
+    print(f"  {args.workers} worker processes x 1 torch thread; seed base {args.seed}; "
+          f"K={args.K}; C2s ridge/support/gain {args.ridge:g}/{args.support_frac:g}/{args.c2_gain:g}")
 
     record = {"tag": args.tag, "argv": list(argv) if argv is not None else sys.argv[1:],
               "created": datetime.now().isoformat(timespec="seconds"),
               "rounds": args.rounds, "nrep": args.nrep, "nsteps": args.nsteps,
               "burn": args.burn, "stride": args.stride, "blocks": args.blocks,
               "relax": args.relax, "workers": args.workers, "seed": args.seed, "K": args.K,
+              "ridge": args.ridge, "support_frac": args.support_frac, "c2_gain": args.c2_gain,
+              "taper_decades": args.taper_decades,
+              "arm_K": {a: _arm_K(a, args.K) for a in arms},
               "ref": str(args.ref), "start_field": str(start_path),
               "baseline_tables": args.baseline_tables or None,
               "retention_protocol": {"nsteps": args.retention_steps,
