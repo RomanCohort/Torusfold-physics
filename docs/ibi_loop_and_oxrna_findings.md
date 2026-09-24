@@ -529,3 +529,46 @@ moments-rebuilt tables, are moments rounds in the full sense. The 548 round-6 ch
 the table operator's `tables_r6.npz` were moved to `results/ibi_relax/tasks_r6_tableop_discarded/`
 rather than mixed into a round whose field had changed.
 
+
+## Part 7 — The table-sigma denominator moves because the TABLE moves: round 6's angle number (2026-09-25)
+
+`sim_ref_table` = sigma_sim / sigma_implied_by_the_table was added to remove the floor the stored
+(outlier-inflated) sigma puts under bb_bond and stack. It does that, and it has a failure mode of its
+own that round 6 walked into. The decomposition, from the pooled task histograms and the table files
+already on disk:
+
+| angle | stored sigma | implied sigma | pooled sigma_sim | sim/implied | sim/stored |
+| :-- | --: | --: | --: | --: | --: |
+| table operator r5 (sampled in round 5) | 0.32027 | 0.25731 | 0.38847 | 1.510 | 1.213 |
+| moment replay r5 | 0.32027 | 0.15112 | — | — | — |
+| moment r6 (sampled in round 6) | 0.32027 | 0.14390 | 0.35903 | 2.495 | 1.121 |
+| moment r7 (sampling now) | 0.32027 | 0.13583 | — | — | — |
+
+The per-chain median of that ratio looks like a regression from round 5 to round 6 (1.373 -> 2.257,
+with the per-chain J_table median 0.234 -> 0.328). It is not one. The SIMULATION's own width improved
+(sigma_sim/stored 1.213 -> 1.121, stored-sigma per-chain J median 0.1458 -> 0.1273); what moved is
+the table: the moment operator's replay narrowed angle's implied width by 41 percent in one step
+(0.257 -> 0.151) and it has kept narrowing (0.144, then 0.136).
+
+**Why it narrows is not a defect of the operator either.** sigma_implied is the width the table ALONE
+would produce, and the sampled marginal is not the table's own Boltzmann distribution — it is the
+table convolved with the rest of the Hamiltonian. A moment-matching step that compares the sampled
+histogram against the reference's moments is therefore asking the table to make up, by itself, for a
+width the coupling contributes. The table it settles on is narrower than the target, and the ratio
+is then a statement about the coupling rather than about the field.
+
+**The asymmetry is the finding.** The same replay left the other three coordinates alone — implied
+sigma bb_bond 0.04804 -> 0.04843, dihedral 0.47592 -> 0.46641, stack 0.12683 -> 0.12683, all inside
+2 percent — against angle's 41 percent. So the angle is the coordinate whose sampled marginal its own
+table explains least, which is the same coordinate that has needed a different operator, a different
+gain, and six rounds of attention since round 0. Rule for reading the metric: quote the implied sigma
+beside `sim_ref_table`, and do not use the ratio as a field-quality number for a coupled coordinate.
+For bb_bond, dihedral and stack the table's own sigma remains the better denominator; for angle it
+is not.
+
+The moment operator's own convergence signal moved the other way over the same pair of rounds and is
+the one to trust: `|d<T>|max` 0.0280 / 0.0470 / 0.0366 at round 6 against 0.0020 / 0.0667 / 0.0087
+at round 5 (bb_bond / angle / dihedral), with the estimated relative-entropy drop staying below
+0.014 kBT per round.
+
+
