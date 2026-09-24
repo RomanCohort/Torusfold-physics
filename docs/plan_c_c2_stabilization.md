@@ -248,7 +248,133 @@ replacement step is the wrong size for two of the three coordinates, and the one
 damped refit helps is the one whose sampled self-consistency (3.1) does not settle -- two different
 instruments pointing at the same coordinate.
 
-## 4. Reproduce
+## 4. The clean instrument -- two SAMPLED ensembles, with its floor
+
+Everything in this section is offline: it reads the stored ensembles under results/plan_c and runs
+no sampler. Tool: scripts/plan_c_instrument.py, tests tests/test_plan_c_instrument.py,
+machine-readable record results/plan_c/instrument.json, printed tables instrument.txt.
+
+### 4.1 Why the old instrument could not be repaired
+
+Section 3.4 measured the confound and it is larger than any effect it was used to judge: the field
+that PRODUCED an ensemble reads 0.218 / 1.721 / 0.514 median ln-units on fit_implied_ln_ratio
+against an instrument floor of 0.007 / 0.009 / 0.035, because the sampled Hamiltonian carries the
+wall potential and every coupling to the rest of the chain, so a bonded coordinate's marginal is
+not the Boltzmann factor of its own term. The replacement compares two SAMPLED ensembles: both
+sides came out of the same sampler under the same full Hamiltonian, so a difference between them is
+the field difference plus sampling noise and nothing else. Six numbers per coordinate: tv,
+mass-weighted ln_mean (which is exactly the loop's own stationarity -- the instrument reproduces
+the json's recorded values to 1e-9, which is what its golden-value test pins), ln_max, and
+dmean_sig / dstd_sig / dq05|50|95_sig, the moment and quantile shifts in units of the coordinate's
+own spread. ln_max is quoted but never used for a verdict: it reads 690 on a bin nobody visited,
+which is the same trap the previous instrument fell into.
+
+### 4.2 The floor (question 1)
+
+| floor part | bb_bond | angle | dihedral |
+| :-- | --: | --: | --: |
+| exact zero: one field, one seed, twice | 0 | 0 | 0 |
+| empirical, adjacent pairs with step <= 1 kJ/mol: ln_mean min / median | 0.068 / 0.178 | 0.073 / 0.133 | 0.070 / 0.123 |
+| same pairs: TV min / median | 0.034 / 0.087 | 0.036 / 0.066 | 0.035 / 0.061 |
+| Poisson-independent p95 (a lower bound): ln_mean / TV | 0.037 / 0.019 | 0.028 / 0.014 | 0.027 / 0.013 |
+
+The exact zero is measured twice and both halves are worth stating: C0_r1 and C1_r1 are identical
+arrays (same field, same seed, so the two arms' first rounds are one trajectory), and the refused
+first attempt's C2s8_r1 is identical to this run's -- identical although the fitting code changed
+in between, which is the check that the sampler does not depend on the fit.
+
+The empirical floor comes from the nine (bb_bond), ten (angle) and six (dihedral) adjacent pairs
+whose injected step was at most 1 kJ/mol, i.e. the arms that had all but stopped moving. Its
+members include C0's last three pairs, whose field changes are the smallest in the whole dataset
+(0.15-0.56 kJ/mol applied std), so their round-to-round distance is almost all noise. The correlated
+sampling of a stride-5 window puts the real floor 2-3x above the independent bound, and the bracket
+to quote for a full-window adjacent-round comparison is **ln_mean 0.03-0.09, TV 0.015-0.04**. C0 --
+an arm whose target is fixed and whose corrections have gone to 0.2-0.6 kJ/mol -- reads 0.068-0.115
+over its last two rounds: that is what a settled arm looks like on this instrument.
+
+### 4.3 C2s8 on the clean instrument (question 2)
+
+| coord | r 1->2 | r 2->3 | r 3->4 | floor bracket | verdict |
+| :-- | --: | --: | --: | --: | :-- |
+| bb_bond (ln_mean) | 1.129 | 0.373 | 0.114 | 0.068 .. 0.178 | converges, ends AT the floor |
+| bb_bond (TV) | 0.405 | 0.182 | 0.056 | 0.034 .. 0.087 | same |
+| angle (ln_mean) | 0.305 | 0.154 | 0.102 | 0.073 .. 0.133 | converges, ends AT the floor |
+| angle (TV) | 0.138 | 0.074 | 0.050 | 0.036 .. 0.066 | same |
+| dihedral (ln_mean) | 1.035 | 0.649 | 0.816 | 0.070 .. 0.123 | 6.6-11.7x the floor, last step RISES |
+| dihedral (TV) | 0.442 | 0.300 | 0.362 | 0.035 .. 0.061 | same |
+
+The moment columns give the shape rather than the amplitude, and they say the same thing: bb_bond's
+quantile shifts decay (dq50/sigma 0.069, 0.031, 0.047; dq95/sigma 0.741, -0.003, -0.057) and so do
+the angle's (0.148, 0.049, 0.033), while **the dihedral's alternate sign every round** (-1.126,
++0.558, -0.598): the distribution is orbiting, not settling. At K=4 the same instrument reads the
+dihedral 1.023 / 1.070 / 1.149 -- rising at both orders.
+
+### 4.4 Side by side with the polluted instrument (question 3)
+
+Paired so that both columns are about the field written at the END of round r: the clean number is
+the distance from ensemble r to r+1, the polluted one is fit_implied_ln_ratio_median recorded at
+round r.
+
+| arm | coord | clean ln_mean 1->2 / 2->3 / 3->4 | polluted r1 / r2 / r3 | reading |
+| :-- | :-- | --: | --: | :-- |
+| C2s8 | bb_bond | 1.129 / 0.373 / 0.114 | 0.957 / 0.499 / 0.196 | agree: both fall |
+| C2s8 | angle | 0.305 / 0.154 / 0.102 | 0.974 / 0.631 / **1.722** | OPPOSITE: the proxy says the fit is getting worse while the ensembles close |
+| C2s8 | dihedral | 1.035 / 0.649 / 0.816 | 1.004 / 0.822 / 1.234 | opposite by first-vs-last; neither shows convergence |
+| C2s4 | angle | 0.407 / 0.291 / 0.156 | 1.081 / 0.641 / **2.153** | opposite, same as K=8 |
+| C2s4 | dihedral | 1.023 / 1.070 / 1.149 | 1.492 / 1.277 / 1.780 | agree on the limit cycle |
+| C1 | dihedral | 0.268 / 0.131 / 0.070 | 0.074 / 0.090 / 0.097 | opposite: the clean side falls to the floor |
+| C1 | angle | 0.155 / 0.132 / 0.083 | 0.027 / 0.025 / 0.025 | agree (both flat or falling) |
+| C0 | all three | 0.073-0.269, falling | not recorded | the polluted column does not exist for C0 |
+
+**On every arm where both columns exist, at least one coordinate has the proxy rising while the
+sampled distance falls** -- the angle in both C2 arms, the dihedral in C1. That is why the
+instrument had to change: not that it was noisy, but that its sign was wrong where it mattered, and
+a loop steered by it would have spent the next round on a coordinate that was already converging.
+
+### 4.5 What this does to the section 3 conclusions (question 4)
+
+**Both survive, and one of them gets stronger.**
+
+* bb_bond and the angle having a fixed point stands, and is now a statement about the measured floor
+  rather than about a trend: their last round-to-round distances (0.114 and 0.102) are INSIDE the
+  floor bracket (0.068-0.178 and 0.073-0.133). They are not merely still falling -- at this
+  instrument's resolution they have stopped.
+* the dihedral being a limit cycle stands and no longer rests on a confounded proxy: 6.6-11.7x the
+  floor at every step, the last step rising, the quantile shifts alternating sign, and the same
+  shape at K=4 (1.023 / 1.070 / 1.149) where the proxy was the only witness before.
+* What changes is the EVIDENCE, not the verdict: the earlier statement rested on an instrument whose
+  own confound (0.218 / 1.721 / 0.514 for the field that produced the ensemble) is larger than the
+  effects being judged. The verdict is unchanged, which is itself worth recording -- the confound
+  was large enough to reverse a sign, and it happened not to reverse these.
+
+### 4.6 To-run list (needs sampling; deliberately NOT run here)
+
+The production round 6 owns the box and none of the above needs a sampler. Three things would
+sharpen it, and all three need one:
+
+1. **The true floor.** Two independent trajectories under ONE field with different seeds, same
+   protocol as the arms: 7 chains x 8 replicas x 5000 steps, twice. Cost about 1.2 core-hours, about
+   11 minutes wall on 6 workers. Everything above brackets the floor from pairs whose fields also
+   moved; this pins it and turns the bracket into a line.
+2. **Per-chain and per-block counts.** plan_c_loop stores the pooled histogram only. Per-chain turns
+   the pooled distance into a median with a spread over 7 chains (the instrument already reports
+   n_a/n_b per pair for exactly this); per-block gives a jackknife floor at full-window size and
+   settles the sqrt(N) scaling that 4.2 assumes between the 150k block floor of 3.4 and the 1.2M
+   full-window comparison.
+3. **A production-burn control.** The same-field pair at burn 20,000 (40 ps) instead of 1,000 (2 ps)
+   would say whether the short burn leaves a residue the block floor does not see. The repo's own
+   measurement (ibi_loop's docstring) says the transient exceeds 40 ps from deposited starts, which
+   is why this is a control and not an assumption.
+
+### 4.7 Reproduce
+
+```
+python scripts/plan_c_instrument.py                     # both datasets, tables + instrument.json
+python scripts/plan_c_instrument.py --datasets c2stab --reps 1000
+pytest tests/test_plan_c_instrument.py -q
+```
+
+## 5. Reproduce
 
 ```
 set TORUSFOLD_RSRNASP=C:/baidunetdiskdownload/torusfold-hybrid/_cgdata/combined
