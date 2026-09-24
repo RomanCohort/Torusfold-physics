@@ -283,6 +283,24 @@ arrays (same field, same seed, so the two arms' first rounds are one trajectory)
 first attempt's C2s8_r1 is identical to this run's -- identical although the fitting code changed
 in between, which is the check that the sampler does not depend on the fit.
 
+**MEASURED 2026-09-24: the floor is a LINE, not a bracket.** To-run item 1 asked for two independent
+trajectories under ONE field -- the one C2s8's last round ended on -- and 614 s of wall clock on 6
+workers bought it (7 chains x 8 replicas x 5000 steps x 2 seeds; scripts/plan_c_same_field_floor.py,
+results/plan_c/same_field_floor.json):
+
+| coord | pooled ln_mean | pooled TV | per-chain ln_mean min / median / max | per-chain TV median |
+| :-- | --: | --: | --: | --: |
+| bb_bond | **0.0471** | 0.0235 | 0.1081 / 0.1180 / 0.1474 | 0.0587 |
+| angle | **0.0521** | 0.0260 | 0.1470 / 0.1709 / 0.1978 | 0.0830 |
+| dihedral | **0.0589** | 0.0294 | 0.1153 / 0.1580 / 0.1750 | 0.0785 |
+
+Seven chains is seven points, so the honest reading of the spread is min/median/max rather than a
+variance -- and they behave exactly as independent chains should: the per-chain median is 0.95, 1.24
+and 1.01 times the pooled value times sqrt(7), which is the sqrt(N) scaling section 4.2 assumed when
+it bounded a 1.2M-observation window comparison with a 150k-observation block floor. So the bracket
+below was conservative in the right direction (its minimum, 0.068-0.073, sits above the line) and is
+REPLACED by the line for any pooled adjacent-round comparison at this protocol.
+
 The empirical floor comes from the nine (bb_bond), ten (angle) and six (dihedral) adjacent pairs
 whose injected step was at most 1 kJ/mol, i.e. the arms that had all but stopped moving. Its
 members include C0's last three pairs, whose field changes are the smallest in the whole dataset
@@ -335,42 +353,70 @@ a loop steered by it would have spent the next round on a coordinate that was al
 
 **Both survive, and one of them gets stronger.**
 
-* bb_bond and the angle having a fixed point stands, and is now a statement about the measured floor
-  rather than about a trend: their last round-to-round distances (0.114 and 0.102) are INSIDE the
-  floor bracket (0.068-0.178 and 0.073-0.133). They are not merely still falling -- at this
-  instrument's resolution they have stopped.
-* the dihedral being a limit cycle stands and no longer rests on a confounded proxy: 6.6-11.7x the
-  floor at every step, the last step rising, the quantile shifts alternating sign, and the same
-  shape at K=4 (1.023 / 1.070 / 1.149) where the proxy was the only witness before.
+* bb_bond and the angle having a fixed point: **the trend stands, the wording does not.** Against
+  the measured line their last steps (0.114 and 0.102) are 2.42x and 1.96x the floor (0.0471 and
+  0.0521), not inside it -- the bracket's upper half had been inflated by the small field changes of
+  the pairs it was taken from. So: converging, ten-fold down from round 1, with a last step still
+  twice the noise; not yet at rest.
+* the dihedral being a limit cycle stands, and the measured floor makes it STRONGER: 13.84x the
+  same-field floor (0.816 against 0.0589) at the last step, rising rather than falling, quantile
+  shifts alternating sign, and the same shape at K=4 (1.023 / 1.070 / 1.149) where the proxy was the
+  only witness before.
 * What changes is the EVIDENCE, not the verdict: the earlier statement rested on an instrument whose
   own confound (0.218 / 1.721 / 0.514 for the field that produced the ensemble) is larger than the
   effects being judged. The verdict is unchanged, which is itself worth recording -- the confound
   was large enough to reverse a sign, and it happened not to reverse these.
 
-### 4.6 To-run list (needs sampling; deliberately NOT run here)
+### 4.6 To-run list -- two of the three are DONE
 
-The production round 6 owns the box and none of the above needs a sampler. Three things would
-sharpen it, and all three need one:
+1. **The true floor. DONE 2026-09-24.** Two independent trajectories under ONE field with different
+   seeds, same protocol as the arms: 7 chains x 8 replicas x 5000 steps, twice, 6 worker processes.
+   Predicted 1.2 core-hours and about 11 minutes; measured 614 s of wall clock (1.0 core-hours) and
+   the answer is the table at the top of 4.2: the bracket is replaced by a line, 0.047-0.059 pooled.
+2. **Per-chain and per-block counts. DONE as code 2026-09-24** -- see 4.7 for what it answers and for
+   the one thing that went wrong with this run's blocks.
+3. **A production-burn control. Still to run, and deliberately not run yet.** The same-field pair at
+   burn 20,000 (40 ps) instead of 1,000 (2 ps) would say whether the short burn leaves a residue the
+   block floor does not see. The repo's own measurement (ibi_loop's docstring) says the transient
+   exceeds 40 ps from deposited starts, which is why this is a control rather than an assumption.
+   Decision rule agreed with the operator: if the 2 ps burn's residue is below the measured floor,
+   this does not need to be spent.
 
-1. **The true floor.** Two independent trajectories under ONE field with different seeds, same
-   protocol as the arms: 7 chains x 8 replicas x 5000 steps, twice. Cost about 1.2 core-hours, about
-   11 minutes wall on 6 workers. Everything above brackets the floor from pairs whose fields also
-   moved; this pins it and turns the bracket into a line.
-2. **Per-chain and per-block counts.** plan_c_loop stores the pooled histogram only. Per-chain turns
-   the pooled distance into a median with a spread over 7 chains (the instrument already reports
-   n_a/n_b per pair for exactly this); per-block gives a jackknife floor at full-window size and
-   settles the sqrt(N) scaling that 4.2 assumes between the 150k block floor of 3.4 and the 1.2M
-   full-window comparison.
-3. **A production-burn control.** The same-field pair at burn 20,000 (40 ps) instead of 1,000 (2 ps)
-   would say whether the short burn leaves a residue the block floor does not see. The repo's own
-   measurement (ibi_loop's docstring) says the transient exceeds 40 ps from deposited starts, which
-   is why this is a control and not an assumption.
+### 4.7 The decomposition: per chain, per block (to-run item 2)
 
-### 4.7 Reproduce
+plan_c_loop used to store the POOLED histogram only, one number per coordinate per round, and that is
+why the only floor sections 4.2 could build was a bracket. Since 2026-09-24
+(plan_c_loop.store_ensembles) every round also stores:
+
+* `<arm>_r<round>__chain<i>__<coord>` -- one histogram per chain, so a pooled distance becomes seven and
+  gets a median with a spread (measured on the calibration run: pooled 0.047-0.059 against per-chain
+  0.108-0.198, which is the sqrt(7) of independent chains, ratios 0.95 / 1.24 / 1.01);
+* `<arm>_r<round>__blocks__<coord>` -- the window cut into equal-time blocks, summed over chains, which
+  is what a delete-one jackknife at FULL WINDOW size needs. plan_c_instrument.jackknife implements it
+  and is tested; the instrument's decomposed_report prints the per-chain spread and the jackknife for
+  any pair that carries them.
+
+Cost: 7 chains x 6 coordinates x 1000 bins x 8 bytes = 336 KB per round, eight times the pooled
+48 KB, and nothing in the fit path reads any of it.
+
+**What went wrong with this run's blocks, and what it cost.** The calibration run stored its blocks
+in the script's first key layout; the analysis script then re-saved the file twice on top of itself,
+and the second re-save nested a phantom chain axis into the block array (shape (7,7,8,1000) where
+(7,8,1000) was meant), so every chain appeared to carry chain 0's blocks. The COUNTRIES -- the
+per-chain histograms the floor is computed from -- were unaffected and were verified against the
+pooled totals; only the block decomposition was lost, so 4.2 quotes no jackknife and the analysis
+prints "not available" for it rather than a number. The re-save now uses np.stack with a shape
+assertion and refuses to write an array whose per-chain rows are all identical, which is the
+signature of exactly this duplication -- and the reason it took a re-save bug rather than a sampling
+budget to lose it is that the counts were on disk, which is the whole point of item 2.
+
+### 4.8 Reproduce
 
 ```
 python scripts/plan_c_instrument.py                     # both datasets, tables + instrument.json
 python scripts/plan_c_instrument.py --datasets c2stab --reps 1000
+python scripts/plan_c_same_field_floor.py               # sampling: 614 s on 6 workers
+python scripts/plan_c_same_field_floor.py --reuse       # re-analysis from the stored counts
 pytest tests/test_plan_c_instrument.py -q
 ```
 

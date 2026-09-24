@@ -77,9 +77,53 @@ def load_ensembles(path):
     for k in z.files:
         if k.endswith("__n_total") or "__n_total__" in k or "__n_outside__" in k:
             continue
+        if "__" in k.split("__", 1)[1]:
+            # <name>__chain<i>__<coord> and <name>__blocks__<coord> are the decomposition, read by
+            # chains_of/blocks_of below. A caller that asked for the pooled ensemble must not
+            # silently receive a decomposed one, so they are skipped here rather than merged.
+            continue
         arm_round, coord = k.split("__", 1)
         out.setdefault(arm_round, {})[coord] = np.asarray(z[k], dtype=float)
     return out
+
+
+def chains_of(z, arm_round, coord):
+    """{chain index: counts} for one name-round and coordinate, or {} if it was not stored.
+
+    The pooled histogram is one number; this is the distribution behind it, which is what turns a
+    floor from a bracket into a line (docs/plan_c_c2_stabilization.md 4.6).
+    """
+    pre = f"{arm_round}__chain"
+    out = {}
+    for k in z.files:
+        if not k.startswith(pre) or not k.endswith(f"__{coord}"):
+            continue
+        mid = k[len(pre):-len(coord) - 2]
+        if mid.endswith("_blocks") or not mid.isdigit():
+            continue
+        out[int(mid)] = np.asarray(z[k], dtype=float)
+    return out
+
+
+def blocks_of(z, arm_round, coord):
+    """(nblocks, nbins) counts summed over chains, or None when the run did not store them."""
+    key = f"{arm_round}__blocks__{coord}"
+    return np.asarray(z[key], dtype=float) if key in z.files else None
+
+
+def jackknife(values):
+    """Delete-one jackknife over a list of block-level estimates: mean and the variance estimate.
+
+    var_jack = (n-1)/n * sum((theta_b - theta_bar)^2) over the n delete-one replicates. It answers
+    the question a pooled pair cannot: how much of this distance is the particular window that was
+    sampled, at the size of the whole window rather than of one block.
+    """
+    v = np.asarray([x for x in values if np.isfinite(x)], dtype=float)
+    if v.size < 2:
+        return {"n": int(v.size), "mean": float(v.mean()) if v.size else float("nan"),
+                "std_jackknife": float("nan")}
+    return {"n": int(v.size), "mean": float(v.mean()),
+            "std_jackknife": float(np.sqrt((v.size - 1) / v.size * ((v - v.mean()) ** 2).sum()))}
 
 
 def metrics(a, b, centre, ln_floor=LN_FLOOR, reps=200, seed=20260923, pseudo=I.DEFAULT_PSEUDO):
@@ -290,6 +334,54 @@ def print_table(rows, arms=None, tag=None):
                   f"{r['dq50_sig']:9.3f} {r['dq95_sig']:9.3f} {pols}")
 
 
+def decomposed_report(sets, reps=0):
+    """Per-chain spread and block jackknife for every stored pair that carries the decomposition.
+
+    TWO QUESTIONS, ONE SECTION. Per chain: is the pooled distance one number or seven, and does the
+    pooled value scale like sqrt(chains) -- which is what section 4.2 assumed when it used a 150k
+    block floor to bound a 1.2M window comparison. Per block: what does a delete-one jackknife at
+    full window size say, which needs no second trajectory at all. Both are printed only where the
+    run stored them; a pooled-only ensembles file prints nothing rather than a guess.
+    """
+    for tag, cfg in sets.items():
+        z = np.load(cfg["ensembles"])
+        ens = load_ensembles(cfg["ensembles"])
+        for arm in sorted({k.split("_r")[0] for k in ens}):
+            for ra, rb in pairs_for(ens, arm):
+                for c in COORDS:
+                    ka, kb = f"{arm}_r{ra}", f"{arm}_r{rb}"
+                    if c not in ens.get(ka, {}) or c not in ens.get(kb, {}):
+                        continue
+                    ca, cb = chains_of(z, ka, c), chains_of(z, kb, c)
+                    ba, bb = blocks_of(z, ka, c), blocks_of(z, kb, c)
+                    if not ca and ba is None:
+                        continue
+                    bits = []
+                    if ca and cb and sorted(ca) == sorted(cb):
+                        centre = np.arange(len(next(iter(ca.values()))), dtype=float)
+                        per = [metrics(ca[i], cb[i], centre, reps=reps)["ln_mean"]
+                               for i in sorted(ca)]
+                        pooled = metrics(ens[ka][c], ens[kb][c], centre, reps=0)["ln_mean"]
+                        bits.append(
+                            f"per-chain n={len(per)} ln_mean {min(per):.4f}/{float(np.median(per)):.4f}"
+                            f"/{max(per):.4f}, pooled {pooled:.4f} "
+                            f"(x sqrt(n) = {pooled * np.sqrt(len(per)):.4f})")
+                    if ba is not None and bb is not None:
+                        centre = np.arange(ba.shape[1], dtype=float)
+                        jk_ln, jk_tv = [], []
+                        for b in range(ba.shape[0]):
+                            d = metrics(np.delete(ba, b, axis=0).sum(axis=0),
+                                        np.delete(bb, b, axis=0).sum(axis=0), centre, reps=0)
+                            jk_ln.append(d["ln_mean"])
+                            jk_tv.append(d["tv"])
+                        j = jackknife(jk_ln)
+                        bits.append(f"block jackknife n={j['n']} ln_mean "
+                                    f"{j['mean']:.4f} +- {j['std_jackknife']:.4f}, "
+                                    f"TV {jackknife(jk_tv)['std_jackknife']:.4f}")
+                    if bits:
+                        print(f"   {tag:6s} {arm:5s} {c:9s} {ra}->{rb}: " + " | ".join(bits))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--datasets", default="run1,c2stab")
@@ -329,6 +421,8 @@ def main(argv=None):
         print(f"   {c}: members {f['members']}")
 
     print_table(rows)
+    print("\n== decomposed: per-chain spread and block jackknife, where the run stored them")
+    decomposed_report(sets, reps=0)
     print("\n== do the two instruments agree about the direction of travel?")
     for tag in sorted({r["tag"] for r in rows}):
         for arm in sorted({r["arm"] for r in rows if r["tag"] == tag}):

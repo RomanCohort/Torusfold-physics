@@ -161,3 +161,42 @@ def test_step_std_reproduces_the_recorded_applied_step():
             got = PI.step_std(fa, fb, z[f"C2s8_r{rnd}__{c}"], c)
             want = doc["arms"]["C2s8"]["rounds"][rnd - 1]["fit"][c]["mass_weighted_std_dU"]
             assert got == pytest.approx(want, rel=1e-9)
+
+# --------------------------------------------------------------- the decomposition (item 2)
+def test_load_ensembles_skips_the_decomposition(tmp_path):
+    """A caller that asked for the pooled ensemble must not silently get a decomposed one."""
+    p = tmp_path / "e.npz"
+    np.savez(p, **{"A_r1__bb_bond": np.ones(4), "A_r1__chain0__bb_bond": np.full(4, 3.0),
+                   "A_r1__blocks__bb_bond": np.ones((2, 4)),
+                   "A_r1__n_total__bb_bond": np.array(4)})
+    ens = PI.load_ensembles(p)
+    assert set(ens["A_r1"]) == {"bb_bond"}
+
+
+def test_chains_of_and_blocks_of_read_the_decomposition(tmp_path):
+    """<name>_r<round>__chain<i>__<coord> and __blocks__<coord>, and nothing else."""
+    p = tmp_path / "e.npz"
+    blocks = np.arange(8, dtype=float).reshape(2, 4)
+    np.savez(p, **{"A_r1__bb_bond": np.ones(4), "A_r1__chain0__bb_bond": np.full(4, 3.0),
+                   "A_r1__chain1__bb_bond": np.full(4, 5.0),
+                   "A_r1__chain0_blocks__bb_bond": np.ones((2, 4)),
+                   "A_r1__blocks__bb_bond": blocks})
+    z = np.load(p)
+    ch = PI.chains_of(z, "A_r1", "bb_bond")
+    assert sorted(ch) == [0, 1], "the per-chain-per-block key was read as a chain histogram"
+    assert ch[1][0] == pytest.approx(5.0)
+    assert np.allclose(PI.blocks_of(z, "A_r1", "bb_bond"), blocks)
+    assert PI.blocks_of(z, "A_r2", "bb_bond") is None
+
+
+def test_jackknife_matches_the_hand_computed_variance():
+    v = [1.0, 2.0, 3.0, 4.0]
+    n, mean = 4, 2.5
+    want = np.sqrt((n - 1) / n * sum((x - mean) ** 2 for x in v))
+    j = PI.jackknife(v)
+    assert j["n"] == 4 and j["mean"] == pytest.approx(mean)
+    assert j["std_jackknife"] == pytest.approx(want)
+    assert PI.jackknife([2.0, 2.0, 2.0, 2.0])["std_jackknife"] == pytest.approx(0.0)
+    assert PI.jackknife([1.0])["n"] == 1 and np.isnan(PI.jackknife([1.0])["std_jackknife"])
+    assert np.isnan(PI.jackknife([])["std_jackknife"])
+

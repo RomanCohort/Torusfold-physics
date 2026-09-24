@@ -142,6 +142,45 @@ def _is_stable_c2(arm):
     return arm == "C2s" or (arm.startswith("C2s") and arm[3:].isdigit())
 
 
+# THE DIHEDRAL ARMS. The 2-cycle measured 2026-09-24 (scripts/plan_c_dihedral_cycle.py, commit
+# f991274): the dihedral's refit step does not decorrelate -- corr(step_r, step_{r-1}) is -0.85 at
+# round 3 and -0.94 at round 4 while its amplitude GROWS (2.72 -> 3.42 -> 4.06 kJ/mol, above 1 kBT),
+# against 0.23 / 0.35 for bb_bond and angle. A shape correlation near -1 with a growing amplitude is
+# an unstable 2-cycle of the refit map, and a damped map is the standard remedy. The three arms ask
+# whether damping turns it into an inward spiral, and whether the production rule -- the table
+# inversion, which is where the loop's dihedral reached 1.015 -- already is one.
+#
+#   D02   the stabilised Chebyshev refit, dihedral gain 0.2, bb_bond and angle unchanged at 1.0
+#   D05   the same at 0.5, to locate the stability boundary (growth ratio ~1.2 implies 1/|lambda| ~
+#         0.83, so 0.5 should already be inside and 0.2 is the safe side)
+#   Dtbl  the dihedral by TABLE INVERSION (ibi_bonded.plan_update, the production rule, gain 1.0)
+#         while bb_bond and angle keep the refit
+#
+# A pre-check on round 4's own ensemble (results/plan_c/_precheck_dihedral.py) says the table step
+# IS milder than the refit's there: mass-weighted rms 2.99 against 4.06 kJ/mol, positively correlated
+# with it (+0.55), i.e. the same shape with less amplitude rather than a different direction.
+DIHEDRAL_ARMS = {
+    "D02": {"dihedral": ("chebyshev_ridge", 0.2)},
+    "D05": {"dihedral": ("chebyshev_ridge", 0.5)},
+    "Dtbl": {"dihedral": ("plan_update", 1.0)},
+}
+
+
+def _is_dihedral_arm(arm):
+    return arm in DIHEDRAL_ARMS
+
+
+def _uses_refit(arm):
+    """Arms whose step is a fit and therefore needs the divergence guard and the stop-on-refusal."""
+    return _is_stable_c2(arm) or _is_dihedral_arm(arm)
+
+
+def _spec_for(arm, coord, default_gain):
+    """(operator, gain) for one coordinate under one arm; the D arms change ONLY the dihedral."""
+    spec = DIHEDRAL_ARMS.get(arm, {}).get(coord)
+    return spec if spec else ("chebyshev_ridge", default_gain)
+
+
 def _arm_K(arm, default):
     """C2s4 means the stabilised fit at K=4; every other arm takes --K."""
     if arm.startswith("C2s") and arm[3:].isdigit():
@@ -246,6 +285,14 @@ def _sample_one(task):
                        log=lambda *a, **k: None)
     return idx, {"name": name, "L": L,
                  "counts": {c: np.asarray(res.counts[c], dtype=np.int64) for c in B.COORDS},
+                 # THE WINDOW'S BLOCKS COME BACK TOO, and that is a measurement decision rather
+                 # than completeness: a pooled histogram cannot be decomposed after the fact, so
+                 # the only floor the offline instrument could build from it was a bracket taken
+                 # from pairs whose FIELDS also moved (docs/plan_c_c2_stabilization.md 4.2). With
+                 # the blocks, the same comparison becomes a delete-one jackknife at full window
+                 # size; with the per-chain histograms below, seven comparisons instead of one.
+                 "blocks": {c: np.asarray([res.b_counts[b][c] for b in range(max(int(blocks), 1))],
+                                          dtype=np.int64) for c in B.COORDS},
                  "acc": {c: [float(v) for v in np.asarray(res.acc[c], dtype=float)]
                          for c in B.COORDS},
                  "n_total": {c: int(res.n_total[c]) for c in B.COORDS},
@@ -397,7 +444,7 @@ def _chebyshev_fit_stable(table, U_target, counts, K, ridge=RIDGE_REL,
 
 
 def _fit_coord(arm, table, counts, n_total, n_outside, p_ref, K, ridge=RIDGE_REL,
-               support_frac=SUPPORT_FRAC, gain=1.0, taper_decades=TAPER_DECADES):
+               support_frac=SUPPORT_FRAC, gain=1.0, taper_decades=TAPER_DECADES, coord=None):
     """(U_new, diagnostics) for one coordinate under one arm. Raises on a refused C0 update.
 
     A refusal is not caught here: plan_update refuses when the simulation left the support or the
@@ -407,13 +454,20 @@ def _fit_coord(arm, table, counts, n_total, n_outside, p_ref, K, ridge=RIDGE_REL
     counts = np.asarray(counts, dtype=float)
     n_outside = int(n_outside)
     n_total = int(n_total)
+    arm_gain = float(gain)
+    if _is_dihedral_arm(arm):
+        # Per-coordinate operator and gain: the D arms are the stabilised refit everywhere except
+        # the coordinate named in DIHEDRAL_ARMS. The coercion goes through the arm's own gain, so a
+        # global --c2-gain cannot leak into the plain C0 arm's meaning.
+        op, arm_gain = _spec_for(arm, coord, gain)
+        arm = "C0" if op == "plan_update" else "C2s"
     if arm == "C0":
         hist = I.SimHistogram(counts=counts, n=n_total, n_outside=n_outside,
                               lo=float(table["lo"]), hi=float(table["hi"]),
                               nbins=len(table["U"]))
         # smooth_bins is +-bins while boltzmann_bonded.SMOOTH_WIDTH is a window WIDTH; the
         # conversion is ibi_loop.py:893's, kept identical so C0's update IS the production update.
-        res = I.plan_update(table, hist, p_ref, gain=1.0,
+        res = I.plan_update(table, hist, p_ref, gain=float(arm_gain),
                             smooth_bins=(B.SMOOTH_WIDTH - 1) // 2)
         diag = {"status": res.status, "reason": res.reason}
         for k, v in res.diagnostics.items():
@@ -437,7 +491,7 @@ def _fit_coord(arm, table, counts, n_total, n_outside, p_ref, K, ridge=RIDGE_REL
         # C2s / C2s4 / C2s2: the same target and the same Chebyshev design, fitted with the
         # support cut, the relative ridge and the mass gauge (see _chebyshev_fit_stable).
         U_new, diag = _chebyshev_fit_stable(table, U_target, counts, K, ridge=ridge,
-                                            support_frac=support_frac, gain=gain,
+                                            support_frac=support_frac, gain=arm_gain,
                                             taper_decades=taper_decades)
     else:
         raise ValueError(f"unknown arm {arm!r}")
@@ -554,6 +608,36 @@ def _num(v):
     return None if v != v else v
 
 
+def store_ensembles(ens_store, arm, rnd, counts, n_total, n_outside, sampled, name_to_index):
+    """The round's ensemble into ens_store: pooled, per chain, and per block.
+
+    THE POOLED HISTOGRAM IS ONE NUMBER PER COORDINATE PER ROUND and that is what the first three
+    passes were limited to: the only floor the offline instrument could build from a pooled pair was
+    a bracket from arms whose fields had also moved (measured 0.068-0.178 / 0.073-0.133 /
+    0.070-0.123 ln_mean for bb_bond / angle / dihedral). Per chain the same comparison becomes seven
+    numbers, i.e. a median with a spread; per block it becomes a delete-one jackknife at full window
+    size, which needs no second trajectory at all. Measured storage cost: 7 chains x 6 coordinates x
+    1000 bins x 8 bytes = 336 KB per round against the pooled 48 KB, so eight times the file for a
+    distribution instead of a point, and nothing in the fit path reads any of it.
+
+    Kept out of run_arm's body so it can be tested without sampling anything: plan C's tests run in
+    seconds and a real round does not.
+    """
+    for c in B.COORDS:
+        ens_store[f"{arm}_r{rnd}__{c}"] = np.asarray(counts[c], dtype=np.int64)
+        for r in sampled:
+            ci = name_to_index.get(r["name"])
+            if ci is None:
+                continue
+            ens_store[f"{arm}_r{rnd}__chain{ci}__{c}"] = np.asarray(r["counts"][c], dtype=np.int64)
+        if sampled and "blocks" in sampled[0]:
+            ens_store[f"{arm}_r{rnd}__blocks__{c}"] = np.asarray(
+                sum(np.asarray(r["blocks"][c], dtype=np.int64) for r in sampled), dtype=np.int64)
+    for c in UPDATED:
+        ens_store[f"{arm}_r{rnd}__n_total__{c}"] = np.int64(n_total[c])
+        ens_store[f"{arm}_r{rnd}__n_outside__{c}"] = np.int64(n_outside[c])
+
+
 # --------------------------------------------------------------------------- one arm
 def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec):
     """R rounds of one arm, filling the caller's record in place; fields are written as it goes.
@@ -576,6 +660,9 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
     # The applied step norm per coordinate, for the divergence guard on the fitted arms: the same
     # history ibi_loop keeps for Plan B's moment operator (ibi_loop:885) and rebuilt per arm.
     norm_hist = {c: [] for c in UPDATED}
+    # The previous round's APPLIED step per coordinate, for the shape-correlation column.
+    dU_prev = {}
+    name_to_index = {s["name"]: i for i, s in enumerate(pool)}
     field_path = write_field(field_dir / f"{arm}_r0.npz", tables)
     rec["fields"].append(str(field_path))
 
@@ -616,7 +703,7 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
                 U_new, diag = _fit_coord(arm, tab, counts[c], n_total[c], n_outside[c],
                                          p_ref[c], _arm_K(arm, args.K), ridge=args.ridge,
                                          support_frac=args.support_frac, gain=args.c2_gain,
-                                         taper_decades=args.taper_decades)
+                                         taper_decades=args.taper_decades, coord=c)
             except I.IBIRefusal as exc:
                 refused = f"{c}: {exc}"
                 diag = {"status": "refused", "reason": str(exc)}
@@ -638,6 +725,32 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
             diag["mass_weighted_std_dU"] = float(
                 np.sqrt((p_mass * (dU - dU_mean) ** 2).sum()))
             diag["dU_offset_under_mass"] = dU_mean
+            # EDGE MASS: the fraction of this coordinate's mass in the outer 5 per cent of the
+            # support at each end. Measured 2026-09-24 (plan_c_dihedral_cycle.py): the dihedral
+            # carries 0.31-0.42 of its mass there against 0.11-0.20 for the angle and 0.01-0.15 for
+            # bb_bond, and a smooth global basis can only move that mass from one edge to the other,
+            # which is the shape the cycle takes.
+            _edge = 0.05 * (float(tab["hi"]) - float(tab["lo"]))
+            _ce = np.asarray(tab["centre"], dtype=float)
+            diag["edge_mass"] = float(p_mass[(_ce <= float(tab["lo"]) + _edge)
+                                            | (_ce >= float(tab["hi"]) - _edge)].sum())
+            # SHAPE CORRELATION WITH THE PREVIOUS ROUND'S STEP, mass-weighted over the bins the
+            # ensemble visits. A contracting refit map reads ~0; the dihedral's measured 2-cycle
+            # reads -0.85 then -0.94 while its amplitude GROWS, which is what this column exists to
+            # show breaking (doc section 5).
+            _prev = dU_prev.get(c)
+            diag["step_shape_corr_prev"] = None
+            if _prev is not None:
+                _m = p_mass > LN_RATIO_FLOOR
+                if _m.any():
+                    _a1 = dU[_m] - float((p_mass[_m] * dU[_m]).sum() / p_mass[_m].sum())
+                    _a0 = _prev[_m] - float((p_mass[_m] * _prev[_m]).sum() / p_mass[_m].sum())
+                    _den = float(np.sqrt((p_mass[_m] * _a1 ** 2).sum()
+                                         * (p_mass[_m] * _a0 ** 2).sum()))
+                    if _den > 0:
+                        diag["step_shape_corr_prev"] = float(
+                            (p_mass[_m] * _a1 * _a0).sum() / _den)
+            dU_prev[c] = np.asarray(dU, dtype=float).copy()
             # THE GUARD ON THE FITTED ARMS. Plan B's coupled step is checked by
             # ibi_bonded.divergence_check on the moment norm before it is injected (ibi_loop:885),
             # and a fitted correction gets the same instrument on the FORCE-RELEVANT size of its
@@ -647,7 +760,7 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
             # window, i.e. a fixed-point iteration walking away: the previous table is kept for
             # that coordinate, the step that was refused is still recorded in the diagnostics, and
             # the arm stops after this round rather than reporting rounds that changed nothing.
-            if _is_stable_c2(arm):
+            if _uses_refit(arm):
                 _div, _msg = I.divergence_check(norm_hist[c], diag["mass_weighted_std_dU"])
                 if _div:
                     refused = f"{c}: {_msg}"
@@ -664,12 +777,10 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
         if refused:
             rec["refusals"].append({"round": rnd, "why": refused})
 
-        # the ensemble, stored so the stationarity claim can be re-derived from disk
-        for c in B.COORDS:
-            ens_store[f"{arm}_r{rnd}__{c}"] = np.asarray(counts[c], dtype=np.int64)
-        for c in UPDATED:
-            ens_store[f"{arm}_r{rnd}__n_total__{c}"] = np.int64(n_total[c])
-            ens_store[f"{arm}_r{rnd}__n_outside__{c}"] = np.int64(n_outside[c])
+        # the ensemble, stored so the stationarity claim can be re-derived from disk -- and stored
+        # DECOMPOSED as well as pooled, because the decomposition is what the offline instrument
+        # needs to turn one number into a distribution (docs/plan_c_c2_stabilization.md 4.6).
+        store_ensembles(ens_store, arm, rnd, counts, n_total, n_outside, sampled, name_to_index)
 
         # the deposited-marginal residual, both denominators, on the field that was just fitted
         vals, j = IC.simref(acc, tables, skip=tuple(B.CONSTRAINED))
@@ -733,7 +844,7 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
                 print(f"      retention {grp:7s} n={sm['n']} median {sm['median_dep_mean']:.2f} A "
                       f"spread {sm['median_spread']:.2f} A moved>10A {sm['n_moved_over_10A']}")
         flush()
-        if refused and _is_stable_c2(arm):
+        if refused and _uses_refit(arm):
             # A fitted arm stops on its first refusal. The step it wanted is already in the record
             # (the diagnostics above are of the REFUSED step, not of the table that was kept), and
             # carrying on would run the remaining rounds under a field the guard just rejected.

@@ -337,3 +337,59 @@ def test_stationarity_reports_total_variation():
     same = L._stationarity(np.array([0.5, 0.5]), np.array([0.5, 0.5]))
     assert same["total_variation"] == pytest.approx(0.0)
 
+
+# ------------------------------------------------------------------ the dihedral arms
+def test_dihedral_arm_specs_change_only_the_dihedral():
+    """D02/D05 damp the dihedral's refit; Dtbl hands the dihedral to the production table inversion.
+    bb_bond and angle must keep gain 1.0 in all three, or the arms differ in two things at once."""
+    assert L._is_dihedral_arm("D02") and L._is_dihedral_arm("D05") and L._is_dihedral_arm("Dtbl")
+    assert not L._is_dihedral_arm("C2s8") and not L._is_dihedral_arm("C0")
+    assert L._spec_for("D02", "dihedral", 1.0) == ("chebyshev_ridge", 0.2)
+    assert L._spec_for("D05", "dihedral", 1.0) == ("chebyshev_ridge", 0.5)
+    assert L._spec_for("Dtbl", "dihedral", 1.0) == ("plan_update", 1.0)
+    for arm in ("D02", "D05", "Dtbl"):
+        for coord in ("bb_bond", "angle"):
+            assert L._spec_for(arm, coord, 1.0) == ("chebyshev_ridge", 1.0), (arm, coord)
+
+
+def test_dihedral_arms_are_guarded_and_plain_c0_is_not_rerouted():
+    """The guard and the stop-on-refusal apply to any arm whose step is a fit -- including the D
+    arms -- while a plain C0 must keep the production rule at gain 1.0 whatever else is set."""
+    assert L._uses_refit("D02") and L._uses_refit("Dtbl") and L._uses_refit("C2s8")
+    assert not L._uses_refit("C0") and not L._uses_refit("C1")
+
+
+def test_dtbl_dihedral_takes_the_plan_update_path_with_the_arm_gain(monkeypatch):
+    """One call of _fit_coord with coord='dihedral' must reach plan_update, not the refit, and must
+    not carry a global --c2-gain into it: the D arms' damping is per coordinate by construction."""
+    seen = {}
+
+    class _Res:
+        ok = False
+        status = "refused"
+        reason = "test"
+        diagnostics = {}
+        table = None
+
+    def fake_plan_update(table, hist, p_ref, **kw):
+        seen.update(kw)
+        return _Res()
+
+    monkeypatch.setattr(L.I, "plan_update", fake_plan_update)
+    tab = _table(nbins=32)
+    counts = (100 * np.exp(-0.5 * ((np.arange(32) - 16) / 3.0) ** 2)).astype(np.int64)
+    p_ref = np.ones(32) / 32.0
+    # Dtbl's dihedral goes through plan_update, with the ARM's gain and not a global 0.3
+    with pytest.raises(L.I.IBIRefusal):
+        L._fit_coord("Dtbl", tab, counts, int(counts.sum()), 0, p_ref, K=8, gain=0.3,
+                     coord="dihedral")
+    assert seen.get("gain") == 1.0, f"the arm gain did not reach plan_update: {seen}"
+    # ... and its bb_bond keeps the refit, at the global gain
+    _u, d_bb = L._fit_coord("Dtbl", tab, counts, int(counts.sum()), 0, p_ref, K=8, gain=0.3,
+                            coord="bb_bond")
+    assert d_bb["fit"] == "chebyshev_ridge" and d_bb["gain"] == pytest.approx(0.3)
+    # D02's dihedral is the refit, damped to 0.2 whatever the global gain says
+    _u2, d_dih = L._fit_coord("D02", tab, counts, int(counts.sum()), 0, p_ref, K=8, gain=1.0,
+                              coord="dihedral")
+    assert d_dih["fit"] == "chebyshev_ridge" and d_dih["gain"] == pytest.approx(0.2)
+
