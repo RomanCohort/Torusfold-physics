@@ -420,7 +420,112 @@ python scripts/plan_c_same_field_floor.py --reuse       # re-analysis from the s
 pytest tests/test_plan_c_instrument.py -q
 ```
 
-## 5. Reproduce
+## 5. The dihedral 2-cycle: three arms that try to break it -- measured
+
+### 5.1 The cycle, and why damping is the standard remedy
+
+The mechanism was measured separately (scripts/plan_c_dihedral_cycle.py, commit f991274) and is not
+re-derived here: the dihedral's refit step does not decorrelate. corr(step_r, step_{r-1}) is -0.85 at
+round 3 and -0.94 at round 4 while its amplitude GROWS (2.72 -> 3.42 -> 4.06 kJ/mol, above 1 kBT),
+against 0.23 / 0.35 for bb_bond and angle, whose correlations sit near zero. A shape correlation
+approaching -1 with a growing amplitude is an unstable 2-cycle of the refit map -- sampling noise
+would decorrelate, a contraction would decay -- and the reason it is the dihedral is in its shape:
+its marginal is bimodal (2 local maxima above ten per cent of the peak against 74-324 elsewhere) and
+31-49 per cent of its mass sits in the outer five per cent of the support, so a smooth global basis
+can only move mass from one edge region to the other, round after round.
+
+Damping is the standard remedy for a fixed-point iteration that walks: the growth ratio is about 1.2,
+so 1/|lambda| is about 0.83 and a gain below that should land inside the stability boundary. The
+three arms ask whether it does, and whether the production rule is already inside it.
+
+### 5.2 What the arms are
+
+| arm | bb_bond | angle | dihedral |
+| :-- | :-- | :-- | :-- |
+| D02 | stabilised refit, gain 1.0 | stabilised refit, gain 1.0 | stabilised refit, **gain 0.2** |
+| D05 | stabilised refit, gain 1.0 | stabilised refit, gain 1.0 | stabilised refit, **gain 0.5** |
+| Dtbl | stabilised refit, gain 1.0 | stabilised refit, gain 1.0 | **table inversion** (ibi_bonded.plan_update, the production rule, gain 1.0) |
+
+Everything else is identical to C2s8 -- same pool, same seeds, same protocol, same ridge, taper and
+guard -- so a difference between the arms is the dihedral's update rule and nothing else. Each arm
+stop on its first refusal, as the fitted arms do.
+
+**An offline pre-check gives Dtbl a positive prior** (results/plan_c/_precheck_dihedral.py, applying
+plan_update to the same round-4 ensemble the refit saw): the table inversion wants a MILDER dihedral
+step there -- mass-weighted rms 2.99 against 4.06 kJ/mol -- and it is positively correlated with the
+refit step (+0.55), i.e. the same shape with less amplitude rather than a different direction. The
+same pre-check on the other two coordinates says why the production loop looks the way it does: for
+the angle the table step is 2.27 against the refit's 0.35 kJ/mol and anti-correlated (-0.77), and for
+bb_bond 6.03 against 0.23.
+### 5.3 Measured: four dihedral rules, four rounds each
+
+All four arms share the pool, the seeds, the protocol, the ridge, the taper and the guard; they
+differ only in what the dihedral does. C2s8 is the reference (gain 1.0 refit, from the c2stab run);
+the rms column is the mass-weighted std of the step the rule wanted, corr is
+corr(step_r, step_{r-1}) over the mass-bearing bins, and the clean column is the distance between
+consecutive SAMPLED ensembles against the same-field floor of section 4.2.
+
+| arm (dihedral rule) | rms kJ/mol, r1 -> r4 | corr, r2 / r3 / r4 | clean ln_mean (x floor), r2 / r3 / r4 | TV r4 | edge mass r4 | ret pool / holdout |
+| :-- | :-- | --: | --: | --: | --: | --: |
+| C2s8: refit, gain 1.0 | 4.08 / 2.72 / 3.42 / **4.06** | -0.37 / -0.85 / **-0.94** | 1.035 (17.6x) / 0.649 (11.0x) / **0.816 (13.8x)** | 0.36 | 0.43 | 0.40 / 0.49 |
+| D05: refit, gain 0.5 | 2.04 / 1.18 / 0.59 / **0.32** | +0.78 / +0.89 / **+0.79** | 0.515 (8.7x) / 0.279 (4.7x) / **0.148 (2.5x)** | 0.073 | 0.396 | 0.391 / 0.491 |
+| D02: refit, gain 0.2 | 0.82 / 0.67 / 0.56 / **0.44** | +0.97 / +0.99 / **+0.99** | 0.284 (4.8x) / 0.191 (3.2x) / **0.114 (1.9x)** | 0.057 | 0.466 | 0.388 / 0.512 |
+| Dtbl: table inversion, gain 1.0 | 1.44 / 1.01 / 0.88 / **0.60** | +0.66 / +0.97 / **+0.96** | 0.343 (5.8x) / **0.083 (1.4x)** / 0.099 (1.7x) | 0.050 | 0.301 | 0.395 / 0.513 |
+
+Every number in the table is from results/plan_c/plan_c_dihedral.json and ensembles_dihedral.npz,
+and the same table is reproduced by results/plan_c/_analyse_dihedral.py. No arm refused: the guard
+never fired, so these are four runs that behaved rather than four runs that were stopped.
+
+### 5.4 Did the cycle break? -- yes, at every damping, and the table rule is already inside it
+
+**The anti-correlation is gone in all three dihedral arms.** corr goes from -0.85 / -0.94 (gain 1.0,
+the cycle) to +0.78 / +0.89 / +0.79 at gain 0.5, +0.97 / +0.99 / +0.99 at gain 0.2, and
++0.66 / +0.97 / +0.96 for the table inversion. One caveat on the criterion as it was written:
+'corr -> 0, decorrelated' is not what a converging iteration looks like -- a contraction repeats the
+SAME step with a shrinking amplitude, which reads corr near +1, while ~0 is the signature of
+noise-dominated steps. What the cycle was made of is the SIGN, and the sign flipped.
+
+**The amplitude falls monotonically in all three**, against rising at gain 1.0: 0.82 -> 0.67 -> 0.56
+-> 0.44 (D02), 2.04 -> 1.18 -> 0.59 -> 0.32 (D05), 1.44 -> 1.01 -> 0.88 -> 0.60 (Dtbl), against
+4.08 -> 2.72 -> 3.42 -> 4.06 (C2s8).
+
+**And the clean distance walks into the floor**: D02 ends at 1.9x, D05 at 2.5x and Dtbl at 1.7x the
+same-field floor, against 13.8x for the undamped refit -- where 1.0 means the ensemble moved no more
+than two independent trajectories under one field do.
+
+**Dtbl is the fastest to the floor and the only rule that changes the SHAPE.** It reaches 1.40x at
+round 3 and holds 1.69x at round 4, and its edge mass falls 0.495 -> 0.337 -> 0.315 -> 0.301 while
+the damped refits leave it at 0.396-0.466. That is the mechanism the cycle was made of: the smooth
+global basis can only shuttle the 31-49 per cent of dihedral mass living in the outer five per cent
+of the support from one edge region to the other, while the table inversion reshapes the marginal
+where it is bimodal. The production loop's choice of the table rule for the dihedral is therefore
+not a historical accident: it is the one that can fix the thing that was wrong.
+
+**Retention never moved in any arm**: pool 0.385-0.400 and holdout 0.482-0.522 across all sixteen
+arm-rounds, against the shared start field's 0.399 / 0.500 and tables_r3's 0.411 / 0.486. The
+criterion was that it must not leave 0.39-0.40, and no arm did.
+
+**bb_bond and the angle were not hurt by changing their partner.** Under all three D arms they
+behave like C2s8's (monotone fall, correlations drifting positive) and end at 2.3-2.8x (bb_bond) and
+1.8-2.1x (angle) the floor. A small cross-effect is worth recording: D02's and Dtbl's bb_bond end at
+2.79x / 2.31x against C2s8's 2.42x, and their angle at 1.83x / 1.88x against 1.96x -- the coupled
+coordinates settle a little further once the dihedral stops cycling, which is what a coupled
+fixed-point iteration should do.
+
+### 5.5 What this settles, and what to do with it
+
+1. **The dihedral's rule should be the table inversion** (which production already uses), or a refit
+   damped to gain <= 0.5. A full-gain refit is the only one of the four that cycles.
+2. **If a uniform operator is wanted later** -- Plan B's moment operator is the live candidate -- the
+   dihedral needs either a gain at or below 0.5 or a basis that can represent a bimodal marginal
+   (a mixture, or a periodic basis, not K=8 Chebyshev over the whole support). The acceptance test is
+   not 'the step got smaller': it is corr(step_r, step_{r-1}) >= 0 with a monotone amplitude, the
+   clean distance reaching the same-field floor, and retention inside its band.
+3. **The 2-cycle is a diagnosable failure, not a mysterious one**: it shows up as a sign flip in this
+   correlation together with a growing amplitude and an edge mass the basis cannot move. All three
+   are cheap columns, and the loop now records two of them (edge_mass and step_shape_corr_prev) on
+   every round of every arm.
+## 6. Reproduce
 
 ```
 set TORUSFOLD_RSRNASP=C:/baidunetdiskdownload/torusfold-hybrid/_cgdata/combined

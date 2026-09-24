@@ -223,6 +223,18 @@ DATASETS = {
              "fields": OUT / "fields" / "run1"},
     "c2stab": {"ensembles": OUT / "ensembles_c2stab.npz", "json": OUT / "plan_c_c2stab.json",
                "fields": OUT / "fields" / "c2stab"},
+    "dihedral": {"ensembles": OUT / "ensembles_dihedral.npz", "json": OUT / "plan_c_dihedral.json",
+                 "fields": OUT / "fields" / "dihedral"},
+}
+
+# THE LINE, not zero. Measured 2026-09-24 (scripts/plan_c_same_field_floor.py, 614 s on 6 workers):
+# the distance between two independent trajectories under ONE field, pooled over the same seven
+# chains every arm uses. A round-to-round distance means nothing until it is read against this, and
+# every table below prints the ratio.
+SAME_FIELD_FLOOR = {
+    "ln_mean": {"bb_bond": 0.0471, "angle": 0.0521, "dihedral": 0.0589},
+    "tv": {"bb_bond": 0.0235, "angle": 0.0260, "dihedral": 0.0294},
+    "source": "results/plan_c/same_field_floor.json (pooled, C2s8_r4 field, 2026-09-24)",
 }
 
 
@@ -323,15 +335,17 @@ def print_table(rows, arms=None, tag=None):
         sel = [r for r in rows if r["arm"] == arm and (tag is None or r["tag"] == tag)]
         if not sel:
             continue
-        print(f"\n== {arm} (clean instrument | polluted)")
+        print(f"\n== {arm} (clean instrument | x floor | polluted)")
         print(f"{'coord':10s} {'r->r+1':>7s} {'step kJ/mol':>11s} {'TV':>7s} {'ln_mean':>8s} "
-              f"{'ln_max':>7s} {'dq50/sig':>9s} {'dq95/sig':>9s} {'| polluted':>11s}")
+              f"{'x floor':>8s} {'ln_max':>7s} {'dq50/sig':>9s} {'dq95/sig':>9s} {'| polluted':>11s}")
         for r in sorted(sel, key=lambda x: (x["coord"], x["ra"])):
             pol = r["polluted_ln_median"]
             pols = f"{pol:11.3f}" if isinstance(pol, (int, float)) else "        n/a"
+            fl = SAME_FIELD_FLOOR["ln_mean"].get(r["coord"])
+            ratio = f"{r['ln_mean'] / fl:8.2f}" if fl else "     n/a"
             print(f"{r['coord']:10s} {str(r['ra'])+'->'+str(r['rb']):>7s} "
-                  f"{r['step_std']:11.3f} {r['tv']:7.3f} {r['ln_mean']:8.3f} {r['ln_max']:7.2f} "
-                  f"{r['dq50_sig']:9.3f} {r['dq95_sig']:9.3f} {pols}")
+                  f"{r['step_std']:11.3f} {r['tv']:7.3f} {r['ln_mean']:8.3f} {ratio} "
+                  f"{r['ln_max']:7.2f} {r['dq50_sig']:9.3f} {r['dq95_sig']:9.3f} {pols}")
 
 
 def decomposed_report(sets, reps=0):
