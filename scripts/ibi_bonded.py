@@ -702,6 +702,15 @@ def advance_from_samples(table, values, p_ref, **policy):
 # inject Poisson noise into the potential), not in the expectation.
 DEFAULT_CORRECTION_K = 8
 
+# THE RIDGE IS RELATIVE TO THE COVARIANCE'S OWN TRACE, so it is dimensionless and does not depend on
+# the coordinate's units. 1e-3 is what this operator has shipped with since the toy test in which a
+# 1e-8 ridge amplified a matching simulation's rounding-level moment difference (delta ~ 1e-6) into a
+# correction of order 1 kJ/mol. IT HAS NEVER BEEN SWEPT, and it is the one number in the moment step
+# that decides how much of a nearly-dependent direction the step is allowed to act on. It is a
+# parameter now so that scripts/ibi_moment_ridge_sweep.py can sweep it against the real 867-chain
+# histograms WITHOUT changing what the production loop runs: rounds 6-8 pass nothing and get 1e-3.
+DEFAULT_RIDGE_REL = 1e-3
+
 
 def _chebyshev_design(centre, lo, hi, K):
     """T_k(x) for k=1..K on the table's own bins, with x the support mapped to [-1, 1].
@@ -715,7 +724,8 @@ def _chebyshev_design(centre, lo, hi, K):
 
 def moment_correction(table, counts, n, n_outside, p_ref, K=DEFAULT_CORRECTION_K, gain=1.0,
                       max_outside_frac=DEFAULT_MAX_OUTSIDE_FRAC,
-                      max_step_kbt=DEFAULT_MAX_STEP_KBT, tol_kbt=DEFAULT_TOL_KBT):
+                      max_step_kbt=DEFAULT_MAX_STEP_KBT, tol_kbt=DEFAULT_TOL_KBT,
+                      ridge_rel=DEFAULT_RIDGE_REL):
     """One round of the relative-entropy (moment-matching) operator. Returns an UpdateResult.
 
     The returned object is the SAME type plan_update returns, with the same statuses and the same
@@ -777,7 +787,7 @@ def moment_correction(table, counts, n, n_outside, p_ref, K=DEFAULT_CORRECTION_K
     # diagonal the same case returns a correction below 0.01 kJ/mol while the informative directions
     # keep their Newton step. This is the standard trade: the ridge is what says "do not act on a
     # direction the ensemble has no information about".
-    ridge = 1e-3 * float(np.trace(cov)) / max(len(cov), 1)
+    ridge = float(ridge_rel) * float(np.trace(cov)) / max(len(cov), 1)
     cov = cov + ridge * np.eye(len(cov))
     d_k = gain * KBT * np.linalg.solve(cov, delta)
     diag["step"] = "covariance (Newton)"

@@ -151,3 +151,49 @@ is a handful of coefficients, so the update is a moment-matching step with no bi
 step size has a measurable objective. The free check above is what selects this variant: fitting the
 whole potential with a basis throws away the shape that is already working.
 
+
+## The ridge, swept at last — measured 2026-09-24 (867 chains, no sampling)
+
+The step above is a Newton step against the simulation's own covariance, and the one number in it
+that decides how much of a nearly-dependent direction it is allowed to act on is the ridge. It has
+been hard-coded at `1e-3 * trace(Cov)/n` since the toy test that showed a 1e-8 ridge turning a
+matching simulation's rounding-level moment difference into ~1 kJ/mol. Plan C's parametric arm was
+stabilised by sweeping exactly this quantity (60.6 -> 23.2 kJ/mol of `max|dU|` between ridge 1e-3 and
+1e-1 while the ensemble-weighted step barely moved), so it was worth asking whether the production
+operator sits in a ridge-sensitive regime. It does not, and the sweep is now a parameter
+(`ibi_bonded.DEFAULT_RIDGE_REL`, default unchanged) plus `scripts/ibi_moment_ridge_sweep.py`, which
+reads the 867 task files of a finished round and calls the shipped function — no sampling.
+
+Round 5, pooled over all 867 chains, K=8, gain 1.0 (all four columns in kJ/mol):
+
+| ridge | bb_bond max\|dU\| | angle max\|dU\| | dihedral max\|dU\| | bb_bond rms | angle rms | dihedral rms |
+| --: | --: | --: | --: | --: | --: | --: |
+| 0 | 0.261 | 2.734 | 0.338 | 0.0145 | 0.4196 | 0.0557 |
+| 1e-3 (shipped) | 0.216 | 1.634 | 0.336 | 0.0142 | 0.4187 | 0.0555 |
+| 1e-2 | 0.089 | 0.914 | 0.324 | 0.0134 | 0.4136 | 0.0540 |
+| 1e-1 | 0.033 | 0.664 | 0.243 | 0.0114 | 0.3799 | 0.0451 |
+| 3e-1 | 0.025 | 0.610 | 0.158 | 0.0094 | 0.3330 | 0.0363 |
+
+Four things fall out of it:
+
+1. **`|d<T>|max` — the diagnostic the divergence guard is fed — is EXACTLY ridge-invariant**
+   (0.00197 / 0.06675 / 0.00871 for the three coordinates at every ridge and every K). It is computed
+   from the moment difference before the solve, so the guard's convergence signal and this choice are
+   independent. What rounds 6-8 report about convergence does not depend on the ridge.
+2. **The ensemble-weighted step is a fraction of kBT and does not care about the ridge.** rms step
+   0.011-0.42 kJ/mol = 0.005-0.17 kBT across the whole sweep; going from the shipped 1e-3 to 1e-1
+   moves it by 10-20 percent while shrinking `max|dU|` by 2.5-6.5x. The headline is tail
+   oscillation, as in Plan C; for bb_bond the thin-tail share of the step's variance is 18 percent at
+   the shipped ridge and 3.7 percent at 1e-1, and for dihedral it is zero.
+3. **The shipped combination sits inside the stable region, and K is what would leave it.** At K=16
+   the same histogram wants 91 kJ/mol on angle at ridge 0 and still 2.7 at 1e-3, against 2.7 and 0.66
+   at K=8: the high-order Chebyshev functions are nearly collinear under a peaked density, and the
+   ridge is the only thing standing between them and the sampler. If K ever grows, the ridge has to
+   grow with it — and `max_step_kbt` (20 kBT = 50 kJ/mol) is the refusal that would catch a mistake.
+4. **The step does not depend on the field being corrected at all.** The archived table-operator
+   `tables_r5.npz` and the replayed moment-operator one differ by up to 9 kJ/mol in U, and every
+   number in the table above is identical for both: the Newton step is a function of the bin
+   geometry, the simulation's histogram and p_ref, and of nothing else. That is why the sweep is
+   valid against a round whose field came from the other operator.
+
+
