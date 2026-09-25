@@ -197,3 +197,25 @@ Four things fall out of it:
    valid against a round whose field came from the other operator.
 
 
+**A trap for anyone who swaps the basis.** The ridge above is `ridge_rel * trace(Cov)/n`, and for
+Chebyshev that is about 0.43 * eig_max — it behaves like a ridge relative to the largest eigenvalue.
+For a LOCAL basis it does not. Measured on one dihedral ensemble (m = number of B-spline knots):
+
+| m | trace/m | eig_max | trace/m / eig_max |
+| --: | --: | --: | --: |
+| 8 | 0.0607 | 0.141 | 0.430 |
+| 16 | 0.0288 | 0.0925 | 0.312 |
+| 32 | 0.0145 | 0.0845 | 0.172 |
+| 64 | 0.00736 | 0.0825 | 0.0891 |
+| 128 | 0.00373 | 0.0761 | 0.0490 |
+
+trace/m falls 16x from m=8 to m=128 while eig_max falls 1.9x, so the same `ridge_rel` regularises
+8.8x more weakly at the fine end, and at m=48 the solve returns 1e100. Plan C's basis module
+therefore defaults to an EIGENVALUE-relative ridge, and its tests pin both that scaling and the fact
+that its Chebyshev path is bit-identical to `plan_c_loop._chebyshev_fit_stable` — otherwise "only the
+basis changed" is not a statement anyone can check. Whoever replaces this operator's basis with a
+local one has to change the ridge convention with it, or the regularisation strength moves by an
+order of magnitude with no line of code saying so.
+
+
+
