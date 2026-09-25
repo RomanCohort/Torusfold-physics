@@ -88,6 +88,7 @@ import cg_potentials as P                             # noqa: E402
 import ibi_bonded as I                                # noqa: E402
 import ibi_core as IC                                 # noqa: E402
 import measure_native_retention as NR                 # noqa: E402
+import plan_c_basis as PB                             # noqa: E402
 import torusfold.scheme2.torch_cgsim as C             # noqa: E402
 
 OUT_ROOT = REPO / "results" / "plan_c"
@@ -165,9 +166,53 @@ DIHEDRAL_ARMS = {
     "Dtbl": {"dihedral": ("plan_update", 1.0)},
 }
 
+# PHASE 2 OF THE BASIS PROJECT (docs/plan_c_basis_family.md). Phase 1 swept locality offline on the
+# dihedral's round-4 ensemble and found the threshold is LOW: the global Chebyshev design cannot
+# express that target at any K (mass-weighted residual 2.87-2.91 kJ/mol, edge deficit -0.12..-0.20
+# against the target's 0.313), a cubic B-spline at m=8 still cannot (1.97), and from m=16 up it can
+# (0.10-0.24 with the edge carried). The ridge must be eigenvalue-relative from m~32 up, because
+# trace(A^T W A)/m -- moment_correction's form, the one this file uses -- falls 16x across m=8..128
+# while eig_max falls 1.9x: the same ridge_rel regularises 8.8x less at the fine end.
+#
+# Four arms at gain 1.0, dihedral only, everything else identical to the D arms and to C2s8:
+#   B08  m=8,  ridge 1e-3  the negative control: below the measured threshold, predicted to cycle
+#   B16  m=16, ridge 1e-3  the threshold itself
+#   B32  m=32, ridge 1e-3  comfortably inside
+#   B64  m=64, ridge 1e-4  the fine end phase 1 still called usable (resid 0.11, cond_fit 1e4)
+BASIS_ARMS = {
+    "B08": {"dihedral": ("bspline", 8, 1e-3)},
+    "B16": {"dihedral": ("bspline", 16, 1e-3)},
+    "B32": {"dihedral": ("bspline", 32, 1e-3)},
+    "B64": {"dihedral": ("bspline", 64, 1e-4)},
+}
+
 
 def _is_dihedral_arm(arm):
-    return arm in DIHEDRAL_ARMS
+    """Arms that override the dihedral's update: damping, table inversion, or a B-spline basis."""
+    return arm in DIHEDRAL_ARMS or arm in BASIS_ARMS
+
+
+def _coord_spec(arm, coord, default_gain=1.0):
+    """The arm's override for one coordinate as a dict, or None.
+
+    Kinds: chebyshev_ridge (the C2s refit, possibly damped), plan_update (the production table
+    inversion), bspline (the phase-2 families, gain 1.0, eigenvalue-relative ridge).
+
+    AN ARM THAT OVERRIDES ONE COORDINATE IS THE C2s REFIT EVERYWHERE ELSE -- that is what makes the
+    D and B arms single-variable experiments, and getting it wrong is silent: every coordinate of
+    "dtbl" would fall through to "unknown arm" (measured, by the test that caught this).
+    """
+    spec = DIHEDRAL_ARMS.get(arm, {}).get(coord) or BASIS_ARMS.get(arm, {}).get(coord)
+    if spec is None:
+        if _is_dihedral_arm(arm):
+            return {"kind": "chebyshev_ridge", "gain": float(default_gain), "m": None,
+                    "ridge_rel": None, "ridge_form": "trace"}
+        return None
+    if spec[0] == "bspline":
+        return {"kind": "bspline", "gain": 1.0, "m": int(spec[1]), "ridge_rel": float(spec[2]),
+                "ridge_form": "eig"}
+    return {"kind": spec[0], "gain": float(spec[1]), "m": None, "ridge_rel": None,
+            "ridge_form": "trace"}
 
 
 def _uses_refit(arm):
@@ -455,12 +500,28 @@ def _fit_coord(arm, table, counts, n_total, n_outside, p_ref, K, ridge=RIDGE_REL
     n_outside = int(n_outside)
     n_total = int(n_total)
     arm_gain = float(gain)
-    if _is_dihedral_arm(arm):
+    _spec = _coord_spec(arm, coord, gain) if _is_dihedral_arm(arm) else None
+    if _spec is not None and _spec["kind"] == "bspline":
+        # THE PHASE-2 FAMILIES. plan_c_basis.fit shares the whole pipeline with the refit the arms
+        # already ran -- support cut, sqrt(p) weighting, taper, mass gauge -- and only the design
+        # matrix differs; test_plan_c_basis pins the Chebyshev path of that function to
+        # _chebyshev_fit_stable, which is what makes these arms comparable with C2s8 and the D arms.
+        _A = PB.design_bspline(table["centre"], float(table["lo"]), float(table["hi"]),
+                               _spec["m"])
+        _desc = f"bspline m={_spec['m']} ridge_rel={_spec['ridge_rel']:g} eig"
+        U_new_b, diag_b = PB.fit(_A, table, counts, U_target=_target_from_counts(counts),
+                                 ridge_rel=_spec["ridge_rel"], ridge_form=_spec["ridge_form"],
+                                 gain=float(_spec["gain"]), support_frac=support_frac,
+                                 taper_decades=taper_decades)
+        diag_b["arm_spec"] = _desc
+        diag_b["fit"] = _desc
+        return np.asarray(U_new_b, dtype=float), diag_b
+    if _spec is not None:
         # Per-coordinate operator and gain: the D arms are the stabilised refit everywhere except
         # the coordinate named in DIHEDRAL_ARMS. The coercion goes through the arm's own gain, so a
         # global --c2-gain cannot leak into the plain C0 arm's meaning.
-        op, arm_gain = _spec_for(arm, coord, gain)
-        arm = "C0" if op == "plan_update" else "C2s"
+        arm_gain = float(_spec["gain"])
+        arm = "C0" if _spec["kind"] == "plan_update" else "C2s"
     if arm == "C0":
         hist = I.SimHistogram(counts=counts, n=n_total, n_outside=n_outside,
                               lo=float(table["lo"]), hi=float(table["hi"]),
