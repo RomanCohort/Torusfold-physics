@@ -624,4 +624,51 @@ for the angle may simply be unattainable through this coupling, in which case no
 it and the target, not the update, is what has to change for this coordinate.
 
 
+## Part 9 — The edge-gap diagnostic transfers to the full pool, and it names both pathologies (2026-09-27)
+
+The basis project's phase 2 ended with a cheap quantity replacing an expensive one: what predicts
+whether a fit will cycle is not its residual but its EDGE GAP -- the outer 5 percent mass of the
+fitted field's own implied distribution against the target's. The only cycling arm (Chebyshev K=8 on
+the dihedral) had gap -0.378; the four that converged sat inside |gap| <= 0.012, including the two
+with the worst residuals. `scripts/ibi_edge_gap.py` applies that quantity to the production record,
+where it needs no sampling: the tables and the pooled histograms are both on disk.
+
+| round | coordinate | reference edge | table's own edge | gap | sampled edge | gap |
+| --: | :-- | --: | --: | --: | --: | --: |
+| 5 | angle | 0.1178 | 0.1538 | **+0.0359** | 0.1048 | -0.0131 |
+| 6 | angle | 0.1178 | 0.1621 | **+0.0442** | 0.1113 | -0.0065 |
+| 7 | angle | 0.1178 | 0.1713 | **+0.0535** | 0.1148 | -0.0030 |
+| 8 | angle | 0.1178 | 0.1750 | **+0.0571** | 0.1144 | -0.0034 |
+| 5 | dihedral | 0.3243 | 0.1699 | **-0.1543** | 0.3183 | -0.0060 |
+| 6 | dihedral | 0.3243 | 0.1747 | -0.1496 | 0.3612 | +0.0369 |
+| 7 | dihedral | 0.3243 | 0.1598 | -0.1645 | 0.3320 | +0.0077 |
+| 8 | dihedral | 0.3243 | 0.1515 | **-0.1728** | 0.3228 | -0.0015 |
+| 5-8 | bb_bond | 0.0006 | 0.0006-0.0009 | within +-0.0003 | 0.0007 | within +-0.0003 |
+
+(outer 5 percent = the outermost 50 of the table's 1000 bins at each end; the reference is
+`refit_smooth5.npz`, the same fixed target every round.)
+
+Three readings, and the first two are the point:
+
+1. **The dihedral's table under-delivers its edges by half, and it worsens every round**
+   (-0.154 -> -0.173). That is the same sign and the same order as the deficit the basis arms
+   measured on the seven-chain pool and then REMOVED by swapping Chebyshev K=8 for a B-spline basis,
+   which is also what stopped that arm's cycle. The production loop ran K=8 on the dihedral for all
+   nine rounds, so it carried the pathology the whole time, and the diagnostic transfers from seven
+   chains to 867.
+2. **The angle's table over-delivers its edges, monotonically** (+0.036 -> +0.057, about 1.5x the
+   reference), while its SAMPLED edge moves the other way, closing from -0.013 to -0.003. The table
+   is walked outward by corrections the simulation does not take -- Part 8's absorbed update, seen
+   by a diagnostic that never looks at the moment residual.
+3. **The tables and the sampled marginals disagree, and that is the coupling again.** The sampled
+   edge mass sits within 0.04 of the reference for all three coordinates at every round, while the
+   tables are off by 0.06 (angle) and 0.17 (dihedral). A table's own implied distribution is not the
+   distribution the chain samples (Part 7), which is why a TABLE-side edge gap predicts a cycle: the
+   fit is trying to place mass where the coupling will not let it stay.
+
+Not claimed here: the bb_bond gap is zero at full pool (the +0.238 the basis arms measured for
+Chebyshev was a seven-chain number), and there is no arm-level evidence for K=16 or K=32.
+
+
+
 
