@@ -322,6 +322,29 @@ pathology Part 8 describes as 'the sampled sigma stalls 9 per cent wider than th
 measured against the field's OWN implied sigma it is a factor of 2.67 rather than 1.09 -- the field has
 left its sampler far behind, not just the reference.
 
+**One correction to that table, because the two operators must not be read as one curve.** The
+implied-sigma column above is the LIVE tables_r<N>.npz, and for rounds 1-5 those are not the tables the
+table operator produced: the switch replayed rounds 0-5 under the moment operator and REWROTE them
+(table_operator_archive holds the originals). Printed side by side:
+
+| round | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+| :-- | --: | --: | --: | --: | --: | --: | --: |
+| live (moment trajectory) | 0.3218 | 0.2594 | 0.2150 | 0.1842 | 0.1637 | 0.1511 | 0.1439 |
+| archived (table operator) | 0.3218 | 0.2968 | 0.2776 | 0.2636 | 0.2559 | 0.2573 | (0.2699) |
+| sampled sigma (what was actually sampled) | 0.4159 | 0.4050 | 0.3998 | 0.3944 | 0.3916 | 0.3885 | 0.3590 |
+
+The honest statement has two parts. Under the TABLE operator, which is what rounds 0-5 actually
+sampled, the angle's implied sigma narrows 20 per cent over five rounds and then STOPS: 0.2559 at r4,
+0.2573 at r5 -- a plateau, i.e. a partial fixed point in this quantity, against a sampled sigma that
+fell 6.6 per cent over the same five rounds. Under the MOMENT operator the same coordinate loses 19 per
+cent in its FIRST round alone and 53 per cent by r5, and by r8 it is still falling 4-5 per cent per
+round with no plateau. So the narrowing is NOT operator-independent: the table operator bounds it and
+the moment operator does not, which is what makes the angle's drift a full-pool moment-operator
+phenomenon -- and it is the reason A's angle arm changes the TARGET rather than the basis. The archived
+r6 (0.2699, in parentheses) is the table the table operator wrote and that no round ever sampled under:
+the switch fired first.
+
+
 ### 5.3 The tension C does not cover: at full pool the angle failed under BOTH rules
 
 C ran on seven chains, where the production rule CONVERGED for the angle (CBdep: residual 13.1 -> 3.4
