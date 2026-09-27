@@ -240,11 +240,33 @@ results/ibi_relax/tasks_r<N>/<idx>.npz (READ-ONLY), so summing them gives the po
 round, and tables_r<N>.npz gives the fields. The number to produce is, per coordinate per round of
 the finished campaign, the implied edge mass of the field minus the ensemble's edge mass.
 
-That is what decides whether this proposal is worth 1,350 core-hours at all: **if the production
-table/moment rule already carries the edges at full pool** -- which the seven-chain Dtbl arm suggests
-it might, since the table rule reached 1.4x the floor there -- then the basis change is unnecessary
-and the answer is no. If instead a coordinate shows the Chebyshev disease (a gap of a few tenths),
-the arm below is the cheapest test of the fix.
+That is what decides whether this proposal is worth 1,350 core-hours at all, and **it has been run**
+(results/plan_c/step0_full_pool_gap.json, 27 rows, offline). Full pool, 867 chains, all nine rounds of
+the finished campaign:
+
+| coord | edge target, r0 -> r8 | edge implied by the field | **gap** | gap p10/p50/p90 across chains, r8 |
+| :-- | --: | --: | --: | --: |
+| bb_bond | 0.0008 -> 0.0010 | 0.0006 - 0.0010 | ~0 | -0.0003 / +0.0003 / +0.0007 |
+| angle | 0.096 -> 0.114 | 0.137 -> 0.179 | **+0.041 -> +0.064** | +0.019 / +0.057 / +0.082 |
+| dihedral | 0.523 -> 0.323 | 0.180 -> 0.147 | **-0.343 -> -0.176** | -0.225 / -0.184 / -0.159 |
+
+**The disease is present at full pool, in the dihedral.** Its fields deliver 0.15-0.18 of edge mass
+against a target holding 0.32-0.52 -- a gap of -0.34 at round 0 that only reaches -0.18 by round 8 --
+and the per-chain band is tight (p10 to p90 spans 0.07), so it is a property of the family and the
+target rather than of a few odd chains. The angle carries the same failure with the OPPOSITE sign
+(+0.04 growing to +0.06: the fit over-delivers the edges, exactly as phase 1 found on seven chains),
+and bb_bond has no gap at all.
+
+**Two things follow, and the second is a correction to this proposal's own premise.** First, the arm
+is worth proposing: the dihedral's full-pool gap is the same order as the seven-chain Chebyshev arm
+that cycled (-0.378), against a converged-arm band of +-0.012. Second, **the gap does not imply
+non-convergence on its own**: the production campaign finished and converged WITH a persistent -0.18
+gap, so what the gap measures is that the field cannot carry the target's edge shape, and whether that
+destabilises the update depends on the operator doing the updating. On the seven-chain pool the refit
+oscillated while the table rule did not, which is the same statement from the other end. The arm below
+therefore tests a representation goal -- does a local basis close the gap -- and reports the
+convergence metrics beside it rather than assuming one follows from the other.
+
 
 ### 5.3 The arm, if step 0 says go
 
