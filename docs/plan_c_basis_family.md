@@ -275,95 +275,122 @@ section 5.
 
 ## 5. The full-pool validation: proposal (NOT launched -- this is the account the operator approves)
 
-### 5.1 What would be validated
+### 5.1 What would be validated, now that C has said which lever is which
 
-The one thing the seven-chain project cannot answer is whether the edge-gap prescription matters at
-full pool scale, where the production campaign's converged fields live. The candidate change is
-narrow by construction: **replace the refit basis for the coordinates whose edge gap is bad with a
-B-spline m=16 (gain 1.0, eigenvalue-relative ridge), and leave everything else exactly as the
-production campaign ended** -- same operator for the other coordinates, same target, same protocol,
-same checkpoints.
+C's result (section 4.2) is that the two coordinates have OPPOSITE levers, so a single change applied
+to both -- which is what an earlier version of this proposal recommended -- would answer the wrong
+question for one of them. The proposal is therefore a per-coordinate rule, and each coordinate carries
+its own hypothesis and its own criterion:
 
-### 5.2 Step 0, before any sampling: measure the full-pool edge gap (offline, about 15 minutes)
+| coordinate | what changes | what does NOT change | criterion |
+| :-- | :-- | :-- | :-- |
+| dihedral | the refit basis: B-spline m=16, gain 1.0, eigenvalue-relative ridge 1e-3 | the target (the deposited reference) and every other coordinate's operator | edge gap \|gap\| <= 0.05, plus the existing convergence metrics (monotone step, corr >= 0, clean distance towards the floor, retention in band) |
+| angle | the TARGET: the ensemble the field itself produces (self-consistent), basis unchanged | everything else | **the drift stops**: the field's implied sigma stops falling monotonically, the step's shape correlation goes to +1 with a decaying amplitude, and the edge excess stops growing; retention in band |
 
-Phase 1 measured edge gaps on the seven-chain pool. The full pool's are computable from what is
-already on disk and cost no sampling: each round stores per-chain histograms in
-results/ibi_relax/tasks_r<N>/<idx>.npz (READ-ONLY), so summing them gives the pooled ensemble per
-round, and tables_r<N>.npz gives the fields. The number to produce is, per coordinate per round of
-the finished campaign, the implied edge mass of the field minus the ensemble's edge mass.
+**The angle's criterion is deliberately NOT the residual against the reference.** A self-consistent
+target is defined as the ensemble the field produced, so the distance from the deposited reference is
+not what that loop descends -- and CA16 already demonstrated it: its step collapsed to 0.111 kJ/mol and
+its ensemble stopped moving (0.94x the same-field floor) while its offset from the reference GREW. That
+growth is the definition of the target, not a failure of the arm, and a proposal that judged it by the
+reference residual would reject the one setting that makes the angle's self-motion converge.
 
-That is what decides whether this proposal is worth 1,350 core-hours at all, and **it has been run**
-(results/plan_c/step0_full_pool_gap.json, 27 rows, offline). Full pool, 867 chains, all nine rounds of
-the finished campaign:
+### 5.2 Step 0 is measured, and it is sharper than expected
 
-| coord | edge target, r0 -> r8 | edge implied by the field | **gap** | gap p10/p50/p90 across chains, r8 |
-| :-- | --: | --: | --: | --: |
-| bb_bond | 0.0008 -> 0.0010 | 0.0006 - 0.0010 | ~0 | -0.0003 / +0.0003 / +0.0007 |
-| angle | 0.096 -> 0.114 | 0.137 -> 0.179 | **+0.041 -> +0.064** | +0.019 / +0.057 / +0.082 |
-| dihedral | 0.523 -> 0.323 | 0.180 -> 0.147 | **-0.343 -> -0.176** | -0.225 / -0.184 / -0.159 |
+Step 0 costs no sampling: the per-chain histograms are on disk (results/ibi_relax/tasks_r<N>/<idx>.npz,
+read-only) and the fields are tables_r<N>.npz. Two things came out of it, and the second is why this
+proposal's cost is worth arguing about at all.
 
-**The disease is present at full pool, in the dihedral.** Its fields deliver 0.15-0.18 of edge mass
-against a target holding 0.32-0.52 -- a gap of -0.34 at round 0 that only reaches -0.18 by round 8 --
-and the per-chain band is tight (p10 to p90 spans 0.07), so it is a property of the family and the
-target rather than of a few odd chains. The angle carries the same failure with the OPPOSITE sign
-(+0.04 growing to +0.06: the fit over-delivers the edges, exactly as phase 1 found on seven chains),
-and bb_bond has no gap at all.
+**(a) The dihedral's edge gap is real at full pool and does not close.** Fields deliver 0.15-0.18 of
+edge mass against a target holding 0.32-0.52; the gap goes -0.343 (r0) -> -0.176 (r8), and the per-chain
+band is tight (p10 to p90 spans 0.07), so it is a property of the family and the target, not of a few
+odd chains. Per round: -0.343, -0.192, -0.163, -0.156, -0.151, -0.145, -0.202, -0.181, -0.176 -- it
+settles into an oscillation around -0.15..-0.20, i.e. the round-to-round noise of this quantity at full
+pool is about +-0.03.
 
-**Two things follow, and the second is a correction to this proposal's own premise.** First, the arm
-is worth proposing: the dihedral's full-pool gap is the same order as the seven-chain Chebyshev arm
-that cycled (-0.378), against a converged-arm band of +-0.012. Second, **the gap does not imply
-non-convergence on its own**: the production campaign finished and converged WITH a persistent -0.18
-gap, so what the gap measures is that the field cannot carry the target's edge shape, and whether that
-destabilises the update depends on the operator doing the updating. On the seven-chain pool the refit
-oscillated while the table rule did not, which is the same statement from the other end. The arm below
-therefore tests a representation goal -- does a local basis close the gap -- and reports the
-convergence metrics beside it rather than assuming one follows from the other.
+**(b) The angle's field collapses away from its own sampler.** The field's IMPLIED sigma and the sampled
+sigma, per round:
 
+| round | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+| :-- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| field's implied sigma | 0.3218 | 0.2594 | 0.2150 | 0.1842 | 0.1637 | 0.1511 | 0.1439 | 0.1358 | 0.1307 |
+| sampled sigma | 0.4159 | 0.4050 | 0.3998 | 0.3944 | 0.3916 | 0.3885 | 0.3590 | 0.3541 | 0.3493 |
+| sampled / implied | 1.29 | 1.56 | 1.86 | 2.14 | 2.39 | 2.57 | 2.49 | 2.61 | 2.67 |
 
-### 5.3 The arm, if step 0 says go
+The implied sigma falls by a factor of 2.5 over nine rounds while the sampled one falls 16 per cent:
+the loop keeps narrowing the angle's potential and the sampler does not follow. That is the same
+pathology Part 8 describes as 'the sampled sigma stalls 9 per cent wider than the reference', but
+measured against the field's OWN implied sigma it is a factor of 2.67 rather than 1.09 -- the field has
+left its sampler far behind, not just the reference.
 
-| item | value |
-| :-- | :-- |
-| chains | 867 (the same pool, so the tables stay comparable) |
-| rounds | 3 (the seven-chain convergence took 3-4; 9 rounds of the production campaign is the fallback if 3 is ambiguous) |
-| operator | the moment operator for every coordinate, as the production campaign ended, EXCEPT the one(s) step 0 flags, which are refitted on a B-spline m=16 |
-| ridge | eigenvalue-relative, 1e-3, for the refit; the moment operator's covariance needs its own rescaling (failure mode 3) |
-| acceptance | (1) edge gap |gap| <= 0.05 on the flagged coordinate; (2) |d<T>|max falls towards the noise floor instead of stalling; (3) sigma_sim closes on sigma_target; (4) retention inside 0.39-0.42 / 0.48-0.52; (5) the round-to-round clean distance falls below the subset floor's multiple |
-| cost | 1 round = 450 core-hours measured (867 chains x 32,500 steps; the sum of per-chain times is 448-461 core-h); 3 rounds = 1,350 core-h |
-| wall clock | 14 h per round at 32 workers is the floor and the campaign's own rounds took 15.9-18.2 h, so 3 rounds is 48-55 h (2.0-2.3 days), plus about 1 h for step 0 and the subset floor |
-| extra measurement | a same-field floor on a SUBSET (20 chains spanning the length range, 2 trajectories: about 1.2 core-h), because a full-pool floor would cost 900 core-h and is not worth a calibration number |
+### 5.3 The tension C does not cover: at full pool the angle failed under BOTH rules
 
-### 5.4 What would make it fail, and what each failure means
+C ran on seven chains, where the production rule CONVERGED for the angle (CBdep: residual 13.1 -> 3.4
+times the noise floor, sigma ratio 1.188 -> 1.12-1.17). At full pool the same rule did not converge: the
+archived table-operator rounds (results/ibi_relax/table_operator_archive, the pre-replay record) give
+the angle's correction as 3.00, 3.94, 3.02, 4.27, 4.31, 3.72 kJ/mol over rounds 0-5 -- **ringing, with
+no decay and no convergence** -- while bb_bond (2.84 -> 0.35 -> 0.62) and the dihedral (5.62 -> 0.27)
+both settled under the same rule. The moment operator then decayed the correction (2.56 -> 1.63 over
+the replay, 2.69 -> 1.68 over the real rounds 6-8) but produced (b) above: a field whose implied sigma
+collapses while its sampler does not move.
 
-1. **Step 0 shows no bad edge gap at full pool.** Then the seven-chain disease does not survive the
-   full pool's heterogeneity, the edge-gap prescription is a seven-chain artefact, and the honest
-   answer is that the production rule never needed the basis change. Cost of finding out: 15 minutes.
-2. **Exactly one coordinate needs it.** A per-coordinate rule is then a judgement call, not a
-   technical one: the machinery already exists (plan_c_loop's per-coordinate specs), the cost is
-   complexity in the operator table, and the alternative -- leave that coordinate on the table rule,
-   which is what production did -- is demonstrably adequate on the seven-chain pool (1.4-1.7x the
-   floor). Recommendation in that case: do not open a per-coordinate basis rule for one coordinate;
-   record the measurement and move on.
+So at full pool the angle has two rules that each fail differently -- the table rule rings, the moment
+operator drifts with no fixed point -- and a seven-chain experiment in which the table rule converges.
+The proposal's hypothesis for the angle is therefore the one C's CA16 arm points at: **give it the
+self-consistent target, so that what the loop descends is the ensemble the field produces, and ask
+whether the drift stops.** The three signatures of 'stopped' are measurable per round and are what the
+arm reports; the reference residual is reported beside them but does not decide.
+
+### 5.4 Three rounds or two: what each version can actually resolve
+
+The two levers are independent (nothing in C couples them), so the arm can be shortened. The costs are
+450 core-hours per round measured -- the campaign's own per-chain times sum to 448-461 -- so three
+rounds is about 1,350 core-hours and 48-55 h of wall clock (its rounds took 15.9-18.2 h), and two
+rounds is about 900 core-hours and roughly 36 h. What the third round buys:
+
+| question | 2 rounds | 3 rounds |
+| :-- | :-- | :-- |
+| dihedral: does the gap reach \|gap\| <= 0.05? | **YES, with authority**: the expected change is 0.12 (from -0.17 to the B-spline's +0.002 on seven chains) against a measured round-to-round noise of +-0.03, i.e. a factor of four, and it is visible after the first round and confirmed by the second | same, with one more confirmation |
+| angle: does the drift stop? | **PARTLY**: the first round after the change already carries a large signal -- with a self-consistent target the implied sigma should move from 0.3218 towards the sampled 0.4159 or settle near it, a 20-60 per cent change, against a sampled-sigma noise of about 1 per cent. But two rounds give ONE shape correlation and ONE amplitude comparison, so they can show the direction and not the trend: 'stopped' and 'slowed' look the same | **YES**: three fields give a two-interval trend in the implied sigma (is it still falling 4-5 per cent per round?), two shape correlations (does the sign stay positive?), and a decay comparison for the amplitude -- which is the criterion as written |
+
+**Recommendation:** if the operator wants the dihedral answer alone, two rounds is enough and the angle
+arm can be left out entirely (about 450 core-hours, 18 h). If the angle's drift is to be settled -- and
+it is the open question of the whole campaign, since neither rule has a fixed point there at full pool
+-- three rounds is the honest minimum, because the criterion is a trend.
+
+### 5.5 Failure modes, with the second one already realised
+
+1. **Step 0 shows no bad edge gap at full pool.** Disproved: it is -0.176 at round 8, with a tight
+   per-chain band. (Kept here as the record of what step 0 was for.)
+2. **The two coordinates need different things.** This is no longer a possibility -- it is the measured
+   result of C (the dihedral's lever is the basis, the angle's is the target), and this proposal is
+   written as a per-coordinate rule because of it. Why it is still worth doing: the machinery already
+   supports it (plan_c_loop's per-coordinate specs, used by every arm in this project), so the cost is
+   complexity in the operator table rather than feasibility, and the alternative -- one rule for every
+   coordinate -- is exactly what produced two different failures in one campaign. What would NOT be
+   worth it is a per-coordinate rule for a single coordinate with a marginal effect: that is why the
+   dihedral arm's criterion is a hard number (0.05) and why the angle arm is judged on its own target's
+   definition rather than on a metric that a self-consistent loop does not descend.
 3. **The moment operator's covariance does not accept the new basis without its own ridge.** The
    eigenvalue-relative rescaling was derived on the refit's Gram, not on moment_correction's
-   covariance. Offline check before the arm: build the B-spline design, form the operator's own
-   matrix, and read its condition number against ridge -- cheap, and it belongs in step 0.
-4. **The edge gap is chain-dependent.** The pool mixes 21-residue chains with a 2,929-residue one, and
-   the bimodality that produces an edge pile-up is a per-chain property. The per-chain histograms are
-   already stored, so step 0 reports the gap's distribution across chains, not just its pooled value;
-   if only a handful of chains show it, the arm should run on those rather than on 867.
-5. **Wall-clock risk.** 48-55 h of machine time for a change whose seven-chain effect is about 2x the
-   floor is a real cost; the campaign is checkpointed per task, so it can be stopped between rounds
-   without losing a round, and 3 rounds at 18 h is the number to approve.
+   covariance. Offline check before the arm: build the B-spline design, form the operator's own matrix,
+   and read its condition number against ridge -- cheap, and it belongs in step 0.
+4. **The edge gap is chain-dependent.** Step 0 says it is not (p10 to p90 spans 0.07 across 867 chains),
+   so the arm can run on the whole pool; that also settles the worry that only a handful of chains show
+   the pile-up.
+5. **Wall-clock risk.** 48-55 h for three rounds is a real cost; the campaign is checkpointed per task,
+   so it can be stopped between rounds without losing one, and the two-round version is the hedge.
 
-### 5.5 What it would cost NOT to run it
+### 5.6 What it would cost NOT to run it
 
-Nothing breaks: the production campaign finished, converged, and its fields are the record. What is
-lost is the only arm-level evidence that a local basis helps where the edge gap is bad at full pool
-scale. Given that step 0 is 15 minutes and the arm is two days, the recommendation is: **run step 0,
-then decide.** If step 0 shows the disease, the arm is worth it; if not, the seven-chain basis project
-closes with its answer recorded, and Plan B' keeps the edge-gap diagnostic, which is the durable part
-of this line of work.
+Nothing breaks: the production campaign finished, and its fields are the record. What is lost is the
+only arm-level evidence for the two things this project has measured and not yet tested at scale -- that
+a local basis closes the dihedral's edge gap, and that a self-consistent target stops the angle's drift.
+Both are cheap to state and expensive to assume: the dihedral's gap is a factor of three wrong in a
+quantity that the whole loop's update is built on, and the angle is the one coordinate where neither
+rule has a fixed point at full pool. The recommendation is unchanged and now better informed: **run the
+three-round version if the angle's drift is to be settled, the two-round version if only the dihedral's
+gap is; either way step 0 is already done and costs nothing further.**
+
 ## 6. Reproduce
 
 ```
