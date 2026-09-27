@@ -193,9 +193,9 @@ better than m=16 (3.3x against 2.1x the floor at round 4).
 
 ## 4. The angle arms (C)
 
-*Running now as scheduled task plan_c_angle, started 2026-09-27 14:39 (two arms, 6 workers each).
-This section is filled from results/plan_c/plan_c_CA16.json, plan_c_CBdep.json and their ensembles
-when they land; the design and its reasons are already fixed:*
+*Run as scheduled task plan_c_angle, 2026-09-27 14:39:54 to 15:23:17 (44 minutes, two arms in
+parallel, 6 workers each). Records: results/plan_c/plan_c_CA16.json, plan_c_CBdep.json,
+ensembles_CA16.npz, ensembles_CBdep.npz, fields/{CA16,CBdep}/. The design and its reasons:*
 
 - **CA16** -- the angle refitted on a B-spline m=16 (ridge 1e-3, eigenvalue-relative), bb_bond and the
   dihedral unchanged at C2s8's K=8 refit. This asks whether the BASIS was what limited the angle:
@@ -219,7 +219,59 @@ dihedral. Down-weighting would treat a symptom the measurement does not show.
 
 Both arms are read with the clean instrument (round-to-round ensemble distance against the same-field
 floor 0.0521 for the angle) AND with the two pooled quantities the task names: the moment residual
-|d<T>|max against the target, and sigma_sim against sigma_target.
+|d<T>|max against the reference, and sigma_sim against the reference's sigma.
+
+### 4.1 Measured
+
+|d<T>|max is the largest moment difference between the round's simulated ensemble and p_ref on
+ibi_bonded's K=8 Chebyshev design, and its noise floor is measured the same way as everything else in
+this project: the two independent trajectories of the same-field calibration run, compared with each
+other on that basis, read **0.0123**. sigma_ref is the reference's implied sigma, 0.32176 (its stored
+sigma is 0.32027 -- the two-denominator distinction again).
+
+| arm | r | step rms kJ | corr | edge mass | clean x floor | |d<T>|max | / floor | sigma ratio | ret pool |
+| :-- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| CA16 basis m=16 | 1 | 0.977 | -- | 0.115 | -- | 0.1609 | 13.1 | 1.188 | 0.384 |
+| | 2 | 0.262 | +0.58 | 0.118 | 2.15 | 0.1993 | 16.2 | 1.285 | 0.385 |
+| | 3 | 0.111 | +0.17 | 0.117 | **0.94** | 0.2092 | 17.0 | 1.266 | 0.384 |
+| | 4 | 0.163 | -0.09 | 0.128 | 1.34 | 0.2063 | 16.8 | 1.246 | 0.387 |
+| CBdep production rule | 1 | 0.932 | -- | 0.115 | -- | 0.1609 | 13.1 | 1.188 | 0.391 |
+| | 2 | 0.517 | +0.53 | 0.097 | 4.46 | 0.0631 | 5.1 | 1.203 | 0.401 |
+| | 3 | 0.378 | +0.87 | 0.104 | 1.31 | 0.0528 | 4.3 | 1.120 | 0.386 |
+| | 4 | 0.446 | +0.20 | 0.104 | 1.76 | **0.0417** | **3.4** | 1.170 | 0.389 |
+| C2s8 K=8 refit, same target as CA16 | 2 | 1.130 | -- | -- | 5.86 | 0.2564 | 20.9 | 1.496 | 0.392 |
+| | 3 | 0.440 | -- | -- | 2.96 | 0.2936 | 23.9 | 1.452 | 0.401 |
+| | 4 | 0.347 | -- | -- | 1.95 | 0.3234 | 26.3 | 1.487 | 0.401 |
+
+Round 1 is shared by construction: every arm samples the same start field with the same seed, so its
+ensemble, and therefore both pooled quantities, are identical to C2s8's. The arms diverge from round 2.
+
+### 4.2 Verdict: for the angle the lever is the TARGET, not the basis
+
+**CBdep closes both quantities the task named.** The moment residual falls 13.1 -> 5.1 -> 4.3 -> 3.4
+times the noise floor, monotonically, while the same-target baseline (C2s8) RISES to 26.3; and the
+sigma ratio comes down from 1.188 to 1.120-1.170 against the baseline's 1.487. The residual is the
+better-conditioned of the two (the sigma ratio is not monotone: 1.120 at round 3 against 1.170 at round
+4 on a four-round window), so the claim is stated on the residual and the sigma ratio is reported
+beside it. The step falls monotonically, the correlation stays positive, the clean distance reaches
+1.3-1.8x the floor, and retention never leaves 0.386-0.401.
+
+**CA16 converges, but to its own ensemble.** Its clean distance is the best of the three (0.94x the
+floor at round 3: the angle's ensemble stops moving entirely) and its step collapses to 0.111 kJ/mol --
+and yet the offset from the reference GROWS (residual 13.1 -> 16.8, sigma ratio 1.188 -> 1.246 against
+C2s8's 1.487). That is not a failure of the fit; it is what a self-consistent target means: the arm
+chases the ensemble its own field produced, that ensemble is wider than the reference, and the fit
+carries it further from the reference every round. Read correctly, CA16 answers a different question
+than the one the task asked: it says the BASIS was a limit for the angle's step and its self-motion
+(0.111 against C2s8's 0.347 at round 4, clean 1.34 against 1.95), and it says nothing about closing on
+the reference, because closing on the reference is not what its target is.
+
+**The two coordinates have opposite levers.** The dihedral's problem was the BASIS (a
+Chebyshev refit could not carry its edge mass, and the B-spline could); the angle's problem is the
+TARGET (a better basis leaves it chasing its own ensemble, while the production rule closes the
+reference gap by a factor of eight in the residual). Any full-pool change therefore has to be
+per-coordinate on the evidence so far, and that is exactly the trade-off written into failure mode 2 of
+section 5.
 
 ## 5. The full-pool validation: proposal (NOT launched -- this is the account the operator approves)
 
