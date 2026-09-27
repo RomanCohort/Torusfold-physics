@@ -187,9 +187,46 @@ BASIS_ARMS = {
 }
 
 
+# THE ANGLE ARMS (task D -> C -> A, 2026-09-27). Two arms on the seven-chain pool, gain 1.0, only the
+# angle changed, everything else identical to C2s8 and the D/B arms:
+#
+#   CA16    the angle refitted on a B-spline with m=16 instead of K=8 Chebyshev ("change the basis").
+#           Phase 1 measured the angle's residual against -kBT ln p at 1.1-2.2 kJ/mol for a Chebyshev
+#           design and 0.4-0.6 for a local one, so the basis IS a limit for it; this arm asks whether
+#           a basis that can express the marginal drives the residual down towards the noise.
+#   CBdep   the angle on the PRODUCTION rule for that coordinate: target p_ref (the deposited
+#           marginal), ibi_bonded.plan_update, gain 1.0 ("change the target"). The self-consistent
+#           target the task suggested is already what C2s8 uses for every coordinate (_target_from
+#           _counts builds -kBT ln p of the arm's own ensemble), so switching to it would change
+#           nothing; the deposited marginal is the other well-defined target, it is the one the
+#           production loop uses, and it is the only one whose sigma (0.32176) can be compared with
+#           the sampled sigma round after round.
+#
+# Why NOT the surgical variant the task offered, down-weighting the edge mass it believes no basis can
+# move: phase 1 measured the angle's IMPLIED edge mass to be 1.5-2.4x its target's for every family
+# (gap +0.10..+0.29), i.e. for the angle the fit OVER-delivers the edges rather than failing to reach
+# them. Down-weighting would treat a symptom the measurement does not show -- and the edge-mass
+# hypothesis is about the dihedral, where the deficit is real (-0.378 for the cycling Chebyshev arm
+# against |gap| <= 0.012 for every arm that converges).
+COORD_ARMS = {
+    "CA16": {"angle": ("bspline", 16, 1e-3)},
+    "CBdep": {"angle": ("plan_update", 1.0)},
+}
+
+
+def _arm_specs(arm):
+    """Every per-coordinate override this arm carries, gathered from the three registries."""
+    out = {}
+    for registry in (DIHEDRAL_ARMS, BASIS_ARMS, COORD_ARMS):
+        out.update(registry.get(arm, {}))
+    return out
+
+
 def _is_dihedral_arm(arm):
-    """Arms that override the dihedral's update: damping, table inversion, or a B-spline basis."""
-    return arm in DIHEDRAL_ARMS or arm in BASIS_ARMS
+    """True for any arm that overrides one coordinate's update. The name is historical: it grew from
+    the dihedral 2-cycle arms (damping, table inversion, B-spline basis) and now covers the angle's
+    too, which is why it is not renamed out from under the tests that pin it."""
+    return bool(_arm_specs(arm))
 
 
 def _coord_spec(arm, coord, default_gain=1.0):
@@ -202,7 +239,7 @@ def _coord_spec(arm, coord, default_gain=1.0):
     D and B arms single-variable experiments, and getting it wrong is silent: every coordinate of
     "dtbl" would fall through to "unknown arm" (measured, by the test that caught this).
     """
-    spec = DIHEDRAL_ARMS.get(arm, {}).get(coord) or BASIS_ARMS.get(arm, {}).get(coord)
+    spec = _arm_specs(arm).get(coord)
     if spec is None:
         if _is_dihedral_arm(arm):
             return {"kind": "chebyshev_ridge", "gain": float(default_gain), "m": None,
@@ -221,8 +258,8 @@ def _uses_refit(arm):
 
 
 def _spec_for(arm, coord, default_gain):
-    """(operator, gain) for one coordinate under one arm; the D arms change ONLY the dihedral."""
-    spec = DIHEDRAL_ARMS.get(arm, {}).get(coord)
+    """(operator, gain[, m, ridge]) for one coordinate under one arm, or the refit default."""
+    spec = _arm_specs(arm).get(coord)
     return spec if spec else ("chebyshev_ridge", default_gain)
 
 

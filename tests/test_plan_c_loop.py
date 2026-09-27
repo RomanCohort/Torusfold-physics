@@ -352,6 +352,18 @@ def test_dihedral_arm_specs_change_only_the_dihedral():
             assert L._spec_for(arm, coord, 1.0) == ("chebyshev_ridge", 1.0), (arm, coord)
 
 
+def test_angle_arms_change_only_the_angle():
+    """CA16 moves the angle to a local basis; CBdep moves it to the production rule (deposited
+    target). bb_bond and the dihedral must stay the C2s refit, or the C comparison is two variables."""
+    assert L._spec_for("CA16", "angle", 1.0) == ("bspline", 16, 1e-3)
+    assert L._spec_for("CBdep", "angle", 1.0) == ("plan_update", 1.0)
+    for arm in ("CA16", "CBdep"):
+        for coord in ("bb_bond", "dihedral"):
+            assert L._spec_for(arm, coord, 1.0) == ("chebyshev_ridge", 1.0), (arm, coord)
+    assert L._uses_refit("CA16") and L._uses_refit("CBdep")
+    assert not L._uses_refit("C0")
+
+
 def test_dihedral_arms_are_guarded_and_plain_c0_is_not_rerouted():
     """The guard and the stop-on-refusal apply to any arm whose step is a fit -- including the D
     arms -- while a plain C0 must keep the production rule at gain 1.0 whatever else is set."""
