@@ -572,3 +572,56 @@ at round 5 (bb_bond / angle / dihedral), with the estimated relative-entropy dro
 0.014 kBT per round.
 
 
+## Part 8 — The angle has no fixed point under the moment operator (2026-09-27)
+
+Part 7 left one observation unexplained: under the moment operator the angle's table implied sigma
+falls every round (0.15112, 0.14390, 0.13583, 0.13065 over rounds 5-8) while the other three
+coordinates move by under 2 percent. `scripts/ibi_angle_narrowing.py` separates the two readings
+that fit those numbers -- a coupling-compensated FIXED POINT, or an update that is being ABSORBED --
+using only the task files and tables on disk. The answer is the second one, and three independent
+signatures say so.
+
+**1. The sampled marginal does not follow the table.** Pooled over all 867 chains, per round:
+
+| round | angle sigma_sim | implied sigma | sim/implied | edge mass | |d<T>|max |
+| --: | --: | --: | --: | --: | --: |
+| 5 | 0.38847 | 0.15112 | 2.571 | 0.105 | 0.0667 |
+| 6 | 0.35903 | 0.14390 | 2.495 | 0.111 | 0.0470 |
+| 7 | 0.35413 | 0.13583 | 2.607 | 0.115 | 0.0223 |
+| 8 | 0.34930 | 0.13065 | 2.674 | 0.114 | 0.0214 |
+
+The reference's own angle sigma is 0.32176. So the sampled width sits 9 percent ABOVE the target and
+falls 1.4 percent per round, while the table's implied width sits 2.5x BELOW the target and falls 4
+percent per round: the two are separating, not meeting. A fixed point would have both rates going to
+zero together; neither does.
+
+**2. The operator's own residual stops falling.** |d<T>|max 0.0470 -> 0.0223 -> 0.0214: the last
+ratio is 0.96 against 0.47 before it, and 0.021 is about 200x the histogram's own noise floor (of
+order 1e-4 at 3.3e8 samples per coordinate-round). A correction of 1.68 kJ/mol that no longer reduces
+the quantity it is computed from is a correction the coupling is absorbing.
+
+**3. The step direction becomes CONSISTENT, which is the opposite of the dihedral's cycle.** The
+angle's consecutive table steps correlate +0.176 then **+0.896**; the dihedral's 2-cycle read -0.853
+then -0.936. A positive correlation that grows means the loop is walking in one direction, not
+overshooting back and forth: the mean drift is +1.098 kJ/mol per round at bin 999 (x = 0.909, the
+right edge) with rms 0.490 across the support, and the scatter about that drift is 0.442 -- a drift
+with an overshoot superimposed, not a cycle.
+
+**The mechanism is the one the basis project found from the other side.** Measured offline on the
+seven-chain pool, the angle's target carries edge mass that no family can move (the fitted-minus-
+target edge gap stays +0.10..+0.29 for Chebyshev, B-splines and the table alike), and the K=8
+Chebyshev residual on it is 0.4-2.2 kJ/mol depending on ridge. So the operator keeps asking for the
+same thing, the basis cannot deliver it, and the table walks: the correction is absorbed by the
+coupling instead of changing the sampled edge.
+
+**What this means for the next campaign.** Both operators fail on the angle at full pool, in
+different ways: the table operator rings between 3.0 and 4.3 kJ/mol for six rounds, and the moment
+operator drifts without a fixed point. That is one coordinate, and it is the coordinate whose
+sampled marginal its own table explains least -- the coupling dominates it (Part 7). Note the
+cross-link to Plan C: there the angle converged (its clean inter-round distance fell to 2.0-2.4x the
+same-field floor) on a SELF-CONSISTENT target, on a seven-chain pool. The pooled deposited marginal
+for the angle may simply be unattainable through this coupling, in which case no operator will close
+it and the target, not the update, is what has to change for this coordinate.
+
+
+
