@@ -1,17 +1,20 @@
 @echo off
-REM ─────────────────────────────────────────────────────────────────────────────
+REM ============================================================================
 REM  Follow the CURRENT run's log file in a terminal.
 REM
-REM  Use this when the server is already running (perhaps started from the web
-REM  UI, or in another window) and you just want to watch a prediction. It finds
-REM  the newest file in output_web\logs and follows it.
+REM  Use this when the server is already running (perhaps started from start.bat,
+REM  or in another window) and you just want to watch a prediction. It finds the
+REM  newest file in output_web\logs and follows it.
 REM
 REM  Why this works: the server mirrors everything the browser sees to a
-REM  line-buffered log file, so it is written as the run happens rather than
-REM  when some buffer happens to fill.
+REM  line-buffered log file, so it is written as the run happens rather than when
+REM  some buffer happens to fill.
 REM
 REM  Ctrl+C stops following. It does NOT stop the server.
-REM ─────────────────────────────────────────────────────────────────────────────
+REM
+REM  NOTE: ASCII-only on purpose. A .bat is read as bytes in the console's active
+REM  code page, so non-ASCII characters here are parsed as stray commands.
+REM ============================================================================
 setlocal
 
 cd /d "%~dp0"
