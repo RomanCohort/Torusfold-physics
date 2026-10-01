@@ -224,6 +224,8 @@ def use_table_file(path, coord=None):
     coord=None sets both; the file only needs the keys for the coordinates actually asked about.
     """
     z = np.load(path)
+    # A new install invalidates any per-device copy force_reference holds for the old one.
+    getattr(FR, "_DEVICE_TABLES", {}).clear()
     for c, attr in (("angle", "_ANGLE_TABLE"), ("dihedral", "_TABLE"), ("bb_bond", "_BOND_TABLE")):
         if coord is not None and c != coord:
             continue
@@ -260,12 +262,10 @@ def make_potential(coord, spec):
     fn = _FORCE_FN[coord]
 
     def potential(pos):
-        if pos.device.type != "cpu":
-            raise NotImplementedError(
-                "the tabulated potentials live on cpu -- force_reference loads them once, on the "
-                "device it is imported from -- and the IBI sampler runs on cpu. Supporting cuda "
-                "means moving the table tensors and the interpolation together, not just this "
-                "call, so it is left until something needs it.")
+        # NO DEVICE GUARD ANY MORE. force_reference resolves the installed table per call from
+        # pos.device, so the tensors _interp indexes follow the coordinates; a cuda caller gets a
+        # cuda copy of U (cached until the next use_table_file) and the scalars travel as floats.
+        # The cpu numbers are unchanged, which is what tests/test_table_potential_device.py pins.
         e, f = fn(spec, pos)
         return e.to(pos.dtype), f.to(pos.dtype)
 

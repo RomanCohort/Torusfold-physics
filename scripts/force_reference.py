@@ -126,6 +126,57 @@ def bond_table():
     return _BOND_TABLE
 
 
+# THE TABLES FOLLOW THE COORDINATES' DEVICE -- the one thing that has to move for a cuda caller.
+#
+# _interp indexes U with an index tensor DERIVED FROM q, so a cpu U and a cuda q cannot be combined at
+# all; the scalars (lo, binw, the bond's hi and edge slopes) are Python floats and travel with the
+# arithmetic on any device. That is the whole of cg_potentials.make_potential's note ("supporting cuda
+# means moving the table tensors and the interpolation together, not just this call"). The record the
+# run INSTALLED -- cg_potentials.use_table_file sets these globals, which is how an IBI round swaps in
+# round N-1's table -- stays the authority; this only ever moves its U, and use_table_file clears the
+# per-device copies when it installs a new one.
+_DEVICE_TABLES: dict = {}
+_KIND_GLOBAL = {"dihedral": "_TABLE", "angle": "_ANGLE_TABLE", "bb_bond": "_BOND_TABLE"}
+
+
+def _load_default(kind, device="cpu"):
+    """The shipped table for kind, on device. Same fields the three accessors always returned."""
+    z = np.load(REPO / "results" / "boltzmann_tables_clean.npz")
+    rec = {"lo": float(z[f"{kind}__lo"]), "binw": float(z[f"{kind}__binw"]),
+           "U": torch.tensor(z[f"{kind}__U"], dtype=torch.float64, device=device)}
+    if kind == "bb_bond":
+        U, binw = rec["U"], rec["binw"]
+        rec["hi"] = rec["lo"] + binw * len(U)
+        rec["slope_lo"] = float(max((U[1] - U[0]) / binw, 0.0))
+        rec["slope_hi"] = float(max((U[-1] - U[-2]) / binw, 0.0))
+    return rec
+
+
+def table_for(kind, device="cpu"):
+    """The installed table for kind as tensors ON device (cached per device).
+
+    Installed means whichever record the three accessors below hold -- the shipped file, or whatever
+    cg_potentials.use_table_file last set. On cpu the record itself is returned, so the numbers a cpu
+    caller sees cannot change; on another device only U is copied, which is the one tensor _interp
+    has to index with something derived from q.
+    """
+    g = globals()
+    base = g.get(_KIND_GLOBAL[kind])
+    if base is None:
+        base = _load_default(kind, "cpu")
+        g[_KIND_GLOBAL[kind]] = base
+    if str(device) == "cpu":
+        return base
+    key = (kind, str(device))
+    rec = _DEVICE_TABLES.get(key)
+    if rec is None or rec.get("_src") is not base:
+        rec = dict(base)
+        rec["U"] = base["U"].to(device)
+        rec["_src"] = base
+        _DEVICE_TABLES[key] = rec
+    return rec
+
+
 def _interp(q, t):
     """Linear interpolation of the table, matching boltzmann_bonded._sample (bin centres)."""
     u = (q - t["lo"]) / t["binw"] - 0.5
@@ -190,13 +241,12 @@ def _v_fn(spec, coord="dihedral"):
                 "fourier expands in Chebyshev polynomials, which are orthogonal on q in [-1, 1]; "
                 "the bond coordinate is an unbounded distance.")
         if spec == "table":
-            t = bond_table()
-            return lambda q: _interp(q, t)
+            return lambda q: _interp(q, table_for("bb_bond", q.device))
         if isinstance(spec, tuple) and spec[0] == "table_wall":
-            t = bond_table()
             k_wall = float(spec[1])
 
-            def _table_wall(q, t=t, k_wall=k_wall):
+            def _table_wall(q, k_wall=k_wall):
+                t = table_for("bb_bond", q.device)
                 """The table plus the wall, identical to boltzmann_bonded.energy's expression.
                 Load-bearing here, not optional: the stored table is flat at both edges, so
                 without this the potential has no restoring force outside its support."""
@@ -222,15 +272,15 @@ def _v_fn(spec, coord="dihedral"):
         k, q0 = float(spec[1]), float(spec[2])
         return lambda q: 0.5 * k * (q - q0) ** 2
     if spec == "table":
-        t = tbl()
-        return lambda q: _interp(q, t)
+        return lambda q: _interp(q, table_for(coord, q.device))
     if isinstance(spec, tuple) and spec[0] == "table_jac":
-        t = tbl()
         eps = spec[1]
         if eps is None:
-            return lambda q: _interp(q, t) - 0.5 * KBT * torch.log(torch.clamp(1.0 - q * q, min=1e-8))
+            return lambda q: (_interp(q, table_for(coord, q.device))
+                              - 0.5 * KBT * torch.log(torch.clamp(1.0 - q * q, min=1e-8)))
         e2 = eps * eps
-        return lambda q: _interp(q, t) - 0.5 * KBT * torch.log(torch.clamp(1.0 - q * q, min=e2))
+        return lambda q: (_interp(q, table_for(coord, q.device))
+                          - 0.5 * KBT * torch.log(torch.clamp(1.0 - q * q, min=e2)))
     if isinstance(spec, tuple) and spec[0] == "fourier":
         K = [torch.tensor(float(x), dtype=torch.float64) for x in spec[1]]
         return lambda q: sum(K[n] * _T(q, n) for n in range(len(K)))
