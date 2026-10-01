@@ -21,6 +21,7 @@ Reference: isRNAcircLong_design.md
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import socket
 import subprocess
@@ -666,11 +667,32 @@ def isrnaclong_pipeline(
     # checkpoint resume: checkpoint file
     _ckpt_path = output_path / "_checkpoint.json"
     ckpt = _load_checkpoint(_ckpt_path) if resume else {}
+
+    # A checkpoint belongs to the sequence that produced it. Resuming one under a
+    # different sequence is silent corruption: the coordinates, pairs and
+    # segment layout all describe the old chain, and nothing downstream can tell.
+    # Only checkpoints written from here on carry the fingerprint; an older one
+    # has no "seq_sha1" and is accepted exactly as it was before.
+    if ckpt:
+        _want = hashlib.sha1(sequence.encode("utf-8")).hexdigest()
+        _have = ckpt.get("seq_sha1")
+        if _have is not None and _have != _want:
+            if verbose:
+                print(f"  [resume] checkpoint is for a different sequence "
+                      f"({str(_have)[:8]} != {_want[:8]}); starting fresh")
+            ckpt = {}
+            _ckpt_path.unlink(missing_ok=True)
+        elif _have is None and verbose:
+            print("  [resume] checkpoint has no sequence fingerprint; "
+                  "accepting it, but it cannot be checked against this input")
+
     _raw_level = ckpt.get("level", -1)
     ckpt_level = float(_raw_level) if _raw_level is not None else -1
     # cumulative checkpoint: each Level appends fields; the full dict is written on save
     # (prevents field loss by overwriting)
     _ckpt_data = dict(ckpt)
+    _ckpt_data.setdefault("seq_sha1", hashlib.sha1(sequence.encode("utf-8")).hexdigest())
+    _ckpt_data.setdefault("seq_len", len(sequence))
 
     def _save_ckpt(level: float, **extra):
         """Append fields to _ckpt_data and save it."""
@@ -757,9 +779,31 @@ def isrnaclong_pipeline(
                 md = _RNA_DL.md(); fc = _RNA_DL.fold_compound(seq, md)
                 ss, _ = fc.mfe(); return ss
             # DivideFold runs as a pure-CPU subprocess (GPU devices hidden in its env)
-            _dd_runner = os.environ.get("TF_DIVIDEFOLD_RUNNER") or os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "scripts", "_dd_runner.py")
+            #
+            # The runner lives in this repository's own scripts/ directory. The
+            # path used to be built as dirname(__file__)/../../.. + "scripts", which
+            # resolves to <repo>/scripts only if you forget that `parents[3]` is
+            # already the repo root — the extra ../../.. walked OUT of the checkout,
+            # so the subprocess was launched against a path that never existed and
+            # every run logged "can't open file".
+            # Resolution order: explicit override, then <repo>/scripts, then a
+            # scripts/ directory beside the configured DivideFold checkout.
+            _dd_runner = os.environ.get("TF_DIVIDEFOLD_RUNNER")
+            if not _dd_runner:
+                _repo_root = Path(__file__).resolve().parents[3]
+                for _candidate in (
+                    _repo_root / "scripts" / "_dd_runner.py",
+                    Path(_dd_root).resolve().parent / "scripts" / "_dd_runner.py",
+                ):
+                    if _candidate.is_file():
+                        _dd_runner = str(_candidate)
+                        break
             _sys_python = os.environ.get("TF_DIVIDEFOLD_PYTHON") or sys.executable
+            if not _dd_runner or not os.path.isfile(_dd_runner):
+                raise FileNotFoundError(
+                    "DivideFold runner not found; expected scripts/_dd_runner.py in "
+                    "the repository, or set TF_DIVIDEFOLD_RUNNER to its path"
+                )
             try:
                 _dd_result = subprocess.run(
                     [_sys_python, _dd_runner, "--seq", sequence, "--max-frag", "200"],
@@ -1885,6 +1929,10 @@ def isrnaclong_pipeline(
     # ── Level 2.6: PyRosetta conditional refinement (WSL, socket preferred) ──
     if not os.path.exists(_final_aa_path):
         _final_aa_path = str(output_path / "final_allatom.pdb")
+    # Guard is defined at function scope: the read at the end of this block is
+    # outside the `elif` that would assign it, so leaving it to the branch made
+    # an unbound-local whenever PyRosetta was off or the input PDB was missing.
+    _l26_ok = False
     if ckpt.get("pyrosetta_done"):
         if verbose:
             print(f"\n[Level 2.6] restored from checkpoint")
@@ -2242,6 +2290,9 @@ def isrnaclong_pipeline(
             )
 
     # ── Level 5: AMBER RNA.OL3 all-atom refinement (with C1'-C1' pair restraints) ──
+    # Same guard rule as Level 2.6: defined here, not inside the `else` branch of
+    # the checkpoint test, because the read below sits outside both branches.
+    _l5_ok = False
     if ckpt_level >= 5:
         if verbose:
             print(f"\n[Level 5] restored from checkpoint")

@@ -11,6 +11,12 @@
   function fmt(v, d) { return typeof v === 'number' ? v.toFixed(d || 2) : '--'; }
   function fmtPct(v) { return typeof v === 'number' ? (v * 100).toFixed(1) + '%' : '--'; }
 
+  /* Resolve a design token to a colour string. Only for the two call sites that
+     hand a colour to a canvas: everything else should name the token in CSS. */
+  function _tok(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
   function makeCard(label, value, color) {
     return '<div class="scalar-card"><div class="k">' + label + '</div><div class="v" style="color:' + (color || 'var(--accent)') + '">' + value + '</div></div>';
   }
@@ -219,17 +225,23 @@
       var canvas = document.createElement('canvas');
       canvas.width = 100; canvas.height = 100;
       canvas.style.cssText = 'width:80px;height:80px';
+      // Canvas cannot resolve var(), and Charts keeps its token reader private,
+      // so read the two tokens this widget needs here and pass them down.
+      var cs = getComputedStyle(document.documentElement);
+      var cAccent = cs.getPropertyValue('--accent').trim();
+      var cWarn = cs.getPropertyValue('--warn').trim();
       Charts.drawDonut(canvas, [
-        { value: ds.dsRNA_pct || 0, color: '#4d8dff' },
-        { value: ds.ssRNA_pct || 0, color: '#fbbf24' },
+        { value: ds.dsRNA_pct || 0, color: cAccent },
+        { value: ds.ssRNA_pct || 0, color: cWarn },
       ], { centerText: (ds.dsRNA_pct || 0).toFixed(0) + '%' });
 
       balanceEl.innerHTML = '';
       balanceEl.appendChild(canvas);
       var info = document.createElement('div');
       info.className = 'ib-info';
-      info.innerHTML = '<div class="ib-row"><span class="ib-label">dsRNA</span><span class="ib-val" style="color:#4d8dff">' + (ds.dsRNA_nt || 0) + ' nt (' + fmt(ds.dsRNA_pct, 1) + '%)</span></div>' +
-        '<div class="ib-row"><span class="ib-label">ssRNA</span><span class="ib-val" style="color:#fbbf24">' + (ds.ssRNA_nt || 0) + ' nt (' + fmt(ds.ssRNA_pct, 1) + '%)</span></div>';
+      // Inline styles do resolve var(), so these two can name the token directly.
+      info.innerHTML = '<div class="ib-row"><span class="ib-label">dsRNA</span><span class="ib-val" style="color:var(--accent)">' + (ds.dsRNA_nt || 0) + ' nt (' + fmt(ds.dsRNA_pct, 1) + '%)</span></div>' +
+        '<div class="ib-row"><span class="ib-label">ssRNA</span><span class="ib-val" style="color:var(--warn)">' + (ds.ssRNA_nt || 0) + ' nt (' + fmt(ds.ssRNA_pct, 1) + '%)</span></div>';
       if (ds.note) info.innerHTML += '<div class="legend" style="margin-top:6px">' + ds.note + '</div>';
       balanceEl.appendChild(info);
     }
@@ -253,9 +265,10 @@
     if (flexEl && flex.most_flexible) {
       var html2 = makeCard('Mean Flexibility', fmt(flex.mean_flexibility_A, 4) + ' A');
       for (var j = 0; j < Math.min(5, flex.most_flexible.length); j++) {
-        var f = flex.most_flexible[j];
-        var color = f.flexibility > 0.04 ? 'var(--err)' : f.flexibility > 0.02 ? 'var(--warn)' : 'var(--ok)';
-        html2 += '<div class="flex-card"><span class="flex-pos">' + f.pos + '</span><span class="flex-region">' + f.region + '</span><span class="flex-val" style="color:' + color + '">' + f.flexibility.toFixed(4) + '</span></div>';
+        var f = flex.most_flexible[j] || {};
+        var fv = typeof f.flexibility === 'number' ? f.flexibility : null;
+        var color = fv == null ? 'var(--ink-3)' : fv > 0.04 ? 'var(--err)' : fv > 0.02 ? 'var(--warn)' : 'var(--ok)';
+        html2 += '<div class="flex-card"><span class="flex-pos">' + f.pos + '</span><span class="flex-region">' + f.region + '</span><span class="flex-val" style="color:' + color + '">' + fmt(fv, 4) + '</span></div>';
       }
       flexEl.innerHTML = html2;
     }
@@ -270,7 +283,8 @@
       html3 += '<div class="receptor-card"><div class="rc-val">' + fmt(rb.ssRNA_GU_sasa, 3) + '</div><div class="rc-label">GU SASA</div></div>';
       html3 += '</div>';
       if (rb.note) html3 += '<div class="legend">' + rb.note + '</div>';
-      rbEl.querySelector('h2').insertAdjacentHTML('afterend', html3);
+      var rbHead = rbEl.querySelector('h2');
+      if (rbHead) rbHead.insertAdjacentHTML('afterend', html3);
     }
   };
 
@@ -329,19 +343,32 @@
       Charts.drawHeatmapStrip(heatmapCanvas, energyVals, result.ires_bounds ? { IRES: result.ires_bounds, CDS: result.cds_bounds } : null);
     }
 
-    // Top penalized list
+    // Top penalized list.
+    // serve.py emits each entry as the tuple [pos, region, energy]; the renderer
+    // wants named fields. Normalise here rather than at either end, so both an
+    // array payload and an object payload render the same.
     var topEl = $('energy-top-list');
-    if (topEl && pr.top_penalized) {
+    if (topEl && pr.top_penalized && pr.top_penalized.length) {
       topEl.innerHTML = '';
+      var norm = function (e) {
+        if (Array.isArray(e)) return { pos: e[0], region: e[1], energy: e[2] };
+        if (e && typeof e === 'object') return e;
+        return { pos: '--', region: '', energy: null };
+      };
+      var rows = [];
+      for (var ti = 0; ti < pr.top_penalized.length; ti++) rows.push(norm(pr.top_penalized[ti]));
       var maxE = 0;
-      for (var k = 0; k < pr.top_penalized.length; k++) maxE = Math.max(maxE, pr.top_penalized[k].energy || 0);
-      for (var k2 = 0; k2 < Math.min(10, pr.top_penalized.length); k2++) {
-        var tp2 = pr.top_penalized[k2];
-        var pct = maxE > 0 ? (tp2.energy / maxE * 100) : 0;
+      for (var k = 0; k < rows.length; k++) {
+        if (typeof rows[k].energy === 'number') maxE = Math.max(maxE, rows[k].energy);
+      }
+      for (var k2 = 0; k2 < Math.min(10, rows.length); k2++) {
+        var tp2 = rows[k2];
+        var eAbs = typeof tp2.energy === 'number' ? Math.abs(tp2.energy) : 0;
+        var pct = maxE > 0 ? (eAbs / maxE * 100) : 0;
         topEl.innerHTML += '<div class="energy-top-item">' +
           '<span class="etp-pos">' + tp2.pos + '</span>' +
           '<span class="etp-region" data-region="' + tp2.region + '">' + tp2.region + '</span>' +
-          '<span class="etp-energy">' + tp2.energy.toFixed(1) + '</span>' +
+          '<span class="etp-energy">' + fmt(tp2.energy, 1) + '</span>' +
           '<span class="etp-bar"><span class="etp-bar-fill" style="width:' + pct + '%"></span></span></div>';
       }
     }
@@ -365,12 +392,12 @@
 
     // Stem histogram
     if (sl.stem_lengths && sl.stem_lengths.length > 0) {
-      Charts.drawHistogram($('stem-histogram'), sl.stem_lengths, { binWidth: 1, barColor: '#4d8dff', label: 'Stem Length (bp)' });
+      Charts.drawHistogram($('stem-histogram'), sl.stem_lengths, { binWidth: 1, barColor: _tok('--accent'), label: 'Stem Length (bp)' });
     }
 
     // Loop histogram
     if (sl.loop_lengths && sl.loop_lengths.length > 0) {
-      Charts.drawHistogram($('loop-histogram'), sl.loop_lengths, { binWidth: 20, barColor: '#a855f7', label: 'Loop Length (nt)' });
+      Charts.drawHistogram($('loop-histogram'), sl.loop_lengths, { binWidth: 20, barColor: _tok('--ink-3'), label: 'Loop Length (nt)' });
     }
 
     // MFE cards
@@ -432,19 +459,23 @@
 
   /* ═══════════════ MASTER RENDER ═══════════════ */
 
+  /* Each renderer runs inside its own try/catch. They are independent panels,
+     but a plain sequential call makes them share a fate: one TypeError on a
+     field the server omitted would abort the whole chain and leave every panel
+     after it empty, which reads as "prediction produced nothing". The name is
+     logged so the failing panel can be identified from the console. */
   Panels.renderAll = function (result) {
     if (!result) return;
-    Panels.renderScoring(result);
-    Panels.renderPhysical(result);
-    Panels.renderCircDesign(result);
-    Panels.renderQualityMetrics(result);
-    Panels.renderPairDist(result);
-    Panels.renderPairQuality(result);
-    Panels.renderStats(result);
-    Panels.renderImmune(result);
-    Panels.renderSequence(result);
-    Panels.renderThermo(result);
-    Panels.renderShape(result);
+    var renderers = ['renderScoring','renderPhysical','renderCircDesign','renderQualityMetrics',
+      'renderPairDist','renderPairQuality','renderStats','renderImmune','renderSequence',
+      'renderThermo','renderShape'];
+    for (var i = 0; i < renderers.length; i++) {
+      try {
+        Panels[renderers[i]](result);
+      } catch (e) {
+        if (window.console) console.error('[TorusFold] ' + renderers[i] + ' failed:', e);
+      }
+    }
   };
 
 })();

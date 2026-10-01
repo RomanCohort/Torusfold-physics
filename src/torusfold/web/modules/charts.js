@@ -4,12 +4,33 @@
   const TF = window.TorusFold = window.TorusFold || {};
   const Charts = TF.Charts = {};
 
-  const COLORS = {
-    ok: '#34d399', warn: '#fbbf24', err: '#f87171',
-    accent: '#4d8dff', accent2: '#00d4ff', accent3: '#a855f7',
-    t1: '#f0f2f8', t2: '#8899cc', t3: '#556699',
-    grid: 'rgba(56,89,160,0.12)', bg: 'rgba(4,6,14,0.4)',
+  /* Canvas 2D and SVG attributes cannot resolve var(), so the design tokens are
+     read off the document once and cached. Never hard-code a colour here again:
+     the charts would stop matching the panels around them, and would not follow
+     the theme switch. */
+  const FALLBACK = {
+    ok:'#1d7a4c', warn:'#8a5f10', err:'#b3352a', accent:'#0f7d72',
+    'accent-ink':'#ffffff', ink:'#151a18', 'ink-2':'#46504d',
+    'ink-3':'#5e6a66', 'hair-2':'#c4bfb1', panel:'#fffefb', well:'#f1efe9',
   };
+  let _tokenCache = null;
+  function tokenColor(name) {
+    if (!_tokenCache) {
+      _tokenCache = {};
+      const probe = document.createElement('canvas').getContext('2d');
+      for (const k in FALLBACK) {
+        const raw = getComputedStyle(document.documentElement).getPropertyValue('--' + k).trim();
+        probe.fillStyle = '#000';
+        probe.fillStyle = raw || FALLBACK[k];   // an invalid value leaves fillStyle untouched
+        _tokenCache[k] = probe.fillStyle;
+      }
+    }
+    return _tokenCache[name] || FALLBACK[name] || '#000';
+  }
+  /* Charts drawn before a theme switch keep the old colours until redrawn. */
+  Charts.refreshTokens = function () { _tokenCache = null; };
+
+  function C(name) { return tokenColor(name); }
 
   /* ── SVG Gauge (semicircle) ── */
   Charts.createGauge = function (value, max, title, unit, thresholds, invert) {
@@ -22,7 +43,7 @@
     const bg = document.createElementNS(ns, 'path');
     bg.setAttribute('d', describeArc(cx, cy, r, sa, ea));
     bg.setAttribute('fill', 'none');
-    bg.setAttribute('stroke', 'rgba(56,89,160,0.15)');
+    bg.setAttribute('stroke', C('hair-2'));
     bg.setAttribute('stroke-width', '8');
     bg.setAttribute('stroke-linecap', 'round');
     svg.appendChild(bg);
@@ -55,7 +76,7 @@
     t1.setAttribute('x', cx);
     t1.setAttribute('y', 12);
     t1.setAttribute('text-anchor', 'middle');
-    t1.setAttribute('fill', '#556699');
+    t1.setAttribute('fill', C('ink-3'));
     t1.setAttribute('font-size', '10');
     t1.textContent = title;
     svg.appendChild(t1);
@@ -82,8 +103,8 @@
   }
 
   function gaugeColor(v, th, inv) {
-    if (inv) return v > th.good ? COLORS.ok : v > th.warn ? COLORS.warn : COLORS.err;
-    return v < th.good ? COLORS.ok : v < th.warn ? COLORS.warn : COLORS.err;
+    if (inv) return v > th.good ? C('ok') : v > th.warn ? C('warn') : C('err');
+    return v < th.good ? C('ok') : v < th.warn ? C('warn') : C('err');
   }
 
   /* ── Canvas Histogram ── */
@@ -99,7 +120,7 @@
     ctx.clearRect(0, 0, W, H);
 
     const binWidth = opts.binWidth || 2;
-    const barColor = opts.barColor || COLORS.accent;
+    const barColor = opts.barColor || C('accent');
     const label = opts.label || '';
 
     // Compute bins
@@ -115,7 +136,7 @@
     const barW = Math.max(2, cw / binCount - 1);
 
     // Grid
-    ctx.strokeStyle = COLORS.grid;
+    ctx.strokeStyle = C('hair-2');
     ctx.lineWidth = 1;
     for (let i = 0; i <= 3; i++) {
       const y = pad.top + (i / 3) * ch;
@@ -136,7 +157,7 @@
     }
 
     // X-axis label
-    ctx.fillStyle = COLORS.t3;
+    ctx.fillStyle = C('ink-3');
     ctx.font = '9px JetBrains Mono, monospace';
     ctx.textAlign = 'center';
     ctx.fillText(label || `bin width=${binWidth}`, W / 2, H - 4);
@@ -173,8 +194,8 @@
 
       // Label inside if wide enough
       if (w > 30) {
-        ctx.fillStyle = '#fff';
-        ctx.font = '10px Inter, sans-serif';
+        ctx.fillStyle = C('accent-ink');
+        ctx.font = '10px "Segoe UI", Inter, system-ui, sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(seg.label, x + w / 2, pad.top + barH / 2 + 4);
       }
@@ -214,7 +235,7 @@
 
     // Center text
     if (opts && opts.centerText) {
-      ctx.fillStyle = COLORS.t1;
+      ctx.fillStyle = C('ink');
       ctx.font = 'bold 14px JetBrains Mono, monospace';
       ctx.textAlign = 'center';
       ctx.fillText(opts.centerText, cx, cy + 5);
@@ -248,7 +269,7 @@
 
     // Region boundaries
     if (regionBounds) {
-      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.strokeStyle = C('hair-2');
       ctx.setLineDash([2, 2]);
       ctx.lineWidth = 1;
       for (const [name, bounds] of Object.entries(regionBounds)) {
@@ -264,16 +285,30 @@
     }
   };
 
-  function divergingColor(t) {
-    // t in [-1, 1]: blue (negative) → white (zero) → red (positive)
-    t = Math.max(-1, Math.min(1, t));
-    if (t < 0) {
-      const k = 1 + t; // 0 at t=-1, 1 at t=0
-      return `rgb(${Math.round(44 + (240 - 44) * k)}, ${Math.round(62 + (240 - 62) * k)}, ${Math.round(178 + (240 - 178) * k)})`;
-    } else {
-      const k = t;
-      return `rgb(${Math.round(240 + (248 - 240) * k)}, ${Math.round(240 - (240 - 113) * k)}, ${Math.round(240 - (240 - 113) * k)})`;
+  /* Parse any resolved CSS colour into [r, g, b] so two tokens can be mixed. */
+  function rgbOf(name) {
+    const probe = document.createElement('canvas').getContext('2d');
+    probe.fillStyle = '#000';
+    probe.fillStyle = tokenColor(name);
+    const hex = probe.fillStyle;
+    if (hex.charAt(0) === '#') {
+      return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
     }
+    const m = hex.match(/\d+/g);
+    return m ? [+m[0], +m[1], +m[2]] : [128, 128, 128];
+  }
+
+  /* Diverging ramp anchored on tokens, so it stays legible on either theme:
+     accent for negative, panel at zero, error for positive. A white midpoint --
+     what this used to hard-code -- vanishes against the dark panel. */
+  function divergingColor(t) {
+    t = Math.max(-1, Math.min(1, t));
+    const end = t < 0 ? rgbOf('accent') : rgbOf('err');
+    const mid = rgbOf('panel');
+    const k = Math.abs(t);
+    return 'rgb(' + Math.round(mid[0] + (end[0] - mid[0]) * k) + ', ' +
+                    Math.round(mid[1] + (end[1] - mid[1]) * k) + ', ' +
+                    Math.round(mid[2] + (end[2] - mid[2]) * k) + ')';
   }
 
   /* ── Canvas Line Chart (energy convergence) ── */
@@ -302,7 +337,7 @@
     const toY = v => pad.top + (1 - (v - yMin) / (yMax - yMin)) * ch;
 
     // Grid
-    ctx.strokeStyle = COLORS.grid;
+    ctx.strokeStyle = C('hair-2');
     ctx.lineWidth = 1;
     for (let i = 0; i <= 4; i++) {
       const y = pad.top + (i / 4) * ch;
@@ -310,7 +345,7 @@
       ctx.moveTo(pad.left, y);
       ctx.lineTo(W - pad.right, y);
       ctx.stroke();
-      ctx.fillStyle = COLORS.t3;
+      ctx.fillStyle = C('ink-3');
       ctx.font = '9px JetBrains Mono, monospace';
       ctx.textAlign = 'right';
       ctx.fillText((yMax - (i / 4) * (yMax - yMin)).toFixed(0), pad.left - 6, y + 3);
@@ -318,8 +353,8 @@
 
     // Gradient fill
     const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + ch);
-    grad.addColorStop(0, 'rgba(77,141,255,0.15)');
-    grad.addColorStop(1, 'rgba(77,141,255,0.01)');
+    grad.addColorStop(0, C('hair-2'));
+    grad.addColorStop(1, C('well'));
     ctx.beginPath();
     ctx.moveTo(toX(0), toY(data[0]));
     for (let i = 1; i < data.length; i++) ctx.lineTo(toX(i), toY(data[i]));
@@ -331,9 +366,9 @@
 
     // Line
     const lineGrad = ctx.createLinearGradient(pad.left, 0, W - pad.right, 0);
-    lineGrad.addColorStop(0, COLORS.accent);
-    lineGrad.addColorStop(0.5, COLORS.accent2);
-    lineGrad.addColorStop(1, COLORS.accent3);
+    lineGrad.addColorStop(0, C('accent'));
+    lineGrad.addColorStop(0.5, C('accent'));
+    lineGrad.addColorStop(1, C('accent'));
     ctx.beginPath();
     ctx.moveTo(toX(0), toY(data[0]));
     for (let i = 1; i < data.length; i++) ctx.lineTo(toX(i), toY(data[i]));
@@ -346,15 +381,15 @@
     const lastX = toX(data.length - 1), lastY = toY(data[data.length - 1]);
     ctx.beginPath();
     ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
-    ctx.fillStyle = COLORS.accent3;
+    ctx.fillStyle = C('accent');
     ctx.fill();
     ctx.beginPath();
     ctx.arc(lastX, lastY, 8, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(168,85,247,0.2)';
+    ctx.fillStyle = C('hair-2');
     ctx.fill();
 
     // X label
-    ctx.fillStyle = COLORS.t3;
+    ctx.fillStyle = C('ink-3');
     ctx.font = '9px Inter, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(opts && opts.xLabel || 'Step', W / 2, H - 4);
@@ -378,7 +413,7 @@
     const maxVal = Math.max(...items.map(i => i.value));
     const barW = Math.min(40, cw / items.length * 0.6);
 
-    const colors = [COLORS.accent, COLORS.accent2, COLORS.accent3, COLORS.ok, COLORS.warn];
+    const colors = [C('accent'), C('accent'), C('accent'), C('ok'), C('warn')];
 
     for (let i = 0; i < items.length; i++) {
       const x = pad.left + ((i + 0.5) / items.length) * cw - barW / 2;
@@ -391,13 +426,13 @@
       ctx.globalAlpha = 1;
 
       // Label
-      ctx.fillStyle = COLORS.t2;
-      ctx.font = '10px Inter, sans-serif';
+      ctx.fillStyle = C('ink-2');
+      ctx.font = '10px "Segoe UI", Inter, system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText(items[i].label, x + barW / 2, H - 8);
 
       // Value on top
-      ctx.fillStyle = COLORS.t1;
+      ctx.fillStyle = C('ink');
       ctx.font = '10px JetBrains Mono, monospace';
       ctx.fillText(items[i].value.toFixed(1), x + barW / 2, pad.top + ch - h - 4);
     }

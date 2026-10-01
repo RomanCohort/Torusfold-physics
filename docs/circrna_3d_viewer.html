@@ -14,99 +14,169 @@ var root,factory;root=this,factory=()=>(()=>{var __webpack_modules__={546(e,t,i)
 
 </script>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: 'Segoe UI', system-ui, sans-serif; background: #f5f5f5; }
-#container { display: flex; height: 100vh; }
-#viewer { flex: 1; position: relative; background: #fff; }
-#panel {
-  width: 280px; background: #1a1a2e; color: #e0e0e0;
-  padding: 20px; overflow-y: auto;
-  display: none;   /* right-side panel removed */
+/* TorusFold standalone viewer -- same design tokens as the main interface, so a
+   projector, a judge's laptop and the app all read as one instrument. The stage
+   is dark because a structure reads better against it.
+
+   z-index: 3Dmol appends its canvas to #viewer as position:absolute, z-index:0,
+   and it lands AFTER the chrome in the DOM -- so without an explicit stacking
+   value the canvas paints over the whole control deck and swallows every click.
+   Every overlay below therefore carries z-index >= 2. */
+:root{
+  --stage:#0a0d0c; --chassis:#111615; --raised:#1b2120;
+  --hair:#262d2b; --hair-2:#3c4543;
+  --ink:#e9edeb; --ink-2:#a0aaa7; --ink-3:#79827f;
+  --accent:#5fd6c8; --warn:#e0ac4d;
+  --font-display:"Charter","Iowan Old Style",Georgia,"Times New Roman",serif;
+  --font-ui:"Segoe UI",system-ui,-apple-system,sans-serif;
+  --font-mono:"Cascadia Mono",Consolas,ui-monospace,Menlo,monospace;
+  --dur:.16s;
 }
-#panel h2 { font-size: 16px; color: #00d4ff; border-bottom: 1px solid #333; padding-bottom: 8px; }
-#panel h3 { font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 1px; margin-top: 8px; }
-.stat { display: flex; justify-content: space-between; font-size: 13px; padding: 4px 0; }
-.stat .label { color: #999; }
-.stat .value { color: #00d4ff; font-weight: 600; }
-.btn {
-  display: block; width: 100%; padding: 8px 12px; margin: 4px 0;
-  background: #16213e; border: 1px solid #0f3460; border-radius: 6px;
-  color: #e0e0e0; font-size: 13px; cursor: pointer; text-align: left;
-  transition: all 0.2s;
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%}
+body{font-family:var(--font-ui);background:var(--stage);color:var(--ink);overflow:hidden}
+#container{display:flex;height:100vh}
+#viewer{flex:1;position:relative;background:var(--stage);min-width:0}
+#viewer canvas{display:block}
+
+/* ── Title plate ── */
+.plate{
+  position:absolute;top:14px;left:14px;z-index:2;
+  display:flex;align-items:baseline;gap:10px;
+  padding:8px 13px;background:var(--chassis);border:1px solid var(--hair-2);
+  border-radius:5px;pointer-events:none;
 }
-.btn:hover { background: #0f3460; border-color: #00d4ff; }
-.btn.active { background: #0f3460; border-color: #00d4ff; color: #00d4ff; }
-.legend { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-.legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; }
-.legend-dot { width: 10px; height: 10px; border-radius: 50%; }
-#info-bar {
-  position: absolute; bottom: 0; left: 0; right: 0;
-  background: rgba(0,0,0,0.7); color: #fff; padding: 8px 16px;
-  font-size: 12px; display: none;
+.plate .name{font-family:var(--font-display);font-size:16px;font-weight:700;letter-spacing:-.01em}
+.plate .what{
+  font-family:var(--font-mono);font-size:10.5px;color:var(--ink-3);
+  padding-left:10px;border-left:1px solid var(--hair-2);letter-spacing:.02em;
 }
-.watermark {
-  position: absolute; top: 12px; left: 12px;
-  background: rgba(0,0,0,0.5); color: #fff; padding: 6px 12px;
-  border-radius: 4px; font-size: 12px; pointer-events: none;
+@media (max-width:760px){.plate .what{display:none}}
+
+/* ── Control deck ── */
+.deck{
+  position:absolute;left:14px;bottom:14px;right:14px;z-index:3;
+  display:flex;flex-wrap:wrap;align-items:center;gap:14px;
+  padding:9px 12px;background:var(--chassis);
+  border:1px solid var(--hair-2);border-radius:6px;
+}
+.group{display:flex;align-items:center;gap:6px;min-width:0}
+.group-label{
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--ink-3);margin-right:2px;white-space:nowrap;
+}
+.sep{width:1px;height:20px;background:var(--hair-2);flex-shrink:0}
+
+.btn{
+  padding:5px 10px;background:transparent;border:1px solid var(--hair-2);
+  border-radius:4px;color:var(--ink-2);font-family:var(--font-ui);font-size:11.5px;
+  cursor:pointer;white-space:nowrap;
+  transition:background var(--dur) ease,border-color var(--dur) ease,color var(--dur) ease;
+}
+.btn:hover{background:var(--raised);border-color:var(--ink-3);color:var(--ink)}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.btn.active{background:rgba(95,214,200,.12);border-color:var(--accent);color:var(--accent)}
+
+/* ── Hover readout ── */
+#info-bar{
+  position:absolute;top:14px;right:14px;z-index:2;padding:8px 12px;
+  background:var(--chassis);border:1px solid var(--hair-2);border-radius:5px;
+  font-family:var(--font-mono);font-size:11px;color:var(--ink-2);
+  display:none;max-width:46vw;
+}
+#info-bar.on{display:block}
+
+/* ── Stats plate ── */
+.stats{
+  position:absolute;right:14px;top:52px;z-index:2;padding:12px 14px;
+  background:var(--chassis);border:1px solid var(--hair-2);border-radius:5px;
+  min-width:214px;display:none;
+}
+.stats.on{display:block}
+.stats h2{
+  font-family:var(--font-mono);font-size:10px;font-weight:400;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--ink-3);
+  padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid var(--hair);
+}
+.stat{display:flex;justify-content:space-between;gap:16px;padding:3px 0;font-size:11.5px}
+.stat .label{color:var(--ink-3)}
+.stat .value{font-family:var(--font-mono);color:var(--ink)}
+.legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:10px;
+  padding-top:10px;border-top:1px solid var(--hair)}
+.legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--ink-2)}
+.legend-dot{width:9px;height:9px;border-radius:2px;flex-shrink:0}
+.credit{margin-top:10px;padding-top:9px;border-top:1px solid var(--hair);
+  font-size:10.5px;line-height:1.5;color:var(--ink-3)}
+
+@media (max-width:900px){
+  .deck{gap:10px;padding:8px 10px}
+  .group-label{display:none}
+  .stats{min-width:0;max-width:60vw}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition-duration:.01ms!important}
 }
 </style>
 </head>
 <body>
 <div id="container">
   <div id="viewer">
-    <div class="watermark">TorusFold circRNA 3D &mdash; 2,013 nt &mdash; Level 4.9 PPR repaired</div>
-    <div id="info-bar">Hover to inspect</div>
-  </div>
-  <div id="panel">
-    <div>
-      <h2>TorusFold Prediction</h2>
+    <div class="plate">
+      <span class="name">TorusFold</span>
+      <span class="what">circRNA 3D &middot; 2,013 nt &middot; all-atom &middot; BSJ closed</span>
+    </div>
+
+    <div id="info-bar">Hover a residue to inspect</div>
+
+    <div class="stats on" id="stats">
+      <h2>Prediction</h2>
       <div class="stat"><span class="label">Sequence</span><span class="value">2,013 nt</span></div>
       <div class="stat"><span class="label">Atoms</span><span class="value">42,831</span></div>
-      <div class="stat"><span class="label">Topology</span><span class="value">Circular (BSJ)</span></div>
-      <div class="stat"><span class="label">BSJ closure</span><span class="value">5.898 A</span></div>
-      <div class="stat"><span class="label">Bond RMSD</span><span class="value">0.0082 A</span></div>
+      <div class="stat"><span class="label">Topology</span><span class="value">circular (BSJ)</span></div>
+      <div class="stat"><span class="label">BSJ closure</span><span class="value">5.898 &Aring;</span></div>
+      <div class="stat"><span class="label">Bond RMSD</span><span class="value">0.0082 &Aring;</span></div>
       <div class="stat"><span class="label">Pair satisfaction</span><span class="value">100.0%</span></div>
       <div class="stat"><span class="label">3dRNAscore</span><span class="value">27.18</span></div>
-      <div class="stat"><span class="label">Global RMSD</span><span class="value">1.23 A</span></div>
+      <div class="stat"><span class="label">Global RMSD</span><span class="value">1.23 &Aring;</span></div>
       <div class="stat"><span class="label">Runtime</span><span class="value">~7 h (CPU)</span></div>
-    </div>
-    <div>
-      <h3>Coloring</h3>
-      <button class="btn active" id="clr-rainbow" onclick="setColor('rainbow')">Rainbow (residue index)</button>
-      <button class="btn" id="clr-base" onclick="setColor('base')">By base (A/U/G/C)</button>
-      <button class="btn" id="clr-element" onclick="setColor('element')">By element</button>
-      <button class="btn" id="clr-structural" onclick="setColor('structural')">Structural cartoon</button>
-    </div>
-    <div>
-      <h3>Style</h3>
-      <button class="btn active" id="sty-cartoon" onclick="setStyle('cartoon')">Cartoon</button>
-      <button class="btn" id="sty-stick" onclick="setStyle('stick')">Stick</button>
-      <button class="btn" id="sty-line" onclick="setStyle('line')">Line</button>
-      <button class="btn" id="sty-sphere" onclick="setStyle('sphere')">Sphere</button>
-    </div>
-    <div>
-      <h3>BSJ Highlights</h3>
-      <button class="btn" onclick="highlightBSJ()">Mark BSJ (res 1 &amp; 2013)</button>
-      <button class="btn" onclick="clearHighlights()">Clear highlights</button>
-    </div>
-    <div>
-      <h3>Base Legend</h3>
       <div class="legend">
-        <div class="legend-item"><div class="legend-dot" style="background:#ff4444"></div>A</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#4488ff"></div>U</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#ffcc00"></div>G</div>
-        <div class="legend-item"><div class="legend-dot" style="background:#44cc44"></div>C</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#e0685f"></div>A</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#7fb2ff"></div>U</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#e8c25f"></div>G</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#79d3a3"></div>C</div>
       </div>
+      <div class="credit">iGEM 2026 &middot; Team JLU-FBH &middot; Jilin University</div>
     </div>
-    <div>
-      <h3>Background</h3>
-      <button class="btn" onclick="setBg('#ffffff')">White</button>
-      <button class="btn" onclick="setBg('#000000')">Black</button>
-      <button class="btn" onclick="setBg('#1a1a2e')">Dark</button>
-    </div>
-    <div style="margin-top:auto; font-size:11px; color:#555; border-top:1px solid #333; padding-top:12px;">
-      TorusFold &mdash; circRNA 3D prediction pipeline<br>
-      IGEM FBH 2026 &mdash; Jilin University
+
+    <div class="deck">
+      <div class="group">
+        <span class="group-label">Colour</span>
+        <button class="btn active" id="clr-rainbow" onclick="setColor('rainbow')">Residue index</button>
+        <button class="btn" id="clr-base" onclick="setColor('base')">Base</button>
+        <button class="btn" id="clr-element" onclick="setColor('element')">Element</button>
+        <button class="btn" id="clr-structural" onclick="setColor('structural')">Structural</button>
+      </div>
+      <span class="sep"></span>
+      <div class="group">
+        <span class="group-label">Style</span>
+        <button class="btn active" id="sty-cartoon" onclick="setStyle('cartoon')">Cartoon</button>
+        <button class="btn" id="sty-stick" onclick="setStyle('stick')">Stick</button>
+        <button class="btn" id="sty-line" onclick="setStyle('line')">Line</button>
+        <button class="btn" id="sty-sphere" onclick="setStyle('sphere')">Sphere</button>
+      </div>
+      <span class="sep"></span>
+      <div class="group">
+        <span class="group-label">Backdrop</span>
+        <button class="btn" onclick="setBg('#0a0d0c')">Dark</button>
+        <button class="btn" onclick="setBg('#ffffff')">White</button>
+        <button class="btn" onclick="setBg('#000000')">Black</button>
+      </div>
+      <span class="sep"></span>
+      <div class="group">
+        <button class="btn" onclick="highlightBSJ()">Mark BSJ</button>
+        <button class="btn" onclick="clearHighlights()">Clear</button>
+        <button class="btn active" id="btn-stats" onclick="toggleStats()">Stats</button>
+      </div>
     </div>
   </div>
 </div>
@@ -117,7 +187,7 @@ var compressed = Uint8Array.from(atob(pdbB64), function(c) { return c.charCodeAt
 var pdbData = pako.ungzip(compressed, { to: 'string' });
 
 var viewer = $3Dmol.createViewer("viewer", {
-  backgroundColor: "#ffffff",
+  backgroundColor: "#0a0d0c",
   antialias: true,
   disableFog: true
 });
@@ -151,7 +221,7 @@ function setColor(mode) {
   } else if (mode === 'element') {
     s = {sphere: {colors: {C:'#aaaaaa',N:'#3050F8',O:'#ff0d0d',P:'#ff8000',S:'#ffff30'}}};
   } else if (mode === 'structural') {
-    s = {cartoon: {color: '#5588cc', opacity: 0.85}};
+    s = {cartoon: {color: '#5fd6c8', opacity: 0.85}};
   }
   viewer.setStyle({}, s);
   viewer.render();
@@ -174,8 +244,8 @@ function setStyle(mode) {
 }
 
 function highlightBSJ() {
-  viewer.addStyle({resi: [0]}, {sphere: {color: '#ff0000', radius: 4.0}});
-  viewer.addStyle({resi: [2012]}, {sphere: {color: '#0044ff', radius: 4.0}});
+  viewer.addStyle({resi: [0]}, {sphere: {color: '#e0ac4d', radius: 4.0}});
+  viewer.addStyle({resi: [2012]}, {sphere: {color: '#5fd6c8', radius: 4.0}});
   try {
     var atoms1 = viewer.getModel().selectedAtoms({resi: 0, atom: 'P'});
     var atoms2 = viewer.getModel().selectedAtoms({resi: 2012, atom: 'P'});
@@ -190,8 +260,8 @@ function highlightBSJ() {
       );
       viewer.addLabel("BSJ " + dist.toFixed(1) + "A", {
         position: {x: mx, y: my, z: mz},
-        backgroundColor: '#00d4ff88',
-        fontColor: '#ffffff',
+        backgroundColor: '#11161599',
+        fontColor: '#e9edeb',
         fontSize: 14
       });
     }
@@ -213,13 +283,24 @@ function setBg(color) {
 viewer.setHoverCallback(function(atom) {
   var bar = document.getElementById('info-bar');
   if (atom) {
-    bar.style.display = 'block';
+    bar.classList.add('on');
     bar.textContent = 'Residue: ' + (atom.resn||'').trim() + ' ' + atom.resi +
       ' | Atom: ' + atom.atom + ' | Chain: ' + atom.chain + ' | Element: ' + atom.elem;
   } else {
-    bar.style.display = 'none';
+    bar.classList.remove('on');
   }
 });
+
+/* Toggle the stats plate. Lives here rather than inline in the markup so the
+   button matches its neighbours. Its id deliberately does not start with
+   'clr-' or 'sty-', which setActive() sweeps when clearing the .active class. */
+function toggleStats() {
+  var s = document.getElementById('stats');
+  if (!s) return;
+  var on = s.classList.toggle('on');
+  var b = document.getElementById('btn-stats');
+  if (b) b.classList.toggle('active', on);
+}
 </script>
 </body>
 </html>

@@ -1,105 +1,174 @@
-/* panels.css — Data visualization panel styles */
+/* ═══════════════════════════════════════════════════════════════════════════
+   panels.css — readout widgets rendered by panels.js / charts.js / app.js
+   ───────────────────────────────────────────────────────────────────────────
+   Every class here is emitted from JavaScript strings, so these names are a
+   contract: rename one and the panel silently loses its styling. The shared
+   grammar is "label above, monospace value below, hairline between" — the same
+   one style.css uses for .scalar-card, so generated and static readouts match.
+   ═══════════════════════════════════════════════════════════════════════════ */
 
-/* ── Pair distance distribution chart ── */
-.pair-dist-legend{display:flex;gap:12px;margin-top:8px;font-size:10px;color:var(--t2)}
-.pair-dist-legend span{display:flex;align-items:center;gap:4px}
-.pair-dist-legend .dot{width:8px;height:8px;border-radius:2px;flex-shrink:0}
+/* ── Small chart legends ── */
+.pair-dist-legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;
+  font-size:var(--t-xs);color:var(--ink-3)}
+.pair-dist-legend span{display:inline-flex;align-items:center;gap:5px}
+.pair-dist-legend .dot{width:8px;height:8px;border-radius:1px;flex-shrink:0}
 
-/* ── Pair quality cards ── */
-.pair-quality-row{display:flex;gap:8px;margin-bottom:8px}
-.pair-quality-row .pq-card{flex:1;padding:10px 12px;border-radius:8px;background:rgba(4,6,14,0.4);border:1px solid var(--border);text-align:center}
-.pq-card .pq-val{font-size:20px;font-weight:700;font-family:'JetBrains Mono',monospace;color:var(--accent)}
-.pq-card .pq-label{font-size:10px;color:var(--t3);margin-top:2px;text-transform:uppercase;letter-spacing:0.5px}
-.pq-card .pq-pct{font-size:11px;color:var(--t2);margin-top:4px}
+/* ── Generic readout card ──
+   One rule set for the species that share a shape: a big monospace number over
+   a small caps caption. Keeps the readout column visually consistent. */
+.pq-card,.receptor-card,.gc-card,.mfe-card,.hull-card{
+  padding:9px 10px;border:1px solid var(--hair);border-radius:5px;background:var(--well);
+  text-align:center;transition:border-color var(--dur) var(--ease);
+}
+.pq-card:hover,.receptor-card:hover,.gc-card:hover,.mfe-card:hover,.hull-card:hover{
+  border-color:var(--hair-2)
+}
+.pq-val,.rc-val,.gc-val,.mfe-val,.hull-val,.flex-val{
+  font-family:var(--font-mono);font-size:var(--t-xl);color:var(--ink);letter-spacing:-.02em;
+}
+.pq-label,.rc-label,.gc-region,.mfe-label,.hull-label{
+  font-size:var(--t-xs);color:var(--ink-3);text-transform:uppercase;letter-spacing:.07em;
+}
+.pq-pct{font-size:var(--t-sm);color:var(--ink-2);margin-top:3px;
+  font-family:var(--font-mono)}
 
-/* ── Immune balance (dsRNA/ssRNA donut) ── */
-.immune-balance{display:flex;align-items:center;gap:16px;padding:10px 0}
+/* ── Pairing quality ── */
+.pair-quality-row{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-2)}
+.pair-quality-row .pq-card{flex:1;min-width:0}
+
+/* ── dsRNA / ssRNA balance ── */
+.immune-balance{display:flex;align-items:center;gap:var(--sp-4);padding:var(--sp-1) 0}
 .immune-balance canvas{flex-shrink:0}
-.immune-balance .ib-info{flex:1}
-.immune-balance .ib-row{display:flex;justify-content:space-between;margin-bottom:4px;font-size:11px}
-.immune-balance .ib-label{color:var(--t2)}
-.immune-balance .ib-val{font-family:'JetBrains Mono',monospace;font-weight:600}
+.immune-balance .ib-info{flex:1;min-width:0}
+.immune-balance .ib-row{display:flex;justify-content:space-between;gap:var(--sp-2);
+  padding:5px 0;font-size:var(--t-sm);border-bottom:1px solid var(--hair)}
+.immune-balance .ib-row:last-child{border-bottom:none}
+.immune-balance .ib-label{color:var(--ink-2)}
+.immune-balance .ib-val{font-family:var(--font-mono);color:var(--ink)}
 
 /* ── RIG-I motif table ── */
-.rigi-table{width:100%;border-collapse:collapse;font-size:11px}
-.rigi-table th{text-align:left;color:var(--t3);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--border);font-size:10px;text-transform:uppercase;letter-spacing:0.5px}
-.rigi-table td{padding:6px 8px;border-bottom:1px solid rgba(56,89,160,0.08);color:var(--t2)}
-.rigi-table tr:hover td{background:rgba(77,141,255,0.04)}
-.rigi-table .mono{font-family:'JetBrains Mono',monospace}
+.rigi-table{width:100%;border-collapse:collapse;font-size:var(--t-sm)}
+.rigi-table th{
+  text-align:left;padding:6px 8px;border-bottom:1px solid var(--hair-2);
+  font-size:var(--t-xs);font-weight:400;color:var(--ink-3);
+  text-transform:uppercase;letter-spacing:.07em;
+}
+.rigi-table td{padding:7px 8px;border-bottom:1px solid var(--hair);color:var(--ink-2)}
+.rigi-table tbody tr:last-child td{border-bottom:none}
+.rigi-table tbody tr:hover td{background:var(--well);color:var(--ink)}
+.rigi-table .mono{font-family:var(--font-mono);color:var(--ink)}
 
-/* ── Flexibility cards ── */
-.flex-card{display:flex;align-items:center;gap:10px;padding:8px 12px;margin-bottom:6px;border-radius:8px;background:rgba(4,6,14,0.4);border:1px solid var(--border)}
-.flex-card .flex-pos{font-family:'JetBrains Mono',monospace;font-weight:600;color:var(--accent);width:40px}
-.flex-card .flex-region{font-size:10px;color:var(--t3);padding:2px 6px;background:rgba(77,141,255,0.08);border-radius:4px}
-.flex-card .flex-val{margin-left:auto;font-family:'JetBrains Mono',monospace;font-weight:600}
+/* ── Local flexibility ── */
+.flex-card{display:flex;align-items:center;gap:10px;padding:7px 0;
+  border-bottom:1px solid var(--hair)}
+.flex-card:last-child{border-bottom:none}
+.flex-card .flex-pos{font-family:var(--font-mono);color:var(--accent);width:42px;flex-shrink:0;
+  font-size:var(--t-sm)}
+.flex-card .flex-region{
+  font-size:var(--t-xs);color:var(--ink-3);padding:2px 7px;
+  border:1px solid var(--hair);border-radius:3px;background:var(--well);
+  text-transform:uppercase;letter-spacing:.05em;
+}
+.flex-card .flex-val{margin-left:auto;font-size:var(--t-md)}
 
-/* ── Receptor binding cards ── */
-.receptor-row{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
-.receptor-card{flex:1;min-width:100px;padding:10px 12px;border-radius:8px;background:rgba(4,6,14,0.4);border:1px solid var(--border);text-align:center}
-.receptor-card .rc-val{font-size:18px;font-weight:700;font-family:'JetBrains Mono',monospace;color:var(--accent)}
-.receptor-card .rc-label{font-size:10px;color:var(--t3);margin-top:2px}
+/* ── Receptor binding ── */
+.receptor-row{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-2);flex-wrap:wrap}
+.receptor-card{flex:1;min-width:96px}
 
-/* ── Sequence composition ── */
-.nuc-comp-bar{display:flex;height:24px;border-radius:6px;overflow:hidden;margin-top:8px}
-.nuc-comp-bar .nuc-seg{display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;font-family:'JetBrains Mono',monospace;color:rgba(255,255,255,0.9);transition:flex 0.6s ease}
-.nuc-seg-A{background:#4d8dff}
-.nuc-seg-U{background:#fbbf24}
-.nuc-seg-G{background:#34d399}
-.nuc-seg-C{background:#f87171}
+/* ── Nucleotide composition bar ── */
+.nuc-comp-bar{display:flex;height:26px;margin-top:10px;border:1px solid var(--hair);
+  border-radius:4px;overflow:hidden}
+/* Four distinguishable hues at similar lightness; the letter carries the meaning
+   when the palette is unavailable or printed in greyscale. */
+.nuc-comp-bar .nuc-seg{
+  display:flex;align-items:center;justify-content:center;flex-basis:0;
+  font-family:var(--font-mono);font-size:var(--t-xs);color:#0b0e0d;
+  transition:flex-grow .5s var(--ease);
+}
+.nuc-seg-A{background:#7fb2ff}
+.nuc-seg-U{background:#e8c25f}
+.nuc-seg-G{background:#79d3a3}
+.nuc-seg-C{background:#e08a7d}
 
-.gc-region-cards{display:flex;gap:8px;flex-wrap:wrap}
-.gc-card{flex:1;min-width:80px;padding:10px 12px;border-radius:8px;background:rgba(4,6,14,0.4);border:1px solid var(--border);text-align:center}
-.gc-card .gc-region{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:0.5px}
-.gc-card .gc-val{font-size:18px;font-weight:700;font-family:'JetBrains Mono',monospace;color:var(--accent);margin-top:2px}
+.gc-region-cards{display:flex;gap:var(--sp-2);flex-wrap:wrap}
+.gc-card{flex:1;min-width:78px}
 
-/* ── Energy heatmap ── */
-.energy-heatmap-wrap{margin:8px 0;position:relative}
-.energy-heatmap-wrap canvas{width:100%;border-radius:4px}
-.energy-region-labels{display:flex;justify-content:space-between;font-size:9px;color:var(--t3);margin-top:4px;font-family:'JetBrains Mono',monospace}
+/* ── Per-residue energy ── */
+.energy-heatmap-wrap{position:relative;margin:10px 0}
+.energy-heatmap-wrap canvas{width:100%;border-radius:3px;display:block}
+.energy-region-labels{
+  display:flex;justify-content:space-between;margin-top:5px;
+  font-family:var(--font-mono);font-size:var(--t-xs);color:var(--ink-3);
+}
 
-/* ── Energy top penalized list ── */
-.energy-top-item{display:flex;align-items:center;gap:8px;padding:5px 8px;margin-bottom:4px;border-radius:6px;font-size:11px;transition:background var(--tr)}
-.energy-top-item:hover{background:rgba(77,141,255,0.04)}
-.energy-top-item .etp-pos{font-family:'JetBrains Mono',monospace;font-weight:600;color:var(--accent);width:36px}
-.energy-top-item .etp-region{font-size:9px;padding:2px 5px;border-radius:3px;font-weight:600}
-.energy-top-item .etp-region[data-region="5UTR"]{background:rgba(77,141,255,0.12);color:var(--accent)}
-.energy-top-item .etp-region[data-region="IRES"]{background:rgba(168,85,247,0.12);color:var(--accent3)}
-.energy-top-item .etp-region[data-region="CDS"]{background:rgba(0,212,255,0.12);color:var(--accent2)}
-.energy-top-item .etp-energy{margin-left:auto;font-family:'JetBrains Mono',monospace;font-weight:600;color:var(--err)}
-.energy-top-item .etp-bar{width:40px;height:4px;border-radius:2px;background:rgba(248,113,113,0.2);overflow:hidden;flex-shrink:0}
-.energy-top-item .etp-bar-fill{height:100%;border-radius:2px;background:var(--err)}
+.energy-top-item{display:grid;grid-template-columns:38px auto 1fr auto 34px;
+  align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--hair);
+  font-size:var(--t-sm)}
+.energy-top-item:last-child{border-bottom:none}
+.energy-top-item .etp-pos{font-family:var(--font-mono);color:var(--accent);font-size:var(--t-sm)}
+.energy-top-item .etp-region{
+  font-size:var(--t-xs);padding:1px 6px;border:1px solid var(--hair);border-radius:3px;
+  color:var(--ink-3);background:var(--well);text-transform:uppercase;letter-spacing:.05em;
+}
+.energy-top-item .etp-region[data-region="5UTR"]{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 35%,transparent)}
+.energy-top-item .etp-region[data-region="IRES"]{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
+.energy-top-item .etp-region[data-region="CDS"]{color:var(--ink-2);border-color:var(--hair-2)}
+.energy-top-item .etp-energy{font-family:var(--font-mono);color:var(--err);text-align:right}
+.energy-top-item .etp-bar{height:3px;background:var(--hair);border-radius:2px;overflow:hidden}
+.energy-top-item .etp-bar-fill{height:100%;background:var(--err);transition:width .4s var(--ease)}
 
-/* ── Stem-loop histogram ── */
-.histogram-wrap{margin:8px 0}
-.histogram-wrap canvas{width:100%;border-radius:6px;background:rgba(4,6,14,0.3);border:1px solid var(--border)}
-.histogram-title{font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px;font-weight:600}
+/* ── Distribution charts ── */
+.histogram-wrap{margin:var(--sp-3) 0}
+.histogram-wrap canvas{
+  width:100%;display:block;border:1px solid var(--hair);border-radius:4px;background:var(--well);
+}
+.histogram-title{
+  margin-bottom:6px;font-size:var(--t-xs);color:var(--ink-3);
+  text-transform:uppercase;letter-spacing:.07em;
+}
 
-/* ── Thermodynamics MFE cards ── */
-.mfe-cards{display:flex;gap:8px;flex-wrap:wrap}
-.mfe-card{flex:1;min-width:80px;padding:10px 12px;border-radius:8px;background:rgba(4,6,14,0.4);border:1px solid var(--border);text-align:center}
-.mfe-card .mfe-val{font-size:18px;font-weight:700;font-family:'JetBrains Mono',monospace;color:var(--accent)}
-.mfe-card .mfe-label{font-size:10px;color:var(--t3);margin-top:2px}
+/* ── Thermodynamics ── */
+.mfe-cards{display:flex;gap:var(--sp-2);flex-wrap:wrap}
+.mfe-card{flex:1;min-width:78px}
 
-/* ── Shape classification ── */
-.shape-class-label{text-align:center;padding:16px;margin-bottom:12px;border-radius:12px;background:rgba(4,6,14,0.4);border:1px solid var(--border)}
-.shape-class-label .shape-name{font-size:20px;font-weight:800;background:var(--grad);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.shape-class-label .shape-desc{font-size:11px;color:var(--t2);margin-top:4px}
-.shape-metric-cards{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+/* ── Shape classification ──
+   The one place a single accent fill is justified: this is the headline verdict
+   for the whole prediction, so it reads as a stamped result rather than a card. */
+.shape-class-label{
+  padding:var(--sp-4) var(--sp-3);margin-bottom:var(--sp-3);
+  border:1px solid var(--hair-2);border-left:3px solid var(--accent);
+  border-radius:5px;background:var(--well);
+}
+.shape-class-label .shape-name{
+  font-family:var(--font-display);font-size:var(--t-2xl);font-weight:700;
+  letter-spacing:-.015em;color:var(--ink);line-height:1.15;
+}
+.shape-class-label .shape-desc{margin-top:5px;font-size:var(--t-sm);color:var(--ink-2)}
+.shape-metric-cards{display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-2)}
 
-/* ── Eigenvalue chart ── */
-.eigen-chart-wrap{margin:8px 0}
-.eigen-chart-wrap canvas{width:100%;border-radius:6px;background:rgba(4,6,14,0.3);border:1px solid var(--border)}
+.eigen-chart-wrap{margin:10px 0}
+.eigen-chart-wrap canvas{
+  width:100%;display:block;border:1px solid var(--hair);border-radius:4px;background:var(--well);
+}
 
-/* ── Hull cards ── */
-.hull-cards{display:flex;gap:8px;flex-wrap:wrap}
-.hull-card{flex:1;min-width:100px;padding:10px 12px;border-radius:8px;background:rgba(4,6,14,0.4);border:1px solid var(--border);text-align:center}
-.hull-card .hull-val{font-size:18px;font-weight:700;font-family:'JetBrains Mono',monospace;color:var(--accent)}
-.hull-card .hull-label{font-size:10px;color:var(--t3);margin-top:2px}
+/* ── Convex hull cards ──
+   Added back after an audit caught them missing: the shared card rule earlier in
+   this file covers .hull-card's skin, but the flex container that lays the row
+   out was dropped when this file was rewritten, so the cards stacked. */
+.hull-cards{display:flex;gap:var(--sp-2);flex-wrap:wrap}
+.hull-card{flex:1;min-width:100px}
 
-/* ── Skeleton loading ── */
-@keyframes shimmer{from{background-position:-200px 0}to{background-position:200px 0}}
-.skeleton{background:linear-gradient(90deg,rgba(56,89,160,0.05) 25%,rgba(56,89,160,0.1) 50%,rgba(56,89,160,0.05) 75%);background-size:200px 100%;animation:shimmer 1.5s ease-in-out infinite;border-radius:6px;height:20px;margin-bottom:8px}
+/* ── Loading ──
+   A quiet sweep, not a shimmer: the column already has hairlines moving it. */
+@keyframes sweep{from{background-position:-160px 0}to{background-position:160px 0}}
+.skeleton{
+  height:16px;margin-bottom:8px;border-radius:3px;
+  background:linear-gradient(90deg,var(--well) 25%,var(--hair) 50%,var(--well) 75%);
+  background-size:160px 100%;animation:sweep 1.4s linear infinite;
+}
+.skeleton:last-child{margin-bottom:0}
 
-/* ── Panel reveal animation ── */
-.panel-reveal{opacity:0;transform:translateX(-10px);transition:all 0.4s ease}
-.panel-reveal.visible{opacity:1;transform:translateX(0)}
+/* ── Reveal on populate ── */
+.panel-reveal{opacity:0;transform:translateY(3px);
+  transition:opacity .28s var(--ease),transform .28s var(--ease)}
+.panel-reveal.visible{opacity:1;transform:none}

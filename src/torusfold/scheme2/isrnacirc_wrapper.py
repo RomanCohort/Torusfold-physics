@@ -14,13 +14,61 @@ from pathlib import Path
 # exe + DLL must stay together under an ASCII-only path (Windows DLL loader rejects non-ASCII paths)
 # ISRNACIRC_BIN_DIR env var points to an ASCII-only directory holding CG_to_allatom.exe + its DLLs
 _ISRNACIRC_BIN_DIR = os.environ.get("ISRNACIRC_BIN_DIR", "")
+if not _ISRNACIRC_BIN_DIR:
+    # Fall back to ISRNACIRC_ROOT/bin when only the root is configured, so a
+    # single variable is enough for a standard tree.
+    _root = os.environ.get("ISRNACIRC_ROOT", "")
+    if _root and os.path.isfile(os.path.join(_root, "bin", "CG_to_allatom.exe")):
+        _ISRNACIRC_BIN_DIR = os.path.join(_root, "bin")
 
 # exe: looked up in the env-specified directory (blank when unset; cg_to_allatom() gives a clear error)
 _CG_TO_AA_EXE = os.path.join(_ISRNACIRC_BIN_DIR, "CG_to_allatom.exe") \
     if _ISRNACIRC_BIN_DIR else ""
 
+# The MD refinement binary, and the Data/ directory it reads. Both are resolved
+# from ISRNACIRC_ROOT. Previously this module referenced _ISRNACIRC_ROOT and
+# _ISRNACIRC_BIN without ever defining either, so both isrnacirc_refine() and
+# cg_to_allatom() raised NameError as soon as they were reached.
+_ISRNACIRC_ROOT = os.environ.get("ISRNACIRC_ROOT", "")
+
+
+def _find_isrnacirc_exe(root):
+    """Locate the refinement binary, which is IsRNAcirc.exe on a Windows build
+    and IsRNAcirc.out on the Linux build documented upstream."""
+    if not root:
+        return ""
+    for rel in (os.path.join("bin", "IsRNAcirc.exe"), "IsRNAcirc.exe",
+                os.path.join("bin", "IsRNAcirc.out"), "IsRNAcirc.out"):
+        candidate = os.path.join(root, rel)
+        if os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+_ISRNACIRC_EXE = _find_isrnacirc_exe(_ISRNACIRC_ROOT)
+
+
+def _resolve_data_dir(root):
+    """The Data/ directory for IsRNAcirc, accepting either the root or Data itself.
+
+    CG_TO_ALLATOM_COEFF may already point at Data/ (that is what the coefficient
+    argument needs), so this checks before appending, which would otherwise
+    produce .../data/Data/.
+    """
+    if not root:
+        return ""
+    base = os.path.basename(os.path.normpath(root)).lower()
+    if base in ("data", "data_bak"):
+        return root
+    for name in ("Data", "data"):
+        candidate = os.path.join(root, name)
+        if os.path.isdir(candidate):
+            return candidate
+    return root
+
+
 # coeff: must be an ASCII-only path; the exe rejects non-ASCII paths
-_COEFF_DIR = os.environ.get("CG_TO_ALLATOM_COEFF", "")
+_COEFF_DIR = os.environ.get("CG_TO_ALLATOM_COEFF", "") or _resolve_data_dir(_ISRNACIRC_ROOT)
 
 
 def _write_cg_pdb(coords_A, sequence, output_path):
@@ -60,8 +108,10 @@ def cg_to_allatom(cg_pdb_path, output_pdb_path, sequence=None):
     """
     if not os.path.exists(_CG_TO_AA_EXE):
         raise FileNotFoundError(
-            f"CG_to_allatom.exe not found at {_CG_TO_AA_EXE}. "
-            f"Set ISRNACIRC_ROOT env var to isRNAcirc standalone root."
+            f"CG_to_allatom.exe not found at '{_CG_TO_AA_EXE}'. "
+            f"Set ISRNACIRC_BIN_DIR to the directory that holds "
+            f"CG_to_allatom.exe and its DLLs. (ISRNACIRC_ROOT is the wrong "
+            f"variable for this binary — it is used for the MD refinement step.)"
         )
 
     cmd = [_CG_TO_AA_EXE, cg_pdb_path, output_pdb_path, _COEFF_DIR]
@@ -69,7 +119,9 @@ def cg_to_allatom(cg_pdb_path, output_pdb_path, sequence=None):
     _bin_dir = os.path.dirname(_CG_TO_AA_EXE)
     _env = os.environ.copy()
     _existing_path = _env.get("PATH", "")
-    _env["PATH"] = _bin_dir + os.pathsep + _ISRNACIRC_BIN + os.pathsep + _existing_path
+    # _ISRNACIRC_BIN was never defined here; the variable that exists is the
+    # bin *directory*, and it is already the first entry below.
+    _env["PATH"] = _bin_dir + os.pathsep + _existing_path
     result = subprocess.run(
         cmd, capture_output=True, text=True, timeout=None, env=_env,
         cwd=_bin_dir if os.path.isdir(_bin_dir) else None,
@@ -104,9 +156,15 @@ def isrnacirc_refine(cg_pdb_path, output_dir, sequence,
     Returns:
         path to best output PDB
     """
-    isrnacirc_exe = os.path.join(_ISRNACIRC_ROOT, "bin", "IsRNAcirc.exe")
+    isrnacirc_exe = _ISRNACIRC_EXE
+    if not isrnacirc_exe:
+        raise FileNotFoundError(
+            "IsRNAcirc refinement binary not found. Set ISRNACIRC_ROOT to the "
+            "isRNAcirc root; the wrapper looks for bin/IsRNAcirc.exe, "
+            "IsRNAcirc.exe, bin/IsRNAcirc.out or IsRNAcirc.out under it."
+        )
     if not os.path.exists(isrnacirc_exe):
-        raise FileNotFoundError(f"IsRNAcirc.exe not found: {isrnacirc_exe}")
+        raise FileNotFoundError(f"IsRNAcirc binary not found: {isrnacirc_exe}")
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -126,7 +184,10 @@ def isrnacirc_refine(cg_pdb_path, output_dir, sequence,
         f.write("PS 0.3\nPE 0.9\nRMSD_Cut 7.5\nNout 1\n")
 
     # Run
-    cmd = [isrnacirc_exe, _ISRNACIRC_ROOT + "/Data/",
+    # The Data directory is passed as its own argument, so it must be the Data/
+    # directory itself and never a root with Data/ appended — the previous form
+    # built "<root>/Data/" from a variable that did not exist.
+    cmd = [isrnacirc_exe, _resolve_data_dir(_ISRNACIRC_ROOT),
            dotbracket_file, output_dir, "output", config_file,
            "1", cg_pdb_path]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=None)

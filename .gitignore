@@ -10,6 +10,14 @@ build/
 dist/
 develop-eggs/
 
+# ── Machine-specific external-tool paths ────────────────
+# Written by tools/configure_deps.py from what it finds on THIS machine, so it
+# must never be committed: the paths are personal and the file would break
+# everyone else's checkout by pinning it to one layout.
+.env.local
+activate_deps.bat
+activate_deps.sh
+
 # ── Virtual envs ────────────────────────────────────────
 .venv/
 venv/
@@ -57,8 +65,24 @@ _final_*.pdb
 _final_out/
 *.log
 
+# ── Analysis intermediates ──────────────────────────────
+# results/ reached 502 MB of .npz ensembles from an IBI sweep. They are
+# regenerable from the scripts, and a repository that has absorbed them cannot
+# easily give them back: the blobs stay in history. The reference tables the
+# code actually loads are the ones under src/ and the committed checkpoints, not
+# these.
+results/
+# Stray capture files from running the server by hand.
+*_out.txt
+*_err.txt
+
 # ── Local config / private sequence ─────────────────────
-sequence.txt
+# ROOT ONLY, and the leading slash is load-bearing. An unanchored `sequence.txt`
+# also matches artifacts/2013nt/sequence.txt, which is committed on purpose: it is
+# the demo target for run_2013nt.py, recovered from the shipped structure (see
+# artifacts/README.md). Without the slash, `git add -A` silently omits the one file
+# that makes the demo startable, and nothing says so.
+/sequence.txt
 test_*_ss.txt
 # .claude/ is ignored except the iGEM AI-use notice
 .claude/*

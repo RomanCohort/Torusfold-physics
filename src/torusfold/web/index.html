@@ -3,275 +3,331 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark light">
+<meta name="description" content="TorusFold — physics-based 3D structure prediction for long circular RNA.">
 <title>TorusFold — circRNA 3D Structure Prediction</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#x1F9EC;</text></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230b0e0d'/><circle cx='16' cy='16' r='8.5' fill='none' stroke='%234fd1c5' stroke-width='2.5'/><circle cx='16' cy='16' r='2.5' fill='%23e8c9a0'/></svg>">
 <link rel="stylesheet" href="/web/molstar.css">
 <link rel="stylesheet" href="/web/style.css">
 <link rel="stylesheet" href="/web/panels.css">
+<script>
+/* Resolve the saved theme before first paint, so the page never flashes the
+   wrong palette. Kept inline and dependency-free on purpose: a deferred module
+   would paint the OS default first and then switch. */
+try{
+  var _t=localStorage.getItem('tf-theme');
+  if(_t==='dark'||_t==='light'){document.documentElement.setAttribute('data-theme',_t);}
+}catch(e){}
+</script>
 </head>
 <body>
-<!-- Floating particles -->
-<div class="particles"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
 
 <!-- ═══════════════ HEADER ═══════════════ -->
-<header>
+<header class="masthead">
   <div class="brand">
-    <div class="logo">&#x1F9EC;</div>
-    <h1>TorusFold</h1>
-    <span class="tag">circRNA 3D Structure Prediction</span>
+    <span class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 32 32" width="26" height="26" fill="none">
+        <circle cx="16" cy="16" r="10" stroke="currentColor" stroke-width="2.4"/>
+        <ellipse cx="16" cy="16" rx="3.4" ry="10" stroke="currentColor" stroke-width="1.2" opacity=".55"/>
+        <circle cx="16" cy="16" r="2" fill="var(--brass)"/>
+      </svg>
+    </span>
+    <span class="brand-text">
+      <span class="brand-name">TorusFold</span>
+      <span class="brand-sub">circRNA 3D structure prediction</span>
+    </span>
   </div>
-  <div class="header-actions">
-    <div class="sub" id="server-status">connecting...</div>
-    <div class="export-group" id="export-group" style="display:none">
-      <button class="export-btn" id="btn-screenshot" title="Screenshot (Ctrl+Shift+S)">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
-        <span>PNG</span>
+
+  <div class="masthead-actions">
+    <span class="conn" id="server-status" role="status" aria-live="polite">connecting…</span>
+
+    <div class="btn-group" id="export-group" style="display:none">
+      <button class="btn btn-ghost" id="btn-screenshot" title="Export viewport as PNG">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        PNG
       </button>
-      <button class="export-btn" id="btn-pdb" title="Download PDB">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-        <span>PDB</span>
+      <button class="btn btn-ghost" id="btn-pdb" title="Download the predicted structure">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        PDB
       </button>
-      <button class="export-btn" id="btn-json" title="Download JSON">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        <span>JSON</span>
+      <button class="btn btn-ghost" id="btn-json" title="Download the metric report">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        JSON
       </button>
     </div>
-    <button class="export-btn feedback-btn" id="btn-feedback" title="Submit Feedback">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+
+    <button class="btn btn-ghost btn-icon" id="theme-toggle" title="Theme: auto"
+            aria-label="Switch theme">
+      <svg class="icon-sun" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg>
+      <svg class="icon-moon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M20.5 14.8A8.6 8.6 0 1 1 9.2 3.5a6.9 6.9 0 0 0 11.3 11.3z"/></svg>
+    </button>
+
+    <button class="btn btn-ghost btn-icon" id="btn-feedback" title="Send feedback" aria-label="Send feedback">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+    </button>
+
+    <button class="btn btn-ghost" id="btn-setup" title="Install and configure the external tools">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Set up environment
     </button>
   </div>
 </header>
 
-<!-- ═══════════════ HERO ═══════════════ -->
-<section class="hero" id="hero-section">
-  <div class="hero-inner">
-    <h2 class="hero-title">From Sequence to 3D Structure <span class="hero-highlight">in 7 Hours</span></h2>
-    <p class="hero-subtitle">
-      End-to-end prediction pipeline for circular RNA: secondary structure, coarse-grained 3D folding,
-      coarse-grained refinement, and all-atom polishing — powered by physics-informed deep learning.
+<!-- ═══════════════ ENVIRONMENT SETUP ═══════════════ -->
+<div class="setup-modal" id="setup-modal" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+  <div class="setup-dialog">
+    <div class="setup-header">
+      <h2 id="setup-title">External tools</h2>
+      <button class="feedback-close" id="setup-close" aria-label="Close">&times;</button>
+    </div>
+
+    <!-- What the button can and cannot do, stated before it runs rather than
+         discovered afterwards: some components have no machine-readable source
+         and a download failure for those is not a bug to be retried. -->
+    <p class="setup-lede">
+      Installs the Python packages the pipeline imports, fetches the tool sources
+      that have a public download, and reuses anything already on this machine.
+      Components with no public download are listed with the manual step instead.
     </p>
+
+    <div class="setup-options">
+      <label class="setup-field">Model source
+        <!-- Populated from /api/deps so the list comes from the installer rather
+             than being duplicated here. huggingface.co is unreachable from some
+             networks while its mirror answers, so this is a choice the user has
+             to be able to make. -->
+        <select id="setup-source"><option value="auto">auto (probe each host)</option></select>
+      </label>
+      <label class="switch"><input type="checkbox" id="setup-skip-downloads"><span>Skip model checkpoints (large)</span></label>
+      <label class="switch"><input type="checkbox" id="setup-skip-sources"><span>Skip tool sources</span></label>
+      <label class="switch"><input type="checkbox" id="setup-install-missing"><span>Install missing Python packages</span></label>
+    </div>
+
+    <div class="setup-actions">
+      <button class="btn btn-primary" id="setup-run">Run setup</button>
+      <button class="btn btn-quiet" id="setup-cancel" type="button" hidden>Cancel</button>
+      <button class="btn btn-quiet" id="setup-refresh" type="button">Re-check</button>
+      <span class="setup-status" id="setup-status" role="status" aria-live="polite"></span>
+    </div>
+
+    <div class="setup-progress" id="setup-progress" hidden>
+      <div class="progress-bar-wrap"><div class="progress-bar-fill" id="setup-bar" style="width:0%"></div></div>
+    </div>
+
+    <div class="setup-results" id="setup-results"></div>
   </div>
-  <div class="pipeline-row" id="hero-pipeline">
-    <div class="pipe-step" data-level="0">
-      <div class="pipe-icon">0</div>
-      <div class="pipe-label">Secondary<br>Structure</div>
-    </div>
-    <div class="pipe-arrow">&rarr;</div>
-    <div class="pipe-step" data-level="1">
-      <div class="pipe-icon">1</div>
-      <div class="pipe-label">3D Structure<br>Prediction</div>
-    </div>
-    <div class="pipe-arrow">&rarr;</div>
-    <div class="pipe-step" data-level="2">
-      <div class="pipe-icon">2</div>
-      <div class="pipe-label">CG<br>Refinement</div>
-    </div>
-    <div class="pipe-arrow">&rarr;</div>
-    <div class="pipe-step" data-level="3">
-      <div class="pipe-icon">3</div>
-      <div class="pipe-label">All-Atom<br>Placement</div>
-    </div>
-    <div class="pipe-arrow">&rarr;</div>
-    <div class="pipe-step" data-level="4">
-      <div class="pipe-icon">4</div>
-      <div class="pipe-label">All-Atom<br>Refinement</div>
-    </div>
-    <div class="pipe-arrow">&rarr;</div>
-    <div class="pipe-step" data-level="5">
-      <div class="pipe-icon">5</div>
-      <div class="pipe-label">All-Atom<br>Minimization</div>
-    </div>
+</div>
+
+<!-- ═══════════════ PIPELINE ═══════════════ -->
+<section class="hero" id="hero-section" aria-label="Pipeline overview">
+  <div class="hero-lede">
+    <h1>Sequence to all-atom fold, no experimental restraints.</h1>
+    <p>Six levels: secondary-structure consensus, segmented 3D prediction, RL-guided coarse-grained
+       folding, REST2 replica exchange, metadynamics, then Amber14-OL3 refinement.</p>
   </div>
+
+  <ol class="pipeline" id="hero-pipeline">
+    <li class="pipe-step" data-level="0">
+      <span class="pipe-num">0</span>
+      <span class="pipe-name">Secondary structure</span>
+      <span class="pipe-tag">consensus</span>
+    </li>
+    <li class="pipe-step" data-level="1">
+      <span class="pipe-num">1</span>
+      <span class="pipe-name">3D prediction</span>
+      <span class="pipe-tag">ensemble</span>
+    </li>
+    <li class="pipe-step" data-level="2">
+      <span class="pipe-num">2</span>
+      <span class="pipe-name">CG folding</span>
+      <span class="pipe-tag">REST2 · MetaD</span>
+    </li>
+    <li class="pipe-step" data-level="3">
+      <span class="pipe-num">3</span>
+      <span class="pipe-name">All-atom placement</span>
+      <span class="pipe-tag">1EHZ template</span>
+    </li>
+    <li class="pipe-step" data-level="4">
+      <span class="pipe-num">4</span>
+      <span class="pipe-name">All-atom refinement</span>
+      <span class="pipe-tag">Amber14-OL3</span>
+    </li>
+    <li class="pipe-step" data-level="5">
+      <span class="pipe-num">5</span>
+      <span class="pipe-name">Minimization</span>
+      <span class="pipe-tag">PPR repair</span>
+    </li>
+  </ol>
 </section>
 
-<!-- ═══════════════ MAIN WORKSPACE ═══════════════ -->
+<!-- ═══════════════ WORKSPACE ═══════════════ -->
 <div id="main">
-  <button class="panel-toggle left-toggle" id="left-toggle" title="Collapse/expand left panel">&#9664;</button>
+  <button class="panel-toggle panel-toggle-left" id="left-toggle" title="Collapse or expand the left panel" aria-label="Toggle left panel">&#9664;</button>
 
-  <!-- ── Left sidebar ── -->
+  <!-- ── Input panel ── -->
   <section class="left" id="left-panel">
-    <!-- Sequence input -->
     <div class="card">
-      <h2>Sequence</h2>
-      <textarea id="sequence"
-        placeholder="Paste circRNA sequence (ACGU/T/N)&#10;or FASTA format (lines starting with > are ignored)&#10;or drag & drop .fa / .fasta / .txt here"
-        rows="7"></textarea>
-      <div class="row">
+      <h2 class="card-title">Sequence</h2>
+      <textarea id="sequence" spellcheck="false" aria-label="circRNA sequence"
+        placeholder="Paste a circRNA sequence (ACGU / T / N)&#10;FASTA headers (&gt;) are ignored&#10;or drop a .fa / .fasta / .txt file here"></textarea>
+      <div class="row row-split">
         <span class="counter" id="seq-counter">0 nt</span>
-        <span class="error" id="seq-error"></span>
+        <span class="error" id="seq-error" role="alert"></span>
       </div>
-      <div class="row" style="margin-top:8px;gap:6px">
-        <button id="load-example-btn" class="secondary" style="flex:1">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-          Load Example
+      <div class="row row-actions">
+        <button id="load-example-btn" class="btn btn-quiet">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+          Load example
         </button>
-        <button id="clear-seq-btn" class="secondary" style="flex:0.6">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <button id="clear-seq-btn" class="btn btn-quiet">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           Clear
         </button>
       </div>
-      <div class="row" style="color:var(--t3);font-size:10px;margin-top:6px">
-        <span>Drag &amp; drop .pdb / .fa / .fasta files onto this panel</span>
-      </div>
-      <button id="predict-btn" class="primary" disabled>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-        Predict Structure
+      <button id="predict-btn" class="btn btn-primary" disabled>
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Predict structure
       </button>
-      <div class="row" style="margin-top:10px">
+      <div class="row">
         <input type="file" id="pdb-upload" accept=".pdb" style="display:none">
-        <button id="load-pdb-btn" class="secondary" onclick="document.getElementById('pdb-upload').click()">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          Load Local PDB
+        <button id="load-pdb-btn" class="btn btn-quiet btn-block" onclick="document.getElementById('pdb-upload').click()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Load a local PDB instead
         </button>
       </div>
     </div>
 
-    <!-- Parameters -->
     <div class="card" id="params-card">
-      <h2>Parameters</h2>
-      <label class="ctrl-label">Max segment length
-        <input type="number" id="param-seglen" value="200" min="50" max="500" step="10">
-      </label>
-      <label class="ctrl-label">Overlap
-        <input type="number" id="param-overlap" value="20" min="0" max="50" step="5">
-      </label>
-      <label class="ctrl-label">REMD rounds
-        <input type="number" id="param-rounds" value="1" min="0" max="5" step="1">
-      </label>
-      <label class="ctrl-label">REST2 replicas
-        <input type="number" id="param-replicas" value="4" min="2" max="16" step="1">
-      </label>
-      <label class="ctrl-label">REST2 steps
-        <input type="number" id="param-rest2steps" value="50000" min="10000" max="500000" step="10000">
-      </label>
-      <label class="ctrl-label"><input type="checkbox" id="param-rl" checked> RL-MCTS</label>
-      <label class="ctrl-label"><input type="checkbox" id="param-rhofold" checked> RhoFold+ (vs Vfold3D)</label>
+      <h2 class="card-title">Parameters</h2>
+      <!-- Filled from GET /api/schema at load. The knobs live in serve.py's
+           _PARAM_SPEC, so the pipeline's defaults and the ones shown here cannot
+           drift apart the way a hand-written input list did. -->
+      <div id="params-form" class="params-form">
+        <div class="legend">Loading parameters…</div>
+      </div>
     </div>
 
-    <!-- Pipeline Progress -->
     <div class="card" id="progress-card" style="display:none">
-      <h2>Pipeline Progress</h2>
-      <div class="progress-steps" id="progress-steps">
-        <div class="progress-step" data-step="0">
-          <div class="step-indicator pending"><span class="step-num">0</span></div>
-          <div class="step-info">
-            <span class="step-name">Secondary Structure</span>
-            <span class="step-status pending-text">Pending</span>
-          </div>
+      <h2 class="card-title">Pipeline progress</h2>
+
+      <!-- Headline: where the run is, how long it has taken, how long is left.
+           The ETA is extrapolated from measured stage boundaries, so it starts
+           as a range and narrows; it never pretends to a precision it lacks. -->
+      <div class="run-head">
+        <div class="run-stage">
+          <span class="run-level" id="run-level">—</span>
+          <span class="run-label" id="run-label">Waiting for the first stage…</span>
         </div>
-        <div class="progress-step" data-step="1">
-          <div class="step-indicator pending"><span class="step-num">1</span></div>
-          <div class="step-info">
-            <span class="step-name">3D Structure Prediction</span>
-            <span class="step-status pending-text">Pending</span>
-          </div>
-        </div>
-        <div class="progress-step" data-step="2">
-          <div class="step-indicator pending"><span class="step-num">2</span></div>
-          <div class="step-info">
-            <span class="step-name">CG Refinement</span>
-            <span class="step-status pending-text">Pending</span>
-          </div>
-        </div>
-        <div class="progress-step" data-step="3">
-          <div class="step-indicator pending"><span class="step-num">3</span></div>
-          <div class="step-info">
-            <span class="step-name">All-Atom Placement</span>
-            <span class="step-status pending-text">Pending</span>
-          </div>
-        </div>
-        <div class="progress-step" data-step="4">
-          <div class="step-indicator pending"><span class="step-num">4</span></div>
-          <div class="step-info">
-            <span class="step-name">All-Atom Refinement</span>
-            <span class="step-status pending-text">Pending</span>
-          </div>
-        </div>
-        <div class="progress-step" data-step="5">
-          <div class="step-indicator pending"><span class="step-num">5</span></div>
-          <div class="step-info">
-            <span class="step-name">All-Atom Minimization</span>
-            <span class="step-status pending-text">Pending</span>
-          </div>
+        <div class="run-clocks">
+          <span class="run-clock"><span class="rc-key">elapsed</span><span class="rc-val" id="run-elapsed">0:00</span></span>
+          <span class="run-clock"><span class="rc-key">remaining</span><span class="rc-val" id="run-remaining">measuring…</span></span>
         </div>
       </div>
+
       <div class="progress-bar-wrap">
         <div class="progress-bar-fill" id="progress-bar-fill" style="width:0%"></div>
       </div>
-      <div class="progress-time" id="progress-time"></div>
+      <div class="progress-meta">
+        <span id="run-confidence">estimating from 0 stage boundaries</span>
+        <span id="run-pct">0%</span>
+      </div>
+
+      <!-- The full stage ladder: 12 boundaries for the 6 numbered pipeline
+           levels. Costs are server-side, so the bar and this list agree. -->
+      <div class="run-ladder" id="run-ladder"></div>
+
+      <div class="run-actions">
+        <button class="btn btn-quiet btn-xs" id="run-reconnect" type="button" hidden>
+          Re-attach to running job
+        </button>
+        <span class="run-job" id="run-job"></span>
+      </div>
+
+      <!-- The run also writes a plain log file, so a second terminal can follow
+           it with `Get-Content -Wait <path>`. Showing the path here is what makes
+           that discoverable; the file is line-buffered, so it is live. -->
+      <div class="run-logpath" id="run-logpath" hidden>
+        <span class="rl-key">live log</span>
+        <code id="run-logpath-value"></code>
+        <button class="btn btn-quiet btn-xs" id="run-logpath-copy" type="button">Copy path</button>
+      </div>
+
+      <details class="run-detail">
+        <summary>Step-by-step timeline</summary>
+        <div class="progress-steps" id="progress-steps"></div>
+      </details>
     </div>
 
-    <!-- Downloads -->
     <div class="card" id="result-card" style="display:none">
-      <h2>Downloads</h2>
-      <div class="download-row">
-        <button id="dl-pdb" class="secondary" disabled>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          .pdb
+      <h2 class="card-title">Downloads</h2>
+      <div class="btn-group btn-group-block">
+        <button id="dl-pdb" class="btn btn-quiet" disabled>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          structure.pdb
         </button>
-        <button id="dl-json" class="secondary" disabled>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          .json
+        <button id="dl-json" class="btn btn-quiet" disabled>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          metrics.json
         </button>
       </div>
       <div class="meta" id="meta-summary"></div>
     </div>
 
-    <!-- Sequence display -->
     <div class="card" id="sequence-card" style="display:none">
-      <h2>Sequence</h2>
+      <h2 class="card-title">Synthesised sequence</h2>
       <div class="seq-box" id="seq-box"></div>
     </div>
   </section>
 
-  <!-- ── Center: 3D Viewer ── -->
+  <!-- ── Viewport + readout ── -->
   <section class="right">
     <div id="viewer-wrap">
       <div id="viewer"></div>
       <div id="viewer-placeholder">
-        <svg width="60" height="60" viewBox="0 0 24 24" fill="none" stroke="rgba(77,141,255,0.3)" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><path d="M8 12l2-6 2 4 2-2 2 4"/></svg>
-        <span>3D structure will appear here after prediction</span>
+        <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 12l2-6 2 4 2-2 2 4"/></svg>
+        <span>No structure loaded</span>
+        <small>Submit a sequence, or load a local PDB</small>
       </div>
-      <!-- Representation controls -->
+
       <div id="repr-controls">
-        <select id="repr-select">
-          <option value="surface">Surface</option>
-          <option value="cartoon">Cartoon</option>
-          <option value="ball-stick">Ball &amp; Stick</option>
-          <option value="spacefill">Spacefill</option>
-        </select>
-        <span class="repr-divider">|</span>
-        <label class="opacity-control">
-          Opacity
-          <input type="range" id="opacity-slider" min="0.05" max="1" step="0.05" value="0.35">
+        <label class="chip-field">Representation
+          <select id="repr-select">
+            <option value="surface">Surface</option>
+            <option value="cartoon">Cartoon</option>
+            <option value="ball-stick">Ball &amp; stick</option>
+            <option value="spacefill">Spacefill</option>
+          </select>
+        </label>
+        <span class="chip-sep" aria-hidden="true"></span>
+        <label class="chip-field opacity-control">Opacity
+          <input type="range" id="opacity-slider" min="0.05" max="1" step="0.05" value="0.35" aria-label="Representation opacity">
           <span id="opacity-val">0.35</span>
         </label>
       </div>
-      <!-- Mini-game toolbar -->
+
       <div id="minigame-toolbar" class="minigame-toolbar">
-        <button class="minigame-btn" id="mg-spin" title="Momentum Spin">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        <button class="minigame-btn" id="mg-spin" title="Momentum spin" aria-label="Momentum spin">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
         </button>
-        <button class="minigame-btn" id="mg-highlight" title="Highlight Residue">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
+        <button class="minigame-btn" id="mg-highlight" title="Highlight a residue" aria-label="Highlight a residue">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="16"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
         </button>
-        <button class="minigame-btn" id="mg-measure" title="Measure Distance">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 2l20 20"/><path d="M6 2v4"/><path d="M2 6h4"/><path d="M18 22v-4"/><path d="M22 18h-4"/></svg>
+        <button class="minigame-btn" id="mg-measure" title="Measure a distance" aria-label="Measure a distance">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 2l20 20"/><path d="M6 2v4"/><path d="M2 6h4"/><path d="M18 22v-4"/><path d="M22 18h-4"/></svg>
         </button>
-        <button class="minigame-btn" id="mg-region" title="Focus Region">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <button class="minigame-btn" id="mg-region" title="Focus a region" aria-label="Focus a region">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
         </button>
-        <button class="minigame-btn" id="mg-autorotate" title="Auto-Rotate">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6"/><path d="M21.34 15.57a10 10 0 1 1-.57-8.38"/></svg>
+        <button class="minigame-btn" id="mg-autorotate" title="Auto-rotate" aria-label="Auto-rotate">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M21.5 2v6h-6"/><path d="M21.34 15.57a10 10 0 1 1-.57-8.38"/></svg>
         </button>
       </div>
-      <!-- Residue tooltip -->
+
       <div id="residue-tooltip" class="residue-tooltip" style="display:none"></div>
     </div>
 
-    <!-- ── Right tabbed panel ── -->
+    <!-- ── Readout panel ── -->
     <aside id="fp-panel">
-      <!-- Tab radios (hidden) -->
       <input type="radio" name="tab" id="tab-overview" checked class="tab-radio">
       <label for="tab-overview" class="tab-label">Overview</label>
       <input type="radio" name="tab" id="tab-structure" class="tab-radio">
@@ -287,214 +343,214 @@
       <input type="radio" name="tab" id="tab-console" class="tab-radio">
       <label for="tab-console" class="tab-label">Console</label>
 
-      <!-- Tab: Overview -->
-      <section class="tab-content" data-tab="overview">
-        <div class="panel">
-          <h2>Scoring</h2>
-          <div class="scoring-grid" id="scoring-grid">
-            <div class="score-item" id="score-rsrnasp">
-              <span class="score-label">rsRNASP1</span>
-              <span class="score-value" id="score-rsrnasp-val">--</span>
-              <span class="score-badge pending-badge">Pending</span>
-            </div>
-            <div class="score-item" id="score-dfire">
-              <span class="score-label">DFIRE</span>
-              <span class="score-value" id="score-dfire-val">--</span>
-              <span class="score-badge pending-badge">Pending</span>
-            </div>
-            <div class="score-item" id="score-3drnascore">
-              <span class="score-label">3dRNAscore</span>
-              <span class="score-value" id="score-3drnascore-val">--</span>
-              <span class="score-badge pending-badge">Pending</span>
-            </div>
-          </div>
-        </div>
-        <div class="panel" id="physical-panel">
-          <h2>Physical Signals</h2>
-          <div class="gauge-row" id="gauges-row"></div>
-          <div id="physical-extra"></div>
-        </div>
-        <div class="panel" id="circdesign-panel">
-          <h2>circDesign</h2>
-          <div id="circdesign-cards"></div>
-        </div>
-        <div class="panel">
-          <h2>Prediction Info</h2>
-          <div id="scalar-cards"><div class="legend">Predictions will populate this panel</div></div>
-        </div>
-        <div class="panel">
-          <h2>Coloring</h2>
-          <select id="scheme-select" disabled></select>
-          <div class="legend" id="scheme-legend"></div>
-          <div class="gradient-bar" id="gradient-bar"></div>
-        </div>
-      </section>
-
-      <!-- Tab: Structure Quality -->
-      <section class="tab-content" data-tab="structure">
-        <div class="panel">
-          <h2>Structure Quality</h2>
-          <div class="quality-metrics" id="quality-metrics">
-            <div class="metric-row" id="qm-closure">
-              <span class="metric-label">BSJ Closure</span>
-              <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-closure-bar"></div></div>
-              <span class="metric-val" id="qm-closure-val">--</span>
-            </div>
-            <div class="metric-row" id="qm-bond">
-              <span class="metric-label">Bond RMSD</span>
-              <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-bond-bar"></div></div>
-              <span class="metric-val" id="qm-bond-val">--</span>
-            </div>
-            <div class="metric-row" id="qm-pair">
-              <span class="metric-label">Pair Satisfaction</span>
-              <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-pair-bar"></div></div>
-              <span class="metric-val" id="qm-pair-val">--</span>
-            </div>
-            <div class="metric-row" id="qm-clash">
-              <span class="metric-label">Clash Count</span>
-              <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-clash-bar"></div></div>
-              <span class="metric-val" id="qm-clash-val">--</span>
+        <!-- Tab: Overview -->
+        <section class="tab-content" data-tab="overview">
+          <div class="panel">
+            <h2 class="panel-title">Scoring</h2>
+            <div class="scoring-grid" id="scoring-grid">
+              <div class="score-item" id="score-rsrnasp">
+                <span class="score-label">rsRNASP1</span>
+                <span class="score-value" id="score-rsrnasp-val">--</span>
+                <span class="score-badge pending-badge">Pending</span>
+              </div>
+              <div class="score-item" id="score-dfire">
+                <span class="score-label">DFIRE</span>
+                <span class="score-value" id="score-dfire-val">--</span>
+                <span class="score-badge pending-badge">Pending</span>
+              </div>
+              <div class="score-item" id="score-3drnascore">
+                <span class="score-label">3dRNAscore</span>
+                <span class="score-value" id="score-3drnascore-val">--</span>
+                <span class="score-badge pending-badge">Pending</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="panel" id="pair-dist-panel">
-          <h2>Pair Distance Distribution</h2>
-          <canvas id="pair-dist-chart" height="80"></canvas>
-          <div class="pair-dist-legend" id="pair-dist-legend"></div>
-        </div>
-        <div class="panel" id="pair-quality-panel">
-          <h2>Pairing Quality</h2>
-          <div id="pair-quality-cards"></div>
-        </div>
-        <div class="panel">
-          <h2>Structure Stats</h2>
-          <div id="stats-cards"><div class="legend">Awaiting prediction...</div></div>
-        </div>
-      </section>
-
-      <!-- Tab: Immune Activation -->
-      <section class="tab-content" data-tab="immune">
-        <div class="panel" id="immune-overview-panel">
-          <h2>dsRNA / ssRNA Balance</h2>
-          <div class="immune-balance" id="immune-balance"></div>
-        </div>
-        <div class="panel" id="immune-panel">
-          <h2>Immune Pathway</h2>
-          <div id="immune-bars"></div>
-          <div id="motif-section"></div>
-        </div>
-        <div class="panel" id="rigi-panel">
-          <h2>RIG-I Motifs to BSJ</h2>
-          <div id="rigi-table"></div>
-        </div>
-        <div class="panel" id="flexibility-panel">
-          <h2>Local Flexibility</h2>
-          <div id="flexibility-cards"></div>
-        </div>
-        <div class="panel" id="receptor-panel">
-          <h2>Receptor Binding</h2>
-          <div id="receptor-cards"></div>
-        </div>
-      </section>
-
-      <!-- Tab: Sequence -->
-      <section class="tab-content" data-tab="sequence">
-        <div class="panel" id="seq-comp-panel">
-          <h2>Sequence Composition</h2>
-          <div id="seq-comp-cards"></div>
-          <canvas id="nucleotide-bar" height="40"></canvas>
-        </div>
-        <div class="panel" id="gc-region-panel">
-          <h2>GC Content by Region</h2>
-          <div id="gc-region-cards"></div>
-        </div>
-        <div class="panel" id="energy-panel">
-          <h2>Per-Residue Energy</h2>
-          <canvas id="energy-heatmap" height="20"></canvas>
-          <div id="energy-top-list"></div>
-        </div>
-      </section>
-
-      <!-- Tab: Thermodynamics -->
-      <section class="tab-content" data-tab="thermo">
-        <div class="panel" id="stemloop-panel">
-          <h2>Stem-Loop Distribution</h2>
-          <div id="stemloop-stats"></div>
-          <canvas id="stem-histogram" height="120"></canvas>
-          <canvas id="loop-histogram" height="120"></canvas>
-        </div>
-        <div class="panel" id="energy-conv-panel">
-          <h2>Energy Convergence</h2>
-          <canvas id="energy-chart" height="160"></canvas>
-        </div>
-        <div class="panel" id="mfe-panel">
-          <h2>Thermodynamics</h2>
-          <div id="mfe-cards"></div>
-        </div>
-      </section>
-
-      <!-- Tab: Shape -->
-      <section class="tab-content" data-tab="shape">
-        <div class="panel" id="shape-class-panel">
-          <h2>Shape Classification</h2>
-          <div id="shape-class-label"></div>
-          <div id="shape-metric-cards"></div>
-        </div>
-        <div class="panel" id="eigen-panel">
-          <h2>Gyration Eigenvalues</h2>
-          <canvas id="eigen-chart" height="100"></canvas>
-        </div>
-        <div class="panel" id="hull-panel">
-          <h2>Convex Hull</h2>
-          <div id="hull-cards"></div>
-        </div>
-      </section>
-
-      <!-- Tab: Console -->
-      <section class="tab-content" data-tab="console">
-        <div class="panel">
-          <h2>Console</h2>
-          <div class="console-toolbar">
-            <button class="console-btn" id="console-clear" title="Clear">Clear</button>
-            <button class="console-btn" id="console-copy" title="Copy All">Copy</button>
-            <label class="console-btn"><input type="checkbox" id="console-autoscroll" checked> Auto-scroll</label>
+          <div class="panel" id="physical-panel">
+            <h2 class="panel-title">Physical signals</h2>
+            <div class="gauge-row" id="gauges-row"></div>
+            <div id="physical-extra"></div>
           </div>
-          <div class="console-panel" id="console-output">
-            <pre class="console-welcome" id="console-welcome">
+          <div class="panel" id="circdesign-panel">
+            <h2 class="panel-title">circDesign</h2>
+            <div id="circdesign-cards"></div>
+          </div>
+          <div class="panel">
+            <h2 class="panel-title">Prediction info</h2>
+            <div id="scalar-cards"><div class="legend">Predictions will populate this panel</div></div>
+          </div>
+          <div class="panel">
+            <h2 class="panel-title">Colouring</h2>
+            <select id="scheme-select" disabled></select>
+            <div class="legend" id="scheme-legend"></div>
+            <div class="gradient-bar" id="gradient-bar"></div>
+          </div>
+        </section>
+
+        <!-- Tab: Structure quality -->
+        <section class="tab-content" data-tab="structure">
+          <div class="panel">
+            <h2 class="panel-title">Structure quality</h2>
+            <div class="quality-metrics" id="quality-metrics">
+              <div class="metric-row" id="qm-closure">
+                <span class="metric-label">BSJ closure</span>
+                <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-closure-bar"></div></div>
+                <span class="metric-val" id="qm-closure-val">--</span>
+              </div>
+              <div class="metric-row" id="qm-bond">
+                <span class="metric-label">Bond RMSD</span>
+                <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-bond-bar"></div></div>
+                <span class="metric-val" id="qm-bond-val">--</span>
+              </div>
+              <div class="metric-row" id="qm-pair">
+                <span class="metric-label">Pair satisfaction</span>
+                <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-pair-bar"></div></div>
+                <span class="metric-val" id="qm-pair-val">--</span>
+              </div>
+              <div class="metric-row" id="qm-clash">
+                <span class="metric-label">Clash count</span>
+                <div class="metric-bar-track"><div class="metric-bar-fill" id="qm-clash-bar"></div></div>
+                <span class="metric-val" id="qm-clash-val">--</span>
+              </div>
+            </div>
+          </div>
+          <div class="panel" id="pair-dist-panel">
+            <h2 class="panel-title">Pair distance distribution</h2>
+            <canvas id="pair-dist-chart" height="80"></canvas>
+            <div class="pair-dist-legend" id="pair-dist-legend"></div>
+          </div>
+          <div class="panel" id="pair-quality-panel">
+            <h2 class="panel-title">Pairing quality</h2>
+            <div id="pair-quality-cards"></div>
+          </div>
+          <div class="panel">
+            <h2 class="panel-title">Structure statistics</h2>
+            <div id="stats-cards"><div class="legend">Awaiting prediction…</div></div>
+          </div>
+        </section>
+
+        <!-- Tab: Immune -->
+        <section class="tab-content" data-tab="immune">
+          <div class="panel" id="immune-overview-panel">
+            <h2 class="panel-title">dsRNA / ssRNA balance</h2>
+            <div class="immune-balance" id="immune-balance"></div>
+          </div>
+          <div class="panel" id="immune-panel">
+            <h2 class="panel-title">Immune pathway</h2>
+            <div id="immune-bars"></div>
+            <div id="motif-section"></div>
+          </div>
+          <div class="panel" id="rigi-panel">
+            <h2 class="panel-title">RIG-I motifs to BSJ</h2>
+            <div id="rigi-table"></div>
+          </div>
+          <div class="panel" id="flexibility-panel">
+            <h2 class="panel-title">Local flexibility</h2>
+            <div id="flexibility-cards"></div>
+          </div>
+          <div class="panel" id="receptor-panel">
+            <h2 class="panel-title">Receptor binding</h2>
+            <div id="receptor-cards"></div>
+          </div>
+        </section>
+
+        <!-- Tab: Sequence -->
+        <section class="tab-content" data-tab="sequence">
+          <div class="panel" id="seq-comp-panel">
+            <h2 class="panel-title">Sequence composition</h2>
+            <div id="seq-comp-cards"></div>
+            <canvas id="nucleotide-bar" height="40"></canvas>
+          </div>
+          <div class="panel" id="gc-region-panel">
+            <h2 class="panel-title">GC content by region</h2>
+            <div id="gc-region-cards"></div>
+          </div>
+          <div class="panel" id="energy-panel">
+            <h2 class="panel-title">Per-residue energy</h2>
+            <canvas id="energy-heatmap" height="20"></canvas>
+            <div id="energy-top-list"></div>
+          </div>
+        </section>
+
+        <!-- Tab: Thermo -->
+        <section class="tab-content" data-tab="thermo">
+          <div class="panel" id="stemloop-panel">
+            <h2 class="panel-title">Stem-loop distribution</h2>
+            <div id="stemloop-stats"></div>
+            <canvas id="stem-histogram" height="120"></canvas>
+            <canvas id="loop-histogram" height="120"></canvas>
+          </div>
+          <div class="panel" id="energy-conv-panel">
+            <h2 class="panel-title">Energy convergence</h2>
+            <canvas id="energy-chart" height="160"></canvas>
+          </div>
+          <div class="panel" id="mfe-panel">
+            <h2 class="panel-title">Thermodynamics</h2>
+            <div id="mfe-cards"></div>
+          </div>
+        </section>
+
+        <!-- Tab: Shape -->
+        <section class="tab-content" data-tab="shape">
+          <div class="panel" id="shape-class-panel">
+            <h2 class="panel-title">Shape classification</h2>
+            <div id="shape-class-label"></div>
+            <div id="shape-metric-cards"></div>
+          </div>
+          <div class="panel" id="eigen-panel">
+            <h2 class="panel-title">Gyration eigenvalues</h2>
+            <canvas id="eigen-chart" height="100"></canvas>
+          </div>
+          <div class="panel" id="hull-panel">
+            <h2 class="panel-title">Convex hull</h2>
+            <div id="hull-cards"></div>
+          </div>
+        </section>
+
+        <!-- Tab: Console -->
+        <section class="tab-content" data-tab="console">
+          <div class="panel panel-flush">
+            <h2 class="panel-title">Console</h2>
+            <div class="console-toolbar">
+              <button class="btn btn-quiet btn-xs" id="console-clear">Clear</button>
+              <button class="btn btn-quiet btn-xs" id="console-copy">Copy</button>
+              <label class="switch switch-inline"><input type="checkbox" id="console-autoscroll" checked><span>Auto-scroll</span></label>
+            </div>
+            <div class="console-panel" id="console-output">
+              <pre class="console-welcome" id="console-welcome">
  ____   ___   ____ _   _ _____ _____ ____  ____
 |  _ \ / _ \ / ___| | | |_   _| ____|  _ \/ ___|
 | | | | | | | |   | |_| | | | |  _| | | | \___ \
 | |_| | |_| | |___|  _  | | | | |___| |_| |___) |
 |____/ \___/ \____|_| |_| |_| |_____|____/|____/
 
-Waiting for prediction to start...
-Connect to SSE stream for real-time output.
-            </pre>
+Waiting for a prediction to start.
+The SSE stream carries live pipeline output once one is running.
+              </pre>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
     </aside>
   </section>
 
-  <button class="panel-toggle aside-toggle" id="aside-toggle" title="Collapse/expand right panel">&#9654;</button>
+  <button class="panel-toggle panel-toggle-right" id="aside-toggle" title="Collapse or expand the readout panel" aria-label="Toggle readout panel">&#9654;</button>
 </div>
 
-<!-- ═══════════════ FOOTER ═══════════════ -->
-<footer>
-  <span>method: <code id="method-foot">--</code></span>
-  <span>closure: <code id="closure-foot">--</code></span>
-  <span>elapsed: <code id="elapsed-foot">--</code></span>
+<!-- ═══════════════ STATUS BAR ═══════════════ -->
+<footer class="statusbar">
+  <span class="status-cell"><span class="status-key">method</span> <code id="method-foot">--</code></span>
+  <span class="status-cell"><span class="status-key">closure</span> <code id="closure-foot">--</code></span>
+  <span class="status-cell"><span class="status-key">elapsed</span> <code id="elapsed-foot">--</code></span>
 </footer>
 
-<!-- ═══════════════ FEEDBACK MODAL ═══════════════ -->
-<div class="feedback-modal" id="feedback-modal">
+<!-- ═══════════════ FEEDBACK ═══════════════ -->
+<div class="feedback-modal" id="feedback-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-title">
   <div class="feedback-dialog">
     <div class="feedback-header">
-      <h2>Prediction Feedback</h2>
-      <button class="feedback-close" id="feedback-close">&times;</button>
+      <h2 id="feedback-title">Prediction feedback</h2>
+      <button class="feedback-close" id="feedback-close" aria-label="Close feedback">&times;</button>
     </div>
     <div class="feedback-body">
-      <label class="feedback-label">Quality Rating</label>
+      <span class="field-caption">Quality rating</span>
       <div class="star-rating" id="star-rating">
         <span class="star" data-value="1">&#9733;</span>
         <span class="star" data-value="2">&#9733;</span>
@@ -502,16 +558,16 @@ Connect to SSE stream for real-time output.
         <span class="star" data-value="4">&#9733;</span>
         <span class="star" data-value="5">&#9733;</span>
       </div>
-      <label class="feedback-label">Comments</label>
-      <textarea id="feedback-comments" rows="4" placeholder="Describe the prediction quality..."></textarea>
-      <label class="feedback-label">Tags</label>
+      <span class="field-caption">Comments</span>
+      <textarea id="feedback-comments" rows="4" spellcheck="false" placeholder="Describe the prediction quality…"></textarea>
+      <span class="field-caption">Tags</span>
       <div class="feedback-tags">
         <label class="feedback-tag"><input type="checkbox" value="structure_looks_reasonable"> Structure looks reasonable</label>
         <label class="feedback-tag"><input type="checkbox" value="bsj_closure_good"> BSJ closure good</label>
         <label class="feedback-tag"><input type="checkbox" value="would_use_again"> Would use again</label>
         <label class="feedback-tag"><input type="checkbox" value="report_issue"> Report issue</label>
       </div>
-      <button class="primary" id="feedback-submit">Submit Feedback</button>
+      <button class="btn btn-primary" id="feedback-submit">Submit feedback</button>
       <div class="feedback-history" id="feedback-history"></div>
     </div>
   </div>
@@ -526,6 +582,7 @@ Connect to SSE stream for real-time output.
 <script src="/web/modules/export.js"></script>
 <script src="/web/modules/feedback.js"></script>
 <script src="/web/modules/minigame.js"></script>
+<script src="/web/modules/setup.js"></script>
 <script src="/web/app.js?v=20260822"></script>
 </body>
 </html>

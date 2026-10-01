@@ -39,7 +39,6 @@
   var progressCard = $('progress-card');
   var progressSteps = $('progress-steps');
   var progressBarFill = $('progress-bar-fill');
-  var progressTime = $('progress-time');
   var resultCard = $('result-card');
   var dlPdb = $('dl-pdb');
   var dlJson = $('dl-json');
@@ -112,7 +111,7 @@
       showToast('Server connected', 'success');
     }).catch(function () {
       serverStatus.textContent = 'server unreachable';
-      serverStatus.style.color = '#f87171';
+      serverStatus.style.color = 'var(--err)';
     });
   }
   probeHealth();
@@ -160,6 +159,35 @@
     });
   }
 
+  /* ═══════════════ THEME ═══════════════ */
+
+  /* Cycle auto -> dark -> light -> auto. The inline script in index.html has
+     already applied a saved value before first paint; this only handles the
+     button and the persistence. */
+  var themeToggle = $('theme-toggle');
+  if (themeToggle) {
+    var THEME_ORDER = ['auto', 'dark', 'light'];
+    themeToggle.addEventListener('click', function () {
+      var current = 'auto';
+      try { current = localStorage.getItem('tf-theme') || 'auto'; } catch (e) {}
+      var next = THEME_ORDER[(THEME_ORDER.indexOf(current) + 1) % THEME_ORDER.length];
+      if (next === 'auto') {
+        document.documentElement.removeAttribute('data-theme');
+        try { localStorage.removeItem('tf-theme'); } catch (e) {}
+      } else {
+        document.documentElement.setAttribute('data-theme', next);
+        try { localStorage.setItem('tf-theme', next); } catch (e) {}
+      }
+      themeToggle.title = 'Theme: ' + next;
+      /* Canvas/SVG charts cache resolved token colours, so they must re-read
+         after the palette changes or they keep the old theme's colours. */
+      if (TF.Charts && TF.Charts.refreshTokens) TF.Charts.refreshTokens();
+    });
+    try {
+      themeToggle.title = 'Theme: ' + (localStorage.getItem('tf-theme') || 'auto');
+    } catch (e) {}
+  }
+
   /* ═══════════════ REPRESENTATION / OPACITY ═══════════════ */
 
   var reprSelect = $('repr-select');
@@ -175,6 +203,155 @@
     if (viewer && viewer.setSurfaceOpacity) viewer.setSurfaceOpacity(v);
   });
 
+  /* ═══════════════ PARAMETERS (built from the server schema) ═══════════════ */
+
+  /* The knob list is not written here. serve.py owns _PARAM_SPEC, derives each
+     default from isrnaclong_pipeline's real signature, and serves the result at
+     /api/schema; this reads it and builds the form. A knob added server-side
+     shows up here with no frontend edit, which is the point: the previous
+     hand-written list offered 8 of the pipeline's 34 options and three of its
+     values contradicted the demo run. */
+  var paramSchema = null;
+  var paramInputs = {};
+
+  function loadParamSchema() {
+    var host = $('params-form');
+    if (!host) return;
+    fetch('/api/schema').then(function (r) { return r.json(); }).then(function (schema) {
+      paramSchema = schema;
+      buildParamForm(host, schema);
+    }).catch(function (e) {
+      host.innerHTML = '<div class="legend">Could not load /api/schema — ' +
+        'the pipeline will run with its own defaults.</div>';
+      if (window.console) console.warn('schema load failed:', e);
+    });
+  }
+
+  function buildParamForm(host, schema) {
+    host.innerHTML = '';
+    paramInputs = {};
+    var open = schema.open_by_default || [];
+
+    (schema.groups || []).forEach(function (group) {
+      var box = document.createElement('details');
+      box.className = 'param-group';
+      if (open.indexOf(group.name) !== -1) box.open = true;
+
+      var sum = document.createElement('summary');
+      sum.innerHTML = '<span class="pg-name">' + group.name + '</span>' +
+        '<span class="pg-count">' + group.params.length + '</span>';
+      box.appendChild(sum);
+
+      var body = document.createElement('div');
+      body.className = 'param-body';
+
+      group.params.forEach(function (p) {
+        var row = document.createElement('label');
+        row.className = 'param-row';
+        row.title = p.help || '';
+        var id = 'param-' + p.name;
+
+        var name = document.createElement('span');
+        name.className = 'param-name';
+        name.textContent = p.label + (p.unit ? ' (' + p.unit + ')' : '');
+        row.appendChild(name);
+
+        var input;
+        if (p.kind === 'bool') {
+          input = document.createElement('input');
+          input.type = 'checkbox';
+          input.checked = !!p.default;
+          row.classList.add('param-row-bool');
+        } else if (p.kind === 'text') {
+          input = document.createElement('input');
+          input.type = 'text';
+          input.value = p.default == null ? '' : p.default;
+          input.placeholder = p.placeholder || '';
+        } else {
+          input = document.createElement('input');
+          input.type = 'number';
+          input.value = p.default;
+          if (p.min != null) input.min = p.min;
+          if (p.max != null) input.max = p.max;
+          input.step = p.step != null ? p.step : (p.kind === 'float' ? 0.01 : 1);
+        }
+        input.id = id;
+        input.dataset.param = p.name;
+        input.addEventListener('change', function () { markTouched(input, p); });
+        input.addEventListener('input', function () { markTouched(input, p); });
+        row.appendChild(input);
+
+        if (p.help) {
+          var help = document.createElement('span');
+          help.className = 'param-help';
+          help.textContent = p.help;
+          row.appendChild(help);
+        }
+
+        paramInputs[p.name] = { el: input, spec: p };
+        body.appendChild(row);
+      });
+
+      var reset = document.createElement('button');
+      reset.type = 'button';
+      reset.className = 'btn btn-quiet btn-xs param-reset';
+      reset.textContent = 'Reset group';
+      reset.addEventListener('click', function () {
+        group.params.forEach(function (p) {
+          var entry = paramInputs[p.name];
+          if (!entry) return;
+          if (p.kind === 'bool') entry.el.checked = !!p.default;
+          else entry.el.value = p.default == null ? '' : p.default;
+          markTouched(entry.el, p);
+        });
+      });
+      body.appendChild(reset);
+
+      box.appendChild(body);
+      host.appendChild(box);
+    });
+
+    var foot = document.createElement('div');
+    foot.className = 'param-foot';
+    foot.textContent = 'defaults from ' + (schema.path || 'the pipeline signature') +
+      ' — ' + (schema.knob_count || materialisedCount()) + ' of ' +
+      (schema.pipeline_option_count || '?') + ' pipeline options';
+    host.appendChild(foot);
+  }
+
+  /* Highlight a value that no longer matches the pipeline default, so a changed
+     run is visible at a glance before submitting. */
+  function markTouched(input, spec) {
+    var isDefault;
+    if (spec.kind === 'bool') isDefault = input.checked === !!spec.default;
+    else if (spec.kind === 'text') isDefault = input.value === (spec.default == null ? '' : spec.default);
+    else isDefault = parseFloat(input.value) === spec.default;
+    input.classList.toggle('touched', !isDefault);
+  }
+
+  function materialisedCount() {
+    return Object.keys(paramInputs).length;
+  }
+
+  /* Collect the form into the pipeline kwargs. The server clamps and coerces
+     again, so a bad value cannot reach the pipeline from here either. */
+  function collectParams() {
+    var out = {};
+    Object.keys(paramInputs).forEach(function (name) {
+      var entry = paramInputs[name];
+      var el = entry.el;
+      if (entry.spec.kind === 'bool') out[name] = !!el.checked;
+      else if (entry.spec.kind === 'text') out[name] = el.value;
+      else {
+        var v = parseFloat(el.value);
+        if (!isNaN(v)) out[name] = v;          // leave it out rather than send NaN
+      }
+    });
+    return out;
+  }
+
+  loadParamSchema();
+
   /* ═══════════════ PIPELINE PROGRESS ═══════════════ */
 
   var PIPELINE_STEPS = [
@@ -188,89 +365,328 @@
   var STEP_COUNT = PIPELINE_STEPS.length;
 
   function resetProgress() {
-    if (!progressSteps) return;
-    var steps = progressSteps.querySelectorAll('.progress-step');
-    steps.forEach(function (el) {
-      var ind = el.querySelector('.step-indicator');
-      var status = el.querySelector('.step-status');
-      ind.className = 'step-indicator pending';
-      status.className = 'step-status pending-text';
-      status.textContent = 'Pending';
-      el.classList.remove('active-step', 'done-step');
-    });
+    if (progressSteps) {
+      var steps = progressSteps.querySelectorAll('.progress-step');
+      steps.forEach(function (el) {
+        var ind = el.querySelector('.step-indicator');
+        var status = el.querySelector('.step-status');
+        ind.className = 'step-indicator pending';
+        status.className = 'step-status pending-text';
+        status.textContent = 'Pending';
+        el.classList.remove('active-step', 'done-step');
+      });
+    }
     if (progressBarFill) progressBarFill.style.width = '0%';
-    if (progressTime) progressTime.textContent = '';
     if (progressCard) progressCard.style.display = '';
+    applyRunState(null);
+    syncHeaderStrip(-1, 'idle');
   }
 
-  function updateProgress(activeLevel, statusText) {
-    if (!progressSteps) return;
-    var steps = progressSteps.querySelectorAll('.progress-step');
-    var pct = 0;
-    steps.forEach(function (el, i) {
+  /* ═══════════════ RUN STATE (server-authoritative) ═══════════════ */
+
+  /* Everything below renders what the server believes, rather than a second
+     guess computed in the browser. The previous bar was fed by three hard-coded
+     assignments in serve.py (5, 10, 20) and therefore sat at 20% for the whole
+     of Levels 1-5 — most of a multi-hour run. serve.py now derives progress from
+     the `[Level X.Y]` banners the pipeline prints, and this just draws it. */
+  var runLevel = $('run-level');
+  var runLabel = $('run-label');
+  var runElapsed = $('run-elapsed');
+  var runRemaining = $('run-remaining');
+  var runConfidence = $('run-confidence');
+  var runPct = $('run-pct');
+  var runLadder = $('run-ladder');
+  var runJob = $('run-job');
+  var runReconnect = $('run-reconnect');
+  var runLogPathWrap = $('run-logpath');
+  var runLogPathValue = $('run-logpath-value');
+  var ladderBuilt = false;
+
+  /* The stage ladder is published by the server, so the bar and the list cannot
+     disagree about how many stages there are or what they are called. */
+  function buildLadder(levels, currentIdx) {
+    if (!runLadder || !levels || !levels.length) return;
+    if (!ladderBuilt) {
+      runLadder.innerHTML = '';
+      // Widths are computed from the weights here rather than left to flex-grow.
+      // flex-grow only distributes space left over after the base sizes, and
+      // each segment's base is its own (narrow) label, so grow ratios produced
+      // near-equal segments. Percentages of the total make the widths exactly
+      // proportional to the modelled cost.
+      var totalCost = 0;
+      levels.forEach(function (lv) { totalCost += Math.max(lv.cost, 0.004); });
+      levels.forEach(function (lv) {
+        var el = document.createElement('div');
+        el.className = 'ladder-step';
+        el.dataset.level = lv.level;
+        el.title = 'Level ' + lv.level + ' — ' + lv.label +
+          ' (modelled at ~' + Math.round(lv.cost * 100) + '% of the run)';
+        var share = Math.max(lv.cost, 0.004) / (totalCost || 1);
+        el.style.flexBasis = (share * 100).toFixed(2) + '%';
+        var bar = document.createElement('span');
+        bar.className = 'ladder-cost';
+        var name = document.createElement('span');
+        name.className = 'ladder-name';
+        name.textContent = lv.level;
+        el.appendChild(bar);
+        el.appendChild(name);
+        runLadder.appendChild(el);
+      });
+      ladderBuilt = true;
+    }
+    var nodes = runLadder.querySelectorAll('.ladder-step');
+    nodes.forEach(function (el, i) {
+      el.classList.remove('active', 'done', 'failed');
+      if (currentIdx < 0) return;
+      if (i < currentIdx) el.classList.add('done');
+      else if (i === currentIdx) el.classList.add('active');
+    });
+  }
+
+  function fmtClock(seconds) {
+    if (seconds == null) return '—';
+    var s = Math.max(0, Math.round(seconds));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h > 0) return h + 'h ' + m + 'm';
+    if (m > 0) return m + 'm ' + (s % 60) + 's';
+    return s + 's';
+  }
+
+  /* The step-by-step timeline is rendered from the server's plan, so it lists
+     every stage the run will actually execute — including the sub-levels such
+     as 2.5 and 5.5 that a six-entry hand-written list could not show — and it
+     carries each finished stage's measured duration. */
+  function renderPlan(plan) {
+    if (!progressSteps || !plan || !plan.length) return;
+    if (progressSteps.childElementCount !== plan.length) {
+      progressSteps.innerHTML = '';
+      plan.forEach(function (item) {
+        var el = document.createElement('div');
+        el.className = 'progress-step';
+        el.dataset.step = item.level;
+        el.innerHTML =
+          '<div class="step-indicator pending"><span class="step-num"></span></div>' +
+          '<div class="step-info">' +
+            '<span class="step-name"></span>' +
+            '<span class="step-status pending-text">Pending</span>' +
+          '</div>';
+        progressSteps.appendChild(el);
+      });
+    }
+    plan.forEach(function (item, i) {
+      var el = progressSteps.children[i];
+      if (!el) return;
       var ind = el.querySelector('.step-indicator');
+      var name = el.querySelector('.step-name');
       var status = el.querySelector('.step-status');
+      ind.querySelector('.step-num').textContent = item.level;
+      name.textContent = item.label;
       el.classList.remove('active-step', 'done-step');
-      if (i < activeLevel) {
-        ind.className = 'step-indicator done';
-        status.className = 'step-status done-text';
-        status.textContent = 'Done';
+      var cls = item.state === 'done' ? 'done' : item.state === 'running' ? 'running' : 'pending';
+      ind.className = 'step-indicator ' + cls;
+      status.className = 'step-status ' + cls + '-text';
+      if (item.state === 'done') {
         el.classList.add('done-step');
-        pct = ((i + 1) / STEP_COUNT) * 100;
+        // The measured duration is the useful number for a finished stage.
+        status.textContent = item.seconds != null ? fmtClock(item.seconds) : 'Done';
+      } else if (item.state === 'running') {
+        el.classList.add('active-step');
+        status.textContent = 'Running…';
+      } else {
+        status.textContent = 'Pending · ~' + item.weight_pct + '%';
+      }
+    });
+  }
+
+  /* One function renders every field, so a refresh and a live SSE heartbeat
+     produce an identical view from the same payload. */
+  function applyRunState(state) {
+    if (!state) {
+      if (runLevel) runLevel.textContent = '—';
+      if (runLabel) runLabel.textContent = 'Waiting for the first stage…';
+      if (runElapsed) runElapsed.textContent = '0:00';
+      if (runRemaining) runRemaining.textContent = 'measuring…';
+      if (runConfidence) runConfidence.textContent = 'estimating from 0 stage boundaries';
+      if (runPct) runPct.textContent = '0%';
+      if (runJob) runJob.textContent = '';
+      if (runLadder) buildLadder(null, -1);
+      renderPlan(null);
+      return;
+    }
+
+    var idx = state.current_level == null ? -1 : state.current_level;
+    buildLadder(state.levels, idx);
+    renderPlan(state.plan);
+
+    if (runLevel) {
+      runLevel.textContent = state.level_name != null ? 'Level ' + state.level_name : '—';
+    }
+    if (runLabel) {
+      runLabel.textContent = state.stage_label || state.message || '—';
+      runLabel.classList.toggle('is-error', state.status === 'error');
+      runLabel.classList.toggle('is-done', state.status === 'done');
+    }
+    if (runElapsed) runElapsed.textContent = fmtClock(state.elapsed);
+    if (runPct) runPct.textContent = (state.progress == null ? 0 : state.progress) + '%';
+    if (progressBarFill && state.progress != null) {
+      progressBarFill.style.width = Math.max(state.progress, state.status === 'running' ? 1 : 0) + '%';
+    }
+
+    var eta = state.eta || {};
+    if (runRemaining) {
+      if (eta.state === 'measuring') runRemaining.textContent = 'measuring…';
+      else if (eta.state === 'done') runRemaining.textContent = 'done';
+      else if (eta.state === 'stopped') runRemaining.textContent = 'stopped';
+      else if (eta.remaining_low == null) runRemaining.textContent = '—';
+      // A single number would claim precision the anchor points do not support,
+      // so the range is shown as-is.
+      else runRemaining.textContent = fmtClock(eta.remaining_low) + '–' + fmtClock(eta.remaining_high);
+      runRemaining.title = eta.basis || '';
+      runRemaining.dataset.confidence = eta.confidence || 'none';
+    }
+    if (runConfidence) {
+      runConfidence.textContent = eta.basis || '';
+    }
+    if (runJob && state.job_id) {
+      runJob.textContent = 'job ' + state.job_id +
+        (state.sequence_length ? ' · ' + state.sequence_length + ' nt' : '');
+    }
+    // Publish the log file path so a second terminal can follow the run. The
+    // server writes it line-buffered, so `Get-Content -Wait` on it is live.
+    if (runLogPathWrap) {
+      if (state.log_path) {
+        runLogPathWrap.hidden = false;
+        if (runLogPathValue) runLogPathValue.textContent = state.log_path;
+      } else {
+        runLogPathWrap.hidden = true;
+      }
+    }
+  }
+
+  /* A page refresh loses the job id the browser was holding. Rather than
+     offering to start a second run — which the server would reject as a
+     conflict anyway — ask the server what it is doing and re-attach. */
+  function reconnectToRunningJob() {
+    fetch('/api/current').then(function (r) { return r.json(); }).then(function (s) {
+      if (!s.has_job) return;
+      applyRunState(s);
+      if (s.job_id) {
+        currentJobId = s.job_id;
+        TF.State.jobId = s.job_id;
+      }
+      if (s.status === 'running') {
+        if (progressCard) progressCard.style.display = '';
+        if (runReconnect) runReconnect.hidden = true;
+        pipelineStartTime = s.started_at ? s.started_at * 1000 : Date.now();
+        if (predictBtn) predictBtn.disabled = true;
+        updateProgress(s.current_level == null ? 0 : s.current_level, 'running');
+        showToast('Re-attached to running job ' + s.job_id, 'info');
+        if (TF.Console && TF.Console.connect) TF.Console.connect(s.job_id);
+        startPolling(s.job_id);
+      } else if (s.status === 'done' && s.job_id) {
+        /* Finished while the page was away. Pull the result rather than asking
+           the user to run a multi-hour job again. */
+        currentJobId = s.job_id;
+        TF.State.jobId = s.job_id;
+        if (progressCard) progressCard.style.display = '';
+        updateProgress(STEP_COUNT - 1, 'done');
+        fetchResult(currentJobId);
+        showToast('Recovered the previous run (' + s.job_id + ')', 'success');
+      } else if (s.status === 'error') {
+        if (progressCard) progressCard.style.display = '';
+        applyRunState(s);
+        showToast('Last run failed: ' + (s.error || 'unknown'), 'error');
+      }
+    }).catch(function () { /* nothing to re-attach to */ });
+  }
+
+  /* Mirror the progress card onto the pipeline strip in the header, so the six
+     levels are readable without opening the Parameters column. Class names
+     differ on purpose: .pipe-step is the monospace strip, .progress-step is the
+     card. Without this the strip would be fixed decoration that lies about
+     which level is running. */
+  function syncHeaderStrip(activeLevel, statusText) {
+    var strip = $('hero-pipeline');
+    if (!strip) return;
+    strip.querySelectorAll('.pipe-step').forEach(function (el, i) {
+      el.classList.remove('active', 'done');
+      if (statusText === 'idle') return;
+      if (i < activeLevel || (i === activeLevel && statusText === 'done')) {
+        el.classList.add('done');
+      } else if (i === activeLevel && statusText === 'error') {
+        el.classList.add('failed');
       } else if (i === activeLevel) {
-        if (statusText === 'error') {
-          ind.className = 'step-indicator error';
-          status.className = 'step-status error-text';
-          status.textContent = 'Error';
-        } else if (statusText === 'done') {
+        el.classList.add('active');
+      }
+    });
+  }
+
+  /* Layer two of the progress UI: the per-step detail list from the local step
+     machine. The server-driven bar and ladder above are authoritative for how
+     far the run has got; this list is the fine-grained narration.
+     progressSteps is empty until the server's ladder has been rendered, so this
+     loops over whatever is present rather than assuming six entries. */
+  function updateProgress(activeLevel, statusText) {
+    if (progressSteps) {
+      var steps = progressSteps.querySelectorAll('.progress-step');
+      var pct = 0;
+      steps.forEach(function (el, i) {
+        var ind = el.querySelector('.step-indicator');
+        var status = el.querySelector('.step-status');
+        el.classList.remove('active-step', 'done-step');
+        if (i < activeLevel) {
           ind.className = 'step-indicator done';
           status.className = 'step-status done-text';
           status.textContent = 'Done';
           el.classList.add('done-step');
+          pct = ((i + 1) / (steps.length || 1)) * 100;
+        } else if (i === activeLevel) {
+          if (statusText === 'error') {
+            ind.className = 'step-indicator error';
+            status.className = 'step-status error-text';
+            status.textContent = 'Error';
+          } else if (statusText === 'done') {
+            ind.className = 'step-indicator done';
+            status.className = 'step-status done-text';
+            status.textContent = 'Done';
+            el.classList.add('done-step');
+          } else {
+            ind.className = 'step-indicator running';
+            status.className = 'step-status running-text';
+            status.textContent = 'Running…';
+            el.classList.add('active-step');
+          }
         } else {
-          ind.className = 'step-indicator running';
-          status.className = 'step-status running-text';
-          status.textContent = 'Running…';
-          el.classList.add('active-step');
+          ind.className = 'step-indicator pending';
+          status.className = 'step-status pending-text';
+          status.textContent = 'Pending';
         }
-      } else {
-        ind.className = 'step-indicator pending';
-        status.className = 'step-status pending-text';
-        status.textContent = 'Pending';
-      }
-    });
-    if (progressBarFill) {
-      if (statusText === 'done') pct = 100;
-      progressBarFill.style.width = Math.max(pct, 2) + '%';
+      });
     }
-    if (progressTime && pipelineStartTime) {
-      var elapsed = ((Date.now() - pipelineStartTime) / 1000).toFixed(0);
-      progressTime.textContent = statusText === 'done' ? 'Total: ' + formatDuration(pipelineStartTime) : 'Elapsed: ' + elapsed + 's';
-    }
-  }
-
-  function formatDuration(startMs) {
-    var secs = Math.round((Date.now() - startMs) / 1000);
-    if (secs < 60) return secs + 's';
-    return Math.floor(secs / 60) + 'm ' + (secs % 60) + 's';
+    syncHeaderStrip(activeLevel, statusText);
   }
 
   /* ═══════════════ SSE → PROGRESS INTEGRATION ═══════════════ */
 
+  /* The heartbeat carries the whole run state, so the card is refreshed from
+     the server on every frame rather than from a local counter. That is what
+     makes a re-attached page and a live session render identically. */
   EventBus.on('sse:heartbeat', function (data) {
+    applyRunState(data);
     if (data.current_level != null) updateProgress(data.current_level, 'running');
-    if (data.progress != null && progressBarFill) progressBarFill.style.width = Math.max(data.progress, 2) + '%';
   });
 
-  EventBus.on('sse:done', function () {
+  EventBus.on('sse:done', function (data) {
+    if (data) applyRunState(data);
     updateProgress(STEP_COUNT - 1, 'done');
     fetchResult(currentJobId);
   });
 
   EventBus.on('sse:error', function (data) {
     updateProgress(-1, 'error');
+    if (data) applyRunState(data);
     predictBtn.disabled = false;
-    showToast('Error: ' + (data.message || 'unknown'), 'error');
+    showToast('Error: ' + (data && data.message ? data.message : 'unknown'), 'error');
   });
 
   /* ═══════════════ PREDICT ═══════════════ */
@@ -284,23 +700,14 @@
     resetProgress();
     pipelineStartTime = Date.now();
 
-    var params = {
-      sequence: seq,
-      max_seg_len: +($('param-seglen') ? $('param-seglen').value : 200),
-      overlap: +($('param-overlap') ? $('param-overlap').value : 20),
-      rounds: +($('param-rounds') ? $('param-rounds').value : 1),
-      replicas: +($('param-replicas') ? $('param-replicas').value : 4),
-      rest2steps: +($('param-rest2steps') ? $('param-rest2steps').value : 50000),
-      use_rl: $('param-rl') ? $('param-rl').checked : true,
-      use_rhofold: $('param-rhofold') ? $('param-rhofold').checked : true,
-    };
+    var params = { sequence: seq, params: collectParams() };
 
     fetch('/api/predict', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(params),
     }).then(function (r) {
-      if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || 'predict failed'); });
+      if (!r.ok) return r.json().then(function (e) { throw new Error(e.error || e.detail || 'predict failed'); });
       return r.json();
     }).then(function (data) {
       currentJobId = data.job_id;
@@ -626,11 +1033,41 @@
   if (TF.Export) TF.Export.init();
   if (TF.Feedback) TF.Feedback.init();
   if (TF.MiniGame) TF.MiniGame.init();
+  if (TF.Setup) TF.Setup.init();
 
   // Console clear/copy buttons
   var consoleClear = $('console-clear');
   var consoleCopy = $('console-copy');
   if (consoleClear) consoleClear.addEventListener('click', function () { TF.Console && TF.Console.clear(); });
   if (consoleCopy) consoleCopy.addEventListener('click', function () { TF.Console && TF.Console.copyAll(); });
+
+  /* Re-attach on load. A refresh throws away the job id the browser held, and
+     the run itself lives on in a server thread, so the page asks what is
+     running instead of presenting a fresh Predict button for a job that is
+     already going. Deferred one tick so the module inits above have finished
+     wiring the console before a re-attached stream starts writing to it. */
+  if (runReconnect) {
+    runReconnect.addEventListener('click', function () {
+      runReconnect.hidden = true;
+      reconnectToRunningJob();
+    });
+  }
+  var logPathCopy = $('run-logpath-copy');
+  if (logPathCopy) {
+    logPathCopy.addEventListener('click', function () {
+      var p = runLogPathValue ? runLogPathValue.textContent : '';
+      if (!p) return;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(p).then(function () {
+          showToast('Log path copied', 'success');
+        }).catch(function () {
+          showToast('Copy failed — select the path manually', 'error');
+        });
+      } else {
+        showToast('Clipboard unavailable in this browser', 'error');
+      }
+    });
+  }
+  setTimeout(reconnectToRunningJob, 0);
 
 })();

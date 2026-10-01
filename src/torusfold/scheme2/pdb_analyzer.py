@@ -260,31 +260,52 @@ def compute_sasa_estimate(coords: np.ndarray, atom_names: List[str],
     max_ar = float(np.max(accessible_radii))
     query_r = 2.0 * max_ar
 
+    # Shrake-Rupley: sample points on each atom's accessible sphere and count
+    # how many are NOT inside any neighbour's sphere. The exposed fraction is
+    # that count over the total, so the result is bounded by construction.
+    #
+    # Two earlier attempts at a closed form both failed. Summing
+    # `0.5 * (1 - d/(r_i + r_j))` is not normalized, so a well-packed atom
+    # accumulated 5-9 and every atom read as fully buried: all 1527 atoms of
+    # PDB 2OIU returned SASA 0. A spherical-cap area formula is exact for two
+    # spheres but not for the union of many, because the caps overlap each
+    # other; on the same structure it also returned 0 for every atom. Sampling
+    # has neither problem, and its error is set by the point count rather than
+    # by an assumption about packing.
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    idx = np.arange(n_probe, dtype=np.float64)
+    z = 1.0 - 2.0 * (idx + 0.5) / n_probe
+    r_xy = np.sqrt(np.maximum(1.0 - z * z, 0.0))
+    theta = golden * idx
+    unit = np.stack([np.cos(theta) * r_xy, np.sin(theta) * r_xy, z], axis=1)
+
+    per_atom_sasa = np.zeros(n, dtype=np.float64)
+
     for i in range(n):
         r_acc = accessible_radii[i]
-        neighbor_indices = tree.query_ball_point(coords[i], query_r)
-        neighbor_indices = [idx for idx in neighbor_indices if idx != i]
+        full_sasa = 4.0 * math.pi * r_acc * r_acc
 
+        neighbor_indices = tree.query_ball_point(coords[i], query_r)
+        neighbor_indices = [j for j in neighbor_indices if j != i]
         if not neighbor_indices:
-            per_atom_sasa[i] = 4.0 * math.pi * r_acc ** 2
+            per_atom_sasa[i] = full_sasa
             continue
 
-        neighbor_coords = coords[neighbor_indices]
-        neighbor_acc_r = accessible_radii[neighbor_indices]
+        pts = coords[i] + unit * r_acc                      # (n_probe, 3)
+        nb = neighbor_indices
+        nb_r = accessible_radii[nb]
+        # Points strictly inside a neighbour's sphere are occluded. One pass per
+        # neighbour keeps this to (n_probe x n_neighbours) and avoids materialising
+        # the full pairwise distance matrix.
+        occluded = np.zeros(n_probe, dtype=bool)
+        for j_pos, j in enumerate(nb):
+            delta = pts - coords[j]
+            inside = (delta * delta).sum(axis=1) < (nb_r[j_pos] * nb_r[j_pos])
+            occluded |= inside
+            if occluded.all():
+                break
 
-        diffs = neighbor_coords - coords[i]
-        dists = np.sqrt(np.sum(diffs ** 2, axis=1))
-
-        # Fraction of surface buried by each neighbor
-        # f = 0.5 * (1 - d/(r_i + r_j)) for overlapping spheres
-        sum_r = r_acc + neighbor_acc_r
-        overlap = np.clip(sum_r - dists, 0, None)
-        exposed_frac = 0.5 * (1.0 - dists / (sum_r + 1e-10))
-        exposed_frac = np.clip(np.where(dists < sum_r, exposed_frac, 0.0), 0, 1)
-        burial = float(np.sum(exposed_frac))
-
-        full_sasa = 4.0 * math.pi * r_acc ** 2
-        per_atom_sasa[i] = full_sasa * max(0.0, 1.0 - min(burial, 1.0))
+        per_atom_sasa[i] = full_sasa * float(n_probe - occluded.sum()) / n_probe
 
     total_sasa = float(np.sum(per_atom_sasa))
     mean_sasa = float(np.mean(per_atom_sasa))

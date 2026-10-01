@@ -8,12 +8,23 @@ import os
 import sys
 import io
 import json
+import re
 import time
+import uuid
 import threading
 import tempfile
 import numpy as np
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+from http.server import HTTPServer, ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+
+# Changes on every process start. The browser compares it against the value it
+# remembered, so "your job is gone because the server restarted" is a different
+# message from "nothing was running".
+_SERVER_GENERATION = "%d-%d" % (os.getpid(), int(time.time()))
+
+# The console streams a prediction replaces sys.stderr with. Kept so the HTTP
+# access log can keep going to the real one instead of into the job log.
+_PROCESS_STDERR = sys.stderr
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(ROOT, "src")
@@ -43,15 +54,861 @@ def _clear_logs():
     with _log_lock:
         _log_entries.clear()
 
+# ════════════════════════════════════════════════════════════════════
+# RUN PROGRESS
+#
+# The pipeline prints one `[Level X.Y] <action>` banner each time it enters a
+# stage, and those banners are the only structured signal it emits. Rather than
+# reaching into 2000 lines of pipeline to add callbacks, the tee writer watches
+# for them: every banner is a free progress tick, and a resumed run that skips
+# stages simply emits fewer ticks.
+#
+# Progress is therefore stage-quantised, not smooth. The per-run stage weights
+# are what turn "which stage am I in" into "how far through am I" — without them
+# a bar would sit near 1% through the whole of Level 2, which is most of the wall
+# time on a default run.
+# ════════════════════════════════════════════════════════════════════
+
+# Stage ladder: the ORDER is fixed, the WEIGHTS are not. Weights are computed per
+# run from the parameters by _stage_weights(), because a constant table is what
+# made the first version of this lie: it assumed coarse-grained folding dominated
+# every run, so a run configured with cheap folding and expensive REST2 shot to
+# 85% before its real bottleneck had started and then sat there for the whole of
+# it.
+LEVEL_ORDER = [
+    ("0",   "Secondary structure"),
+    ("1",   "3D prediction"),
+    ("1.5", "Global restraint relaxation"),
+    ("2",   "Coarse-grained folding"),
+    ("2.3", "5-bead refinement"),
+    ("2.5", "CG to all-atom"),
+    ("2.6", "PyRosetta refinement"),
+    ("3",   "RL fine-tuning"),
+    ("3.5", "Metadynamics"),
+    ("4",   "REST2 refinement"),
+    ("5",   "Amber refinement"),
+    ("5.5", "PPR repair"),
+]
+_LEVEL_INDEX = {name: i for i, (name, _) in enumerate(LEVEL_ORDER)}
+
+# ── How the per-run stage weights are built ──────────────────────────────────
+#
+# Only one wall-time fact exists in this repository: docs/REPRODUCTION_RESOURCES
+# section 2 states the ~7 h reference run "is dominated by the Level-2 REMD
+# sampling stage (2 replicas x 8 relax rounds) together with the Level-4 REST2
+# run (8 replicas x 20,000 steps)". Nothing states any other stage's share, and
+# one data point cannot solve for twelve shares.
+#
+# So the model does not pretend to. Level 2 and Level 4 together take
+# _HEAD_SHARE of every run — that much is documented — and are split between
+# themselves by the relative step counts this run will execute. Everything else
+# divides the remainder by step count.
+#
+# An earlier version set per-step factors for each stage individually and let
+# Level 4's weight follow raw REST2 steps. It was wrong by a factor of ~150: a
+# run whose REST2 stage was the whole bottleneck got a 2% weight for that stage,
+# so the bar parked at 41% for the entire run. Anchoring the head is what fixes
+# it, and the cost is that the non-head shares are order-of-magnitude. The UI
+# says so rather than implying they were measured.
+#
+# The weights drive the PROGRESS BAR only. The time estimate uses measured wall
+# time. The two deliberately take different inputs: the bar has to be smooth,
+# the estimate has to be honest.
+_HEAD_SHARE = 0.85        # Level 2 + Level 4, per the documented reference run
+_FIVE_BEAD_STEPS_AT_2000 = 130_845.0
+
+
+def _stage_weights(params, sequence_length=None):
+    """Per-stage share of a run, computed from that run's own parameters.
+
+    A constant table was tried first and measured wrong: it put coarse-grained
+    folding at 45% of every run, so a run configured with cheap folding and
+    expensive REST2 reached 85% before its real bottleneck had started and then
+    sat there for the whole of it. Deriving the split per run is what fixes that.
+    """
+    p = params or {}
+
+    def num(key, default):
+        v = p.get(key, default)
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return float(default)
+
+    L = sequence_length or 0
+    rounds = max(1.0, num("n_relax_rounds", 6))
+
+    # Level 2: its REMD budget is fixed in torch_gpu_refine at 8 rounds x 5,000
+    # steps, with 64 replicas above 1,000 nt and nrep/n_rest2_replicas below
+    # (isrnaclong.py:1568-1571). Relative to the documented 20-round default.
+    if L > 1000:
+        l2_rel = rounds / 20.0
+    else:
+        reps = max(num("nrep", 1) or 6.0, num("n_rest2_replicas", 1))
+        l2_rel = (rounds / 20.0) * (reps / 8.0)
+
+    # Level 4: REST2 steps relative to the documented 100,000-step reference.
+    l4_rel = max(1.0, num("rest2_nsteps", 300000)) / 100_000.0
+
+    head = {}
+    l2_rel = max(l2_rel, 1e-6)
+    l4_rel = max(l4_rel, 1e-6)
+    l2_share = _HEAD_SHARE * l2_rel / (l2_rel + l4_rel)
+    head["2"] = l2_share
+    head["4"] = _HEAD_SHARE - l2_share
+
+    # Everything else divides the remainder by the MD steps it will execute.
+    tail = {}
+    tail["0"] = 600.0 + L * 0.4
+    tail["1"] = (1200.0 + L * 0.6) * (2.0 if p.get("use_rhofold") else 1.0)
+    if p.get("use_msa"):
+        tail["1"] += 800.0
+    tail["1"] += 1500.0 * max(0.0, num("n_candidates", 1) - 1)
+    tail["1.5"] = 1000.0
+    tail["2.5"] = 600.0
+
+    if p.get("use_5bead"):
+        scale = max(1.0, L / 2000.0) if L else 1.0
+        tail["2.3"] = _FIVE_BEAD_STEPS_AT_2000 * scale * (rounds / 20.0)
+    else:
+        tail["2.3"] = 0.0
+
+    tail["2.6"] = 20000.0 if p.get("use_pyrosetta") else 0.0
+    tail["3"] = 5000.0 * max(1.0, num("rl_n_simulations", 50)) / 50.0 if p.get("use_rl_mcts") else 0.0
+    tail["3.5"] = max(0.0, num("metad_n_steps", 200000)) if p.get("use_metad") else 0.0
+    tail["5"] = 3000.0
+    tail["5.5"] = 400.0 * max(1.0, num("ppr_max_rounds", 5)) if p.get("use_ppr", True) else 0.0
+
+    tail_total = sum(tail.values()) or 1.0
+    remainder = max(0.0, 1.0 - _HEAD_SHARE)
+
+    weights = {name: head.get(name, 0.0) + remainder * tail.get(name, 0.0) / tail_total
+               for name, _ in LEVEL_ORDER}
+    total = sum(weights.values()) or 1.0
+    return {k: max(0.0, v / total) for k, v in weights.items()}
+
+
+# A run is described by anchor points, each (fraction_done, seconds_elapsed).
+_STAGE_BANNER = re.compile(r"\[Level ([0-9]+(?:\.[0-9]+)?)\]\s*(.*)")
+_JOB_LOCK = threading.Lock()
+_JOB_ID = {"current": None}
+# The environment-setup sidecar (tools/install_deps.py). Tracked separately from
+# a prediction because the two can be started independently and one must not
+# block the other.
+_install_lock = threading.Lock()
+_install_state = {"running": False, "started_at": None, "finished_at": None,
+                  "result": None}
+# Timestamp of the last keep-alive progress line, so a quiet stage still shows
+# the run is alive without flooding the log.
+_PROGRESS_BEAT = {"at": 0.0, "stage": None}
+
+
+def _register_job(job_id, sequence, params):
+    """Publish a job the browser can re-attach to after a refresh.
+
+    server_generation lets a page that reloaded after a server restart tell
+    "no job is running" apart from "the job you were watching is gone".
+    """
+    with _JOB_LOCK:
+        _JOB_ID["current"] = job_id
+    weights = _stage_weights(params, len(sequence))
+    _predict_state.update({
+        "job_id": job_id,
+        "sequence": sequence,
+        "sequence_length": len(sequence),
+        "params": dict(params),
+        "status": "running",
+        "progress": 0,
+        "current_level": -1,
+        "level_name": "Queued",
+        "stage_label": "Queued",
+        "message": "Starting...",
+        "started_at": time.time(),
+        "finished_at": None,
+        "elapsed": 0.0,
+        "weights": weights,
+        "stage": {"fraction": 0.0, "label": "Starting", "anchors": [(0.0, 0.0)],
+                  "spans": [], "entered": None, "spent": {}, "level": None},
+        "stages": [],
+        "eta": {"state": "measuring", "confidence": "none", "remaining_low": None,
+                "remaining_high": None, "total_est": None,
+                "basis": "waiting for the first stage to complete"},
+        "result_ready": False,
+        "log_count": 0,
+        "server_generation": _SERVER_GENERATION,
+        "levels": [{"level": n, "label": lab, "cost": weights.get(n, 0.0),
+                    "pct": round(weights.get(n, 0.0) * 100, 1)} for n, lab in LEVEL_ORDER],
+    })
+
+
+def _note_stage(level_name, label):
+    """Record arrival at a stage and recompute progress plus a time estimate."""
+    idx = _LEVEL_INDEX.get(level_name)
+    if idx is None:
+        return
+    now = time.time()
+    started = _predict_state.get("started_at") or now
+    elapsed = max(0.0, now - started)
+
+    weights = _predict_state.get("weights") or _stage_weights(None)
+    ordered = [n for n, _ in LEVEL_ORDER]
+
+    done_cost = sum(weights.get(n, 0.0) for n in ordered[:idx])
+    here_cost = weights.get(level_name, 0.0)
+    # A stage is entered, not left, so credit it as half spent. Progress is then
+    # roughly proportional to work done, which is what makes the bar advance
+    # steadily through the expensive stage instead of parking before it starts.
+    fraction = min(1.0, done_cost + 0.5 * here_cost)
+
+    stage = _predict_state.get("stage") or {"anchors": [(0.0, 0.0)]}
+    anchors = list(stage.get("anchors") or [(0.0, 0.0)])
+    for i in range(len(anchors) - 1, 0, -1):
+        if abs(anchors[i][0] - fraction) < 1e-6:
+            anchors[i] = (fraction, elapsed)
+            break
+    else:
+        anchors.append((fraction, elapsed))
+
+    # Close the previous span so its real duration is measured, not guessed.
+    spans = list(stage.get("spans") or [])
+    spent = dict(stage.get("spent") or {})
+    entered = stage.get("entered")
+    prev_level = stage.get("level")
+    if entered is not None and prev_level:
+        dur = max(0.0, now - entered)
+        spent[prev_level] = spent.get(prev_level, 0.0) + dur
+        spans.append({"level": prev_level, "seconds": round(dur, 1)})
+
+    # Publish a per-level view of the plan: what has run, what is running, what
+    # is still ahead, and how long each finished stage actually took. The UI
+    # renders its timeline from this, so the stage list is derived from the
+    # server rather than being a copy of the ladder hard-coded in the HTML —
+    # which is how the previous hard-coded list ended up empty after a change.
+    level_labels = dict(LEVEL_ORDER)
+    plan = []
+    for i, name in enumerate(ordered):
+        spent_here = spent.get(name)
+        if i == idx and entered is not None:
+            state = "running"
+            spent_here = max(0.0, now - entered)
+        elif i < idx:
+            state = "done"
+        else:
+            state = "pending"
+        plan.append({
+            "level": name,
+            "label": level_labels.get(name, name),
+            "state": state,
+            "weight_pct": round(weights.get(name, 0.0) * 100, 2),
+            "seconds": round(spent_here, 1) if spent_here is not None else None,
+        })
+
+    stages = list(_predict_state.get("stages") or [])
+    stages.append({"level": level_name, "label": label, "at": round(elapsed, 1)})
+
+    _predict_state.update({
+        "current_level": idx,
+        "level_name": level_name,
+        "stage_label": label,
+        "message": label,
+        "progress": round(fraction * 100, 1),
+        "fraction": round(fraction, 4),
+        "elapsed": round(elapsed, 1),
+        "plan": plan,
+        "stage": {"fraction": fraction, "label": label, "anchors": anchors,
+                  "spans": spans[-24:], "entered": now, "spent": spent,
+                  "level": level_name},
+        "stages": stages[-64:],
+        "eta": _estimate_remaining(anchors, elapsed, current_level=level_name,
+                                   entered=now, weights=weights),
+    })
+
+
+def _estimate_remaining(anchors, elapsed, current_level=None, entered=None, weights=None):
+    """Seconds left, from the measured wall time at each stage boundary.
+
+    Two independent estimates are combined, because either alone is wrong in a
+    way the other catches:
+
+      * the median of (elapsed / fraction) over the boundaries reached so far.
+        This is what actually predicts total duration.
+      * the elapsed time of the stage currently running, divided by its share of
+        the work. That is a LOWER BOUND, since only part of the stage is done.
+        Without it the median collapses the moment a run of cheap stages
+        completes and an expensive one starts — the failure that made the first
+        version of this report "2s left" for eighty seconds.
+
+    The result is a range: one or two boundaries cannot support more precision
+    than that, and a confident wrong ETA is worse than an honest wide one.
+    """
+    usable = [(f, s) for f, s in anchors if f > 0.001]
+    if not usable:
+        return {"state": "measuring", "confidence": "none", "remaining_low": None,
+                "remaining_high": None, "total_est": None,
+                "basis": "no stage has been reached yet"}
+
+    rates = [s / f for f, s in usable if s > 0.5]
+    if not rates:
+        return {"state": "measuring", "confidence": "none", "remaining_low": None,
+                "remaining_high": None, "total_est": None,
+                "basis": "elapsed time is too small to extrapolate from"}
+
+    rates.sort()
+    mid = rates[len(rates) // 2]
+
+    # Lower bound from the stage currently running: only part of it is done, so
+    # elapsed/share underestimates its total, never overestimates it.
+    bound = 0.0
+    if current_level and entered and weights and weights.get(current_level, 0.0) > 1e-6:
+        inside = max(0.0, time.time() - entered)
+        bound = inside / weights[current_level]
+
+    total = max(mid, bound)
+    spread = (rates[-1] - rates[0]) / mid if len(rates) > 1 else 1.6
+    spread = min(spread, 3.0)
+    # Wide early, narrowing as boundaries accumulate.
+    shrink = 1.0 + 0.5 * len(rates)
+    lo = max(0.25, 1.0 - 0.5 * spread / shrink)
+    hi = min(3.0, 1.0 + 0.5 * spread / shrink)
+
+    remaining = max(0.0, total - elapsed)
+    basis = "extrapolated from %d stage boundary(ies)" % len(rates)
+    if bound > mid:
+        basis += "; the running stage already exceeds that, so the estimate was raised"
+    return {
+        "state": "estimated",
+        "confidence": "low" if len(rates) < 3 else ("medium" if len(rates) < 6 else "high"),
+        "remaining_low": round(remaining * lo),
+        "remaining_high": round(remaining * hi),
+        "total_est": round(total),
+        "basis": basis,
+        "progress_basis": round(max(f for f, _ in usable), 3),
+    }
+
+
+def _maybe_emit_progress(pub, every=60.0):
+    """Write a keep-alive line for a stage that prints nothing of its own.
+
+    The pipeline banners only fire on ENTERING a stage, so a long stage is
+    silent. Level 4 (REST2) is the worst case: hours of work with no output, so
+    both the job log and the terminal look hung while the run is in fact fine.
+    One line a minute is enough to tell "working" apart from "stuck", and it
+    lands in the same log the browser and the terminal both read.
+
+    Rate-limited here rather than in the caller so every path that reports state
+    gets the same behaviour.
+    """
+    if pub.get("status") != "running":
+        return
+    stage = pub.get("level_name")
+    if not stage:
+        return
+    now = time.time()
+    last = _PROGRESS_BEAT.get("at", 0.0)
+    if now - last < every:
+        return
+    _PROGRESS_BEAT["at"] = now
+    _PROGRESS_BEAT["stage"] = stage
+
+    elapsed = pub.get("elapsed") or 0.0
+    eta = pub.get("eta") or {}
+    if eta.get("state") == "estimated" and eta.get("remaining_low") is not None:
+        left = "still running — about %s left" % _human_seconds(
+            (eta["remaining_low"] + eta["remaining_high"]) / 2.0)
+    else:
+        left = "still running"
+    line = "  [%s] %s · %s · %s · %.1f%%" % (
+        stage, pub.get("stage_label") or "", _human_seconds(elapsed), left,
+        pub.get("progress") or 0.0)
+
+    # Print rather than _emit_log. _emit_log only appends to the in-memory buffer
+    # that feeds the browser; the LOG FILE is written by the tee wrapping stdout,
+    # so a buffer-only line never reaches the file and the terminal following it
+    # stays silent. Printing goes to both: the tee mirrors it to the file and
+    # echoes it back through _emit_log for the browser.
+    stream = sys.stdout
+    if stream is not None and hasattr(stream, "write"):
+        try:
+            stream.write(line + "\n")
+            stream.flush()
+            return
+        except (OSError, ValueError):
+            pass
+    _emit_log("progress", line)
+
+
+def _human_seconds(seconds):
+    s = int(max(0, seconds))
+    if s >= 3600:
+        return "%dh %dm" % (s // 3600, (s % 3600) // 60)
+    if s >= 60:
+        return "%dm %ds" % (s // 60, s % 60)
+    return "%ds" % s
+
+
+def _publish_final(status, message, error=None):
+    now = time.time()
+    started = _predict_state.get("started_at") or now
+    _predict_state.update({
+        "status": status,
+        "message": message,
+        "error": error,
+        "finished_at": now,
+        "elapsed": round(now - started, 1),
+        "result_ready": status == "done",
+        "eta": {"state": "done" if status == "done" else "stopped",
+                "confidence": "high", "remaining_low": 0, "remaining_high": 0,
+                "total_est": round(now - started), "basis": "finished"},
+    })
+
+
+# The state the UI is allowed to see. The prediction result carries the whole
+# PDB as a string, so it is never included here; it is fetched separately from
+# /api/result/{job_id}.
+_PUBLIC_KEYS = (
+    "job_id", "status", "progress", "current_level", "level_name", "stage_label",
+    "message", "error", "elapsed", "eta", "stages", "levels", "started_at",
+    "finished_at", "sequence_length", "result_ready", "server_generation",
+    "fraction", "weights", "plan", "log_path",
+)
+
+
+def _model_source_ids():
+    """The model hosts the installer accepts, plus "auto".
+
+    Read from the installer so the endpoint and the CLI cannot disagree about
+    what is valid. Cached after the first read.
+    """
+    cached = _MODEL_SOURCE_CACHE.get("ids")
+    if cached:
+        return cached
+    ids = {"auto"}
+    try:
+        script_dir = os.path.join(ROOT, "tools")
+        if script_dir not in sys.path:
+            sys.path.insert(0, script_dir)
+        import install_deps as _id_mod
+        ids.update(s["id"] for s in _id_mod.MODEL_SOURCES)
+    except Exception:                                    # noqa: BLE001
+        ids.update({"huggingface", "hf-mirror", "modelscope"})
+    _MODEL_SOURCE_CACHE["ids"] = ids
+    return ids
+
+
+_MODEL_SOURCE_CACHE = {}
+
+
+def _deps_payload():
+    """GET /api/deps — what the setup button should offer, and its state.
+
+    Reports the same three-way split the installer uses, so the UI can be honest
+    about it: things that can be fetched automatically, things already present,
+    and things that have no download source and need a human.
+    """
+    with _install_lock:
+        state = dict(_install_state)
+    # The model hosts are published so the UI can offer them rather than
+    # hard-coding a list that would drift from the installer's.
+    sources = []
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import install_deps as _id_mod
+        sources = [{"id": s["id"], "label": s["label"], "note": s["note"]}
+                   for s in _id_mod.MODEL_SOURCES]
+        default_source = _id_mod.DEFAULT_SOURCE
+    except Exception:                                    # noqa: BLE001
+        default_source = "auto"
+    return {
+        "install_running": state["running"],
+        "started_at": state["started_at"],
+        "finished_at": state["finished_at"],
+        "last_result": state["result"],
+        "tools_dir": os.path.join(os.path.dirname(ROOT), "TorusFold-tools"),
+        "has_installer": os.path.isfile(os.path.join(ROOT, "tools", "install_deps.py")),
+        "model_sources": sources,
+        "default_source": default_source,
+    }
+
+
+def _public_state():
+    state = _predict_state
+    out = {k: state.get(k) for k in _PUBLIC_KEYS}
+    # The ladder is always published, with the weights of the run in progress so
+    # the UI can draw the timeline before anything happens and does not have to
+    # hard-code either the level names or their relative costs.
+    weights = state.get("weights") or _stage_weights(None)
+    out["levels"] = [{"level": n, "label": lab, "cost": weights.get(n, 0.0),
+                      "pct": round(weights.get(n, 0.0) * 100, 1)} for n, lab in LEVEL_ORDER]
+    # Before any run, synthesise the plan so the UI has something to draw rather
+    # than an empty timeline.
+    if not out.get("plan"):
+        out["plan"] = [{"level": n, "label": lab, "state": "pending",
+                        "weight_pct": round(weights.get(n, 0.0) * 100, 2),
+                        "seconds": None} for n, lab in LEVEL_ORDER]
+
+    if state.get("status") == "running" and state.get("started_at"):
+        now = time.time()
+        out["elapsed"] = round(now - state["started_at"], 1)
+        # Recompute the estimate here rather than serving the one stored when the
+        # stage was entered. Two reasons: the "current stage is overrunning"
+        # lower bound needs the time spent inside the stage, which is zero at
+        # entry, and a long stage would otherwise keep showing the figure
+        # calculated before it started — the exact failure that had a four-hour
+        # stage reporting "8s left" for two minutes.
+        stage = state.get("stage") or {}
+        anchors = stage.get("anchors") or [(0.0, 0.0)]
+        out["eta"] = _estimate_remaining(
+            anchors, out["elapsed"],
+            current_level=stage.get("level"),
+            entered=stage.get("entered"),
+            weights=weights,
+        )
+
+    out["log_count"] = len(_log_entries)
+    return out
+
+
+def _current_job_payload():
+    """/api/current — what a freshly loaded page asks for.
+
+    A page refresh loses the job id, so the client re-attaches from here rather
+    than starting a second run. If the id it remembered belongs to an earlier
+    server process, this says so explicitly instead of letting the browser
+    poll a job that no longer exists.
+    """
+    with _JOB_LOCK:
+        job_id = _JOB_ID["current"]
+    payload = _public_state()
+    payload["has_job"] = bool(job_id)
+    payload["job_running"] = _predict_state.get("status") == "running"
+    return payload
+
+
+# ════════════════════════════════════════════════════════════════════
+# PARAMETER REGISTRY — the single source of truth for what the web UI may set.
+#
+# This table exists because the same parameter list used to live in three
+# places (the HTML inputs, app.js, and this file's call into the pipeline) and
+# they had drifted apart: the UI offered five numbers, the pipeline accepts
+# thirty-four options, and several values this file passed disagreed with the
+# demo invocation in run_2013nt.py.
+#
+# Defaults are NOT written here. They are read from the real signature of
+# isrnaclong_pipeline() by _pipeline_defaults(), so this table can never state a
+# default the pipeline does not use. Add a knob here and it appears in the UI;
+# nothing else needs editing.
+# ════════════════════════════════════════════════════════════════════
+
+# kind: "int" | "float" | "bool" | "text"
+# group decides which collapsible section of the parameters card it lands in.
+_PARAM_SPEC = [
+    # ── segmentation and relaxation ──────────────────────────────────
+    dict(name="max_seg_len", kind="int", group="Segmentation",
+         label="Max segment length", unit="nt", min=50, max=1000, step=10,
+         help="Level 1 splits the chain into chunks of at most this many nt."),
+    dict(name="overlap", kind="int", group="Segmentation",
+         label="Segment overlap", unit="nt", min=0, max=100, step=5,
+         help="Overlap between chunks; larger gives more context for the Kabsch alignment."),
+    dict(name="n_relax_rounds", kind="int", group="Segmentation",
+         label="Relaxation rounds", min=0, max=60, step=1,
+         help="Level 2 iterations. Early stopping usually truncates this."),
+    dict(name="n_parallel", kind="int", group="Segmentation",
+         label="Parallel segments", min=0, max=64, step=1,
+         help="0 lets the pipeline pick from the CPU count."),
+
+    # ── sampling budget ──────────────────────────────────────────────
+    dict(name="n_rest2_replicas", kind="int", group="Sampling",
+         label="REST2 replicas", min=2, max=64, step=1,
+         help="Replica-exchange replicas. Costs one core each."),
+    dict(name="rest2_nsteps", kind="int", group="Sampling",
+         label="REST2 steps", min=5000, max=2000000, step=5000),
+    dict(name="md_step_scale", kind="float", group="Sampling",
+         label="MD step scale", min=0.01, max=1.0, step=0.05,
+         help="Multiplies the per-round Level 2 step count. The dominant cost."),
+    dict(name="nrep", kind="int", group="Sampling",
+         label="REMD replicas", min=1, max=64, step=1,
+         help="Concurrent Level 2 replicas, one process each."),
+    dict(name="platform", kind="text", group="Sampling", label="Platform",
+         placeholder="auto",
+         help="OpenMM/LAMMPS platform: auto, CPU, CUDA, OpenCL."),
+
+    # ── enhanced sampling ────────────────────────────────────────────
+    dict(name="use_5bead", kind="bool", group="Enhanced sampling",
+         label="5-bead CG refinement",
+         help="Level 2.3. P/S/B1/B2/B3 per nucleotide instead of 3 beads."),
+    dict(name="use_metad", kind="bool", group="Enhanced sampling",
+         label="Metadynamics",
+         help="Level 3.5. Wells-tempered hills along BSJ distance, contacts and Rg."),
+    dict(name="metad_n_steps", kind="int", group="Enhanced sampling",
+         label="Metadynamics steps", min=0, max=2000000, step=10000),
+
+    # ── reinforcement learning ───────────────────────────────────────
+    dict(name="use_rl_relax", kind="bool", group="Guidance & repair",
+         label="RL relaxation guidance", help="Level 2. Off = fixed-parameter ablation."),
+    dict(name="use_rl_mcts", kind="bool", group="Guidance & repair",
+         label="RL-MCTS closing", help="Level 3. Off = ablation."),
+    dict(name="rl_n_simulations", kind="int", group="Guidance & repair",
+         label="MCTS iterations", min=0, max=500, step=5),
+
+    # ── Level 1 prediction source ────────────────────────────────────
+    dict(name="use_rhofold", kind="bool", group="Prediction source",
+         label="RhoFold+ ensemble",
+         help="On: RhoFold+/trRosettaRNA2/RNAbpFlow ensemble. Off: Vfold3D only."),
+    dict(name="n_candidates", kind="int", group="Prediction source",
+         label="Candidates per segment", min=1, max=10, step=1),
+    dict(name="use_msa", kind="bool", group="Prediction source",
+         label="Adaptive MSA",
+         help="Feeds the predictor a pseudo-MSA. Recommended with RhoFold+."),
+
+    # ── optional stages ──────────────────────────────────────────────
+    dict(name="use_pyrosetta", kind="bool", group="Optional stages",
+         label="PyRosetta refinement (Level 2.6)",
+         help="Needs WSL with PyRosetta. Skips in well under a second when absent."),
+    dict(name="use_ppr", kind="bool", group="Optional stages",
+         label="PPR base-pair repair (Level 5.5)"),
+    dict(name="ppr_max_rounds", kind="int", group="Optional stages",
+         label="PPR rounds", min=0, max=20, step=1),
+    dict(name="resume", kind="bool", group="Optional stages",
+         label="Resume from checkpoint",
+         help="Reuses any checkpoint in the output directory."),
+
+    # ── structRFM heads (opt-in, off by default) ─────────────────────
+    dict(name="use_multi_task_heads", kind="bool", group="structRFM heads",
+         label="Multi-task heads"),
+    dict(name="use_structrfm", kind="bool", group="structRFM heads",
+         label="structRFM scoring"),
+    dict(name="multitask_head_weights", kind="text", group="structRFM heads",
+         label="Head weights path", placeholder="(unset)"),
+    dict(name="ss_head_weight", kind="float", group="structRFM heads",
+         label="SS head weight", min=0, max=10, step=0.1),
+    dict(name="pair_head_weight", kind="float", group="structRFM heads",
+         label="Pair head weight", min=0, max=10, step=0.1),
+    dict(name="bsj_head_weight", kind="float", group="structRFM heads",
+         label="BSJ head weight", min=0, max=10, step=0.1),
+    dict(name="clash_head_weight", kind="float", group="structRFM heads",
+         label="Clash head weight", min=0, max=10, step=0.1),
+
+    # ── method variants ──────────────────────────────────────────────
+    dict(name="use_rcm_reweight", kind="bool", group="Method variants",
+         label="RCM pair reweighting",
+         help="Overwrites the method-agreement pair weights with RCM confidence. Off by default."),
+]
+
+# Keys the old frontend sent, and the real parameter each one meant. Kept so an
+# older cached page still drives the pipeline correctly.
+_LEGACY_KEYS = {
+    "rounds": "n_relax_rounds",
+    "replicas": "n_rest2_replicas",
+    "rest2steps": "rest2_nsteps",
+    "use_rl": None,          # expands to both RL switches
+    "max_seg_len": "max_seg_len",
+    "overlap": "overlap",
+}
+
+_schema_cache = {}
+_schema_lock = threading.Lock()
+
+
+def _pipeline_defaults():
+    """Read the real defaults off isrnaclong_pipeline's signature.
+
+    Importing the pipeline pulls in torch, so this is done once and cached, and
+    main() warms it on a background thread to keep the first request fast.
+    """
+    with _schema_lock:
+        if _schema_cache:
+            return _schema_cache
+        try:
+            if SRC not in sys.path:
+                sys.path.insert(0, SRC)
+            from torusfold.scheme2.isrnaclong import isrnaclong_pipeline as f
+            defaults = dict(f.__kwdefaults__ or {})
+        except Exception as exc:                      # pragma: no cover
+            _emit_log("warn", f"parameter defaults unavailable: {exc}")
+            defaults = {}
+        _schema_cache.update(defaults)
+        return _schema_cache
+
+
+def _default_for(name):
+    return _pipeline_defaults().get(name)
+
+
+def parameter_schema():
+    """The payload GET /api/schema returns: groups, knobs, defaults, bounds."""
+    defaults = _pipeline_defaults()
+    groups = []
+    by_group = {}
+    for spec in _PARAM_SPEC:
+        name = spec["name"]
+        if name not in defaults:
+            # A knob the pipeline no longer accepts. Surface it rather than
+            # dropping it silently, so a rename cannot hide here.
+            _emit_log("warn", f"parameter '{name}' is not a pipeline argument")
+        item = dict(spec)
+        item["default"] = defaults.get(name)
+        g = item.pop("group")
+        if g not in by_group:
+            by_group[g] = []
+            groups.append({"name": g, "params": by_group[g]})
+        by_group[g].append(item)
+    return {"groups": groups,
+            "open_by_default": ["Segmentation", "Sampling"],
+            "path": "torusfold.scheme2.isrnaclong.isrnaclong_pipeline",
+            "knob_count": sum(len(g["params"]) for g in groups),
+            "pipeline_option_count": len(defaults)}
+
+
+def normalise_params(raw):
+    """Turn a request body into pipeline kwargs.
+
+    Accepts the schema-shaped {"params": {...}} and the legacy flat body, so a
+    browser holding an older app.js keeps working. Values are coerced to the
+    declared kind and clamped to the declared range; unknown keys are rejected
+    rather than forwarded, because the pipeline raises TypeError on them.
+    """
+    if not isinstance(raw, dict):
+        return {}, []
+    incoming = raw.get("params") if isinstance(raw.get("params"), dict) else raw
+    defaults = _pipeline_defaults()
+    spec_by_name = {s["name"]: s for s in _PARAM_SPEC}
+    out, notes = {}, []
+
+    for key, value in incoming.items():
+        name = _LEGACY_KEYS.get(key, key)
+        if name is None:                       # legacy "use_rl": both switches
+            for twin in ("use_rl_relax", "use_rl_mcts"):
+                out[twin] = bool(value)
+            notes.append("use_rl -> use_rl_relax + use_rl_mcts")
+            continue
+        spec = spec_by_name.get(name)
+        if spec is None:
+            notes.append(f"ignored unknown parameter '{key}'")
+            continue
+        kind = spec["kind"]
+        try:
+            if kind == "bool":
+                if isinstance(value, str):
+                    value = value.strip().lower() not in ("", "0", "false", "off", "no")
+                value = bool(value)
+            elif kind == "int":
+                value = int(float(value))
+            elif kind == "float":
+                value = float(value)
+            else:
+                value = str(value)
+        except (TypeError, ValueError):
+            notes.append(f"'{name}': {value!r} is not a valid {kind}, using default")
+            continue
+        if kind in ("int", "float"):
+            lo, hi = spec.get("min"), spec.get("max")
+            if lo is not None and value < lo:
+                notes.append(f"{name}={value} below min {lo}; clamped")
+                value = lo
+            if hi is not None and value > hi:
+                notes.append(f"{name}={value} above max {hi}; clamped")
+                value = hi
+        out[name] = value
+
+    return out, notes
+
 # ── stdout/stderr capture for pipeline output ────────────────────
+
+class _LogMirror:
+    """Append every line the process writes to a file, as it is written.
+
+    Two reasons this exists rather than `tee`:
+
+      * Python block-buffers stdout when it is not a terminal (8 KB by default),
+        so a run redirected to a file or a pipe shows nothing for minutes and
+        then dumps everything at once. A run in progress is exactly when the
+        output is worth watching, so the file is opened line-buffered and the
+        process is started unbuffered as well.
+      * One file per job means a finished run can be read back afterwards, and
+        its failures compared against a later run's.
+
+    Writes are best-effort: a log that cannot be written must never take the
+    pipeline down with it.
+    """
+
+    def __init__(self, original, path):
+        self._orig = original
+        self._path = path
+        self._fh = None
+        self.encoding = getattr(original, "encoding", None) or "utf-8"
+        self.errors = getattr(original, "errors", None) or "replace"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            self._fh = open(path, "a", encoding="utf-8", errors="replace", buffering=1)
+        except OSError:
+            self._fh = None
+
+    @property
+    def path(self):
+        return self._path
+
+    def write(self, s):
+        if isinstance(s, (bytes, bytearray)):
+            s = bytes(s).decode(self.encoding, self.errors)
+        if self._orig:
+            self._orig.write(s)
+        if self._fh:
+            try:
+                self._fh.write(s)
+            except (OSError, ValueError):
+                self._fh = None
+        return len(s)
+
+    def flush(self):
+        if self._orig:
+            self._orig.flush()
+        if self._fh:
+            try:
+                self._fh.flush()
+            except (OSError, ValueError):
+                self._fh = None
+
+    def close(self):
+        self.flush()
+
+    def fileno(self):
+        if self._orig and hasattr(self._orig, "fileno"):
+            return self._orig.fileno()
+        raise io.UnsupportedOperation("fileno")
+
+    def isatty(self):
+        return bool(getattr(self._orig, "isatty", lambda: False)())
+
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self.__dict__["_orig"], name)
+
+
 class _TeeWriter:
     """Wraps a file-like object, echoing each line to _emit_log."""
     def __init__(self, original, level="info"):
         self._orig = original
         self._level = level
         self._buf = ""
+        # A stand-in for sys.stdout must answer the text-stream protocol.
+        # Libraries (and subprocess wrappers) read .encoding / .errors off
+        # sys.stdout; a bare write/flush object raises AttributeError there.
+        # utf-8 first: the log buffer goes out as SSE JSON, so a gbk console
+        # default would only turn wide characters into decode errors later.
+        self.encoding = "utf-8"
+        self.errors = "replace"
 
     def write(self, s):
+        if isinstance(s, (bytes, bytearray)):
+            s = bytes(s).decode(self.encoding, self.errors)
         if self._orig:
             self._orig.write(s)
         self._buf += s
@@ -59,14 +916,63 @@ class _TeeWriter:
             line, self._buf = self._buf.split("\n", 1)
             line = line.rstrip()
             if line:
+                self._watch_for_stage(line)
                 _emit_log(self._level, line)
 
     def flush(self):
         if self._orig:
             self._orig.flush()
         if self._buf.strip():
-            _emit_log(self._level, self._buf.strip())
+            line = self._buf.strip()
+            self._watch_for_stage(line)
+            _emit_log(self._level, line)
             self._buf = ""
+
+    @staticmethod
+    def _watch_for_stage(line):
+        """Turn a `[Level X.Y]` banner into a progress tick.
+
+        The pipeline already prints one of these at every stage boundary, so the
+        progress bar can be driven without adding a callback to 2000 lines of
+        pipeline code. Anything that is not a banner is ignored.
+        """
+        m = _STAGE_BANNER.search(line)
+        if not m:
+            return
+        level_name = m.group(1)
+        label = m.group(2).strip().rstrip(".")
+        if not label:
+            label = dict(LEVEL_ORDER).get(level_name, "Level " + level_name)
+        # Keep it short: this string goes into the progress header.
+        if len(label) > 72:
+            label = label[:69].rstrip() + "..."
+        _note_stage(level_name, label)
+
+    def fileno(self):
+        # No real descriptor when the original is absent or is itself a mock.
+        if self._orig and hasattr(self._orig, "fileno"):
+            return self._orig.fileno()
+        raise io.UnsupportedOperation("fileno")  # io is imported at module top
+
+    def isatty(self):
+        return bool(getattr(self._orig, "isatty", lambda: False)())
+
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return False
+
+    def close(self):
+        self.flush()
+
+    def __getattr__(self, name):
+        # Anything else the caller expects of a stream (buffer, name, ...)
+        # is delegated to the stream being wrapped.
+        return getattr(self.__dict__["_orig"], name)
 
 # ── Global prediction state ─────────────────────────────────────
 _predict_state = {
@@ -77,6 +983,9 @@ _predict_state = {
     "result": None,
     "error": None,
     "start_time": 0,
+    # Published from the first request onward, so a page that has never seen a
+    # run can still tell which server process it is talking to.
+    "server_generation": _SERVER_GENERATION,
 }
 
 
@@ -118,6 +1027,8 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             self._handle_score_pdb()
         elif path in ("/api/feedback", "/feedback"):
             self._handle_feedback()
+        elif path in ("/api/install-deps", "/install-deps"):
+            self._handle_install_deps()
         else:
             self._send_json({"error": f"Unknown POST endpoint: {path}"}, 404)
 
@@ -127,6 +1038,18 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
 
         if path in ("/api/health", "/health"):
             self._send_json({"ok": True, "status": _predict_state["status"]})
+            return
+        elif path in ("/api/schema", "/schema"):
+            self._send_json(parameter_schema())
+            return
+        elif path in ("/api/current", "/current"):
+            self._send_json(_current_job_payload())
+            return
+        elif path in ("/api/deps", "/deps"):
+            self._send_json(_deps_payload())
+            return
+        elif path in ("/api/log", "/log"):
+            self._handle_log()
             return
         elif path in ("/api/status", "/status"):
             self._handle_status()
@@ -184,17 +1107,17 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         self.wfile.write(data)
 
     def _handle_status(self):
-        self._send_json(_predict_state)
+        self._send_json(_public_state())
 
     def _handle_job_status(self, path):
         """GET /api/jobs/{jid} — return task status"""
         jid = path.split("/")[-1]
-        self._send_json(_predict_state)
+        self._send_json(_public_state())
 
     def _handle_job_result(self, path):
         """GET /api/result/{jid} — return prediction result"""
         jid = path.split("/")[-1]
-        if _predict_state["status"] == "done" and _predict_state["result"]:
+        if _predict_state["status"] == "done" and _predict_state.get("result"):
             self._send_json(_predict_state["result"])
         elif _predict_state["status"] == "running":
             self._send_json({"status": "running", "progress": _predict_state["progress"]})
@@ -216,31 +1139,41 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
         last_idx = 0
+        last_beat = 0.0
         try:
             while True:
                 with _log_lock:
                     new_entries = _log_entries[last_idx:]
                     last_idx = len(_log_entries)
-                    status = _predict_state["status"]
-                    progress = _predict_state.get("progress", 0)
-                    current_level = _predict_state.get("current_level", -1)
-                    message = _predict_state.get("message", "")
+                # _public_state recomputes elapsed while running, so the header
+                # clock ticks even when no stage boundary has been crossed.
+                pub = _public_state()
+                status = pub["status"]
 
                 for entry in new_entries:
                     data = json.dumps(entry, ensure_ascii=False)
                     self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
                     self.wfile.flush()
 
-                # Heartbeat with status
-                heartbeat = json.dumps({
-                    "level": "heartbeat",
-                    "status": status,
-                    "progress": progress,
-                    "current_level": current_level,
-                    "message": message,
-                })
-                self.wfile.write(f"data: {heartbeat}\n\n".encode("utf-8"))
-                self.wfile.flush()
+                # A heartbeat every 0.5s for a run measured in hours is ~14k
+                # frames, nearly all identical. Send one whenever the state
+                # actually moves (which also carries a new log line), and a
+                # keepalive only every few seconds so a quiet stage stays quiet.
+                now = time.time()
+                if new_entries or (now - last_beat) >= 3.0:
+                    last_beat = now
+                    beat = dict(pub)
+                    beat["level"] = "heartbeat"
+                    self.wfile.write(("data: " + json.dumps(beat, ensure_ascii=False) + "\n\n")
+                                     .encode("utf-8"))
+                    self.wfile.flush()
+
+                    # Keep-alive line for a stage that prints nothing of its own.
+                    # Level 4 (REST2) can run for hours with no output at all, and
+                    # the pipeline only prints on entering a stage — so without
+                    # this the log and the terminal look frozen exactly when the
+                    # run is working hardest.
+                    _maybe_emit_progress(pub)
 
                 if status in ("done", "error"):
                     # Send final event
@@ -248,7 +1181,9 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
                     final = json.dumps({
                         "event": event_type,
                         "status": status,
-                        "message": message,
+                        "message": pub.get("message"),
+                        "job_id": pub.get("job_id"),
+                        "elapsed": pub.get("elapsed"),
                     })
                     self.wfile.write(f"event: {event_type}\ndata: {final}\n\n".encode("utf-8"))
                     self.wfile.flush()
@@ -445,6 +1380,190 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
 
         self._send_json({"ok": True, "count": len(existing)})
 
+    def _handle_install_deps(self):
+        """POST /api/install-deps — fetch what the external tools need.
+
+        A sidecar to tools/install_deps.py rather than a reimplementation, and
+        deliberately narrow: it installs pip packages, clones the two tool
+        repositories that have upstream URLs, and fetches the one checkpoint that
+        has a working direct link. It does NOT touch anything already on the
+        machine, and it does not claim to do the parts that have no download
+        source — those come back in the summary as manual steps.
+
+        Runs detached so the browser is not held open by a multi-GB transfer; the
+        installer's JSON events land in the same log the console panel already
+        reads. POST {"cancel": true} stops a running one.
+        """
+        body = self._read_body()
+        try:
+            opts = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            opts = {}
+
+        if opts.get("cancel"):
+            self._handle_install_cancel()
+            return
+
+        if _install_state.get("running"):
+            self._send_json({"error": "An install is already running",
+                             "started_at": _install_state.get("started_at")}, 409)
+            return
+
+        skip_downloads = bool(opts.get("skip_downloads"))
+        skip_git = bool(opts.get("skip_git"))
+        # Installing packages changes the interpreter the user runs the pipeline
+        # with, so it is opt-in: the default pass surveys and reports instead.
+        install_missing = bool(opts.get("install_missing"))
+        # Where model weights come from. Validated against the installer's own
+        # list rather than a pattern: an allow-list cannot be talked around, and
+        # it also turns a typo into a visible rejection instead of a silent
+        # fallback that hides the mistake the user is trying to fix.
+        source = str(opts.get("source") or "auto")
+        if source not in _model_source_ids():
+            self._send_json({"error": "unknown model source: %r" % source,
+                             "allowed": sorted(_model_source_ids())}, 400)
+            return
+        script = os.path.join(ROOT, "tools", "install_deps.py")
+        if not os.path.isfile(script):
+            self._send_json({"error": "tools/install_deps.py not found"}, 500)
+            return
+
+        with _install_lock:
+            _install_state.update({"running": True, "started_at": time.time(),
+                                   "finished_at": None, "result": None})
+        thread = threading.Thread(target=self._run_install,
+                                  args=(script, sys.executable, skip_downloads, skip_git,
+                                        source, install_missing),
+                                  daemon=True)
+        thread.start()
+        self._send_json({"status": "started", "script": script,
+                         "python": sys.executable, "source": source,
+                         "install_missing": install_missing,
+                         "skip_downloads": skip_downloads, "skip_git": skip_git})
+
+    def _handle_install_cancel(self):
+        """POST /api/install-deps {"cancel": true} — stop a running setup.
+
+        A setup can legitimately take a long time (a 532 MB checkpoint over a slow
+        mirror) and the browser has no other way to stop it. The child process tree
+        is terminated, and the state is cleared here as well as in the pump thread
+        so the flag cannot survive the cancellation.
+        """
+        with _install_lock:
+            proc = _install_state.get("proc")
+            running = _install_state.get("running")
+        if not running:
+            self._send_json({"ok": True, "note": "nothing was running"})
+            return
+        killed = False
+        if proc is not None:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                killed = True
+            except (OSError, subprocess.SubprocessError):
+                killed = False
+        _emit_log("warn", "Environment setup cancelled by request")
+        with _install_lock:
+            _install_state.update({"running": False, "finished_at": time.time(),
+                                   "proc": None,
+                                   "result": {"installed": [], "skipped": [],
+                                              "failed": [], "cancelled": True,
+                                              "manual": []}})
+        self._send_json({"ok": True, "killed": killed})
+
+    def _run_install(self, script, python, skip_downloads, skip_git, source="auto",
+                     install_missing=False):
+        cmd = [python, "-u", script, "--python", python]
+        if skip_downloads:
+            cmd.append("--skip-downloads")
+        if skip_git:
+            cmd.append("--skip-git")
+        if install_missing:
+            cmd.append("--install-missing")
+        if source and source != "auto":
+            cmd += ["--source", source]
+
+        # A sidecar's output has to reach BOTH the browser's console panel and the
+        # server's own console. _emit_log alone only fills the in-memory buffer
+        # that feeds SSE, so a terminal watching the server would show nothing for
+        # the whole install. Writing to sys.stdout fixes that (the tee mirrors it
+        # back through _emit_log), and _emit_log is still called when stdout is
+        # not a usable stream.
+        def say(level, message):
+            stream = sys.stdout
+            written = False
+            if stream is not None and hasattr(stream, "write"):
+                try:
+                    stream.write(message + "\n")
+                    stream.flush()
+                    written = True
+                except (OSError, ValueError):
+                    written = False
+            if not written:
+                _emit_log(level, message)
+
+        say("step", "Environment setup started")
+        say("info", " ".join(cmd))
+        summary = None
+        try:
+            try:
+                proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE,
+                                        stderr=subprocess.STDOUT, text=True,
+                                        encoding="utf-8", errors="replace", bufsize=1)
+                # Published so a cancel request can reach it. The installer can
+                # legitimately run for many minutes on a slow mirror.
+                with _install_lock:
+                    _install_state["proc"] = proc
+                for line in proc.stdout:
+                    line = line.rstrip()
+                    if not line:
+                        continue
+                    # The installer emits one JSON object per event; anything else
+                    # is its human-readable tail and is passed through as-is.
+                    if line.startswith("{"):
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            say("info", line)
+                            continue
+                        kind = event.get("event")
+                        if kind == "progress":
+                            pct = event.get("pct")
+                            say("progress", "  %s: %s MB%s" % (
+                                event.get("id"), event.get("mb"),
+                                "" if pct is None else " (%.1f%%)" % pct))
+                        elif kind == "step":
+                            lvl = {"fail": "error", "skip": "info"}.get(event.get("status"), "info")
+                            say(lvl, "  %s %s%s" % (
+                                event.get("status", "").upper(), event.get("label", ""),
+                                "" if not event.get("note") else " — " + event["note"]))
+                        elif kind == "summary":
+                            summary = event
+                    else:
+                        say("info", line)
+                proc.wait(timeout=30)
+            except (OSError, subprocess.SubprocessError, ValueError) as exc:
+                say("error", "Environment setup failed to run: %s" % exc)
+        finally:
+            # This reset MUST happen on every path. It used to sit after the
+            # try/except, so any exception the handlers did not name — or a
+            # thread death — left install_running True forever and every later
+            # request was answered "An install is already running" with no way
+            # back short of restarting the server.
+            ok = bool(summary) and not summary.get("failed")
+            try:
+                say("success" if ok else "warn",
+                    "Environment setup finished%s" % ("" if ok else " with problems"))
+            except Exception:                            # noqa: BLE001
+                pass
+            with _install_lock:
+                _install_state.update({"running": False, "finished_at": time.time(),
+                                       "proc": None, "result": summary})
+
     def _handle_predict(self):
         if _predict_state["status"] == "running":
             self._send_json({"error": "Prediction already running"}, 409)
@@ -466,35 +1585,51 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             self._send_json({"error": f"Invalid characters: {set(bad)}"}, 400)
             return
 
+        # Coerce and bound-check against the registry before anything is queued,
+        # so a malformed body is rejected here rather than as a TypeError 40s
+        # into a run. The notes go to the SSE log so the user sees what changed.
+        pipeline_params, notes = normalise_params(params)
+
         # Clear log buffer for new prediction
         _clear_logs()
+        for note in notes:
+            _emit_log("warn", f"parameter: {note}")
 
-        import uuid
         job_id = str(uuid.uuid4())[:8]
-        _predict_state["job_id"] = job_id
+        # Register before the thread starts, so a browser that refreshes the
+        # instant after submitting can still find the job.
+        _register_job(job_id, sequence, pipeline_params)
         thread = threading.Thread(
             target=self._run_prediction,
-            args=(sequence, params),
+            args=(sequence, pipeline_params),
             daemon=True,
         )
         thread.start()
-        self._send_json({"status": "started", "job_id": job_id, "length": len(sequence)})
+        self._send_json({"status": "started", "job_id": job_id, "length": len(sequence),
+                         "params": sorted(pipeline_params), "notes": notes})
 
     def _run_prediction(self, sequence, params):
         global _predict_state
-        _predict_state.update({
-            "status": "running", "progress": 0,
-            "current_level": 0, "message": "Starting...",
-            "result": None, "error": None, "start_time": time.time(),
-        })
+        _note_stage("0", "Secondary structure prediction")
+
         _emit_log("step", "=== TorusFold Pipeline Started ===")
         _emit_log("info", f"Sequence length: {len(sequence)} nt")
 
-        # Capture stdout/stderr for SSE streaming
         orig_stdout = sys.stdout
         orig_stderr = sys.stderr
-        sys.stdout = _TeeWriter(orig_stdout, "info")
-        sys.stderr = _TeeWriter(orig_stderr, "warn")
+
+        # Capture stdout/stderr for SSE streaming, and mirror both to a per-job
+        # log file. The mirror is what makes the run watchable from a second
+        # terminal: `Get-Content -Wait output_web/logs/<job>.log`, or `tail -f`.
+        # It goes INSIDE the tee so the file sees exactly what the browser sees.
+        _mirror_path = os.path.join(ROOT, "output_web", "logs",
+                                    "%s.log" % (_predict_state.get("job_id") or "job"))
+        _stdout_mirror = _LogMirror(orig_stdout, _mirror_path)
+        _stderr_mirror = _LogMirror(orig_stderr, _mirror_path)
+        _predict_state["log_path"] = _mirror_path
+        sys.stdout = _TeeWriter(_stdout_mirror, "info")
+        sys.stderr = _TeeWriter(_stderr_mirror, "warn")
+        _emit_log("info", "live log: %s" % _mirror_path)
 
         try:
             sys.path.insert(0, SRC)
@@ -531,45 +1666,31 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             _emit_log("info", f"MFE = {mfe:.1f} kcal/mol")
             _emit_log("info", f"SS length = {len(ss)}")
 
-            # Pipeline params
-            max_seg = int(params.get("max_seg_len", 200))
-            overlap = int(params.get("overlap", 20))
-            rounds = int(params.get("rounds", 1))
-            replicas = int(params.get("replicas", 4))
-            rest2steps = int(params.get("rest2steps", 50000))
-            use_rl = params.get("use_rl", True)
-            use_rhofold = params.get("use_rhofold", True)
-
             out_dir = os.path.join(ROOT, "output_web")
             os.makedirs(out_dir, exist_ok=True)
 
-            # Level 1+: Full pipeline
-            _predict_state["current_level"] = 1
-            _predict_state["message"] = "3D structure prediction..."
-            _predict_state["progress"] = 20
-            _emit_log("step", "Level 1: Segmented Vfold3D/RhoFold+ + Kabsch assembly")
+            # Level 1+: Full pipeline.
+            #
+            # Every knob comes from the registry via normalise_params(), which
+            # already dropped unknown keys and clamped the rest. Nothing is
+            # hard-coded here on purpose: this block used to pin use_msa=False,
+            # use_pyrosetta=False, use_ppr=False and md_step_scale=0.1, which
+            # silently disabled two headline levels and disagreed with the demo
+            # invocation in run_2013nt.py.
+            #
+            # verbose is forced on: the SSE log stream is built by teeing stdout,
+            # so verbose=False would leave the console panel empty.
+            call_kwargs = dict(params)
+            call_kwargs["verbose"] = True
+            _emit_log("info", "parameters: " + ", ".join(
+                f"{k}={call_kwargs[k]}" for k in sorted(call_kwargs) if k != "verbose"))
 
             from torusfold.scheme2.isrnaclong import isrnaclong_pipeline
             result = isrnaclong_pipeline(
                 sequence=sequence,
                 secondary_structure=ss,
                 output_dir=out_dir,
-                max_seg_len=max_seg,
-                overlap=overlap,
-                n_relax_rounds=rounds,
-                use_rl_relax=use_rl,
-                use_rl_mcts=use_rl,
-                rl_n_simulations=20,
-                n_rest2_replicas=replicas,
-                rest2_nsteps=rest2steps,
-                md_step_scale=0.1,
-                nrep=max(2, replicas),
-                platform="auto",
-                use_rhofold=use_rhofold,
-                n_candidates=1,
-                use_msa=False,
-                resume=False,
-                verbose=False,
+                **call_kwargs,
             )
 
             elapsed = time.time() - _predict_state["start_time"]
@@ -590,24 +1711,59 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
                 pdb_path=pdb_path, out_dir=out_dir,
             )
 
-            _predict_state.update({
-                "status": "done",
-                "progress": 100,
-                "current_level": 5,
-                "message": "Complete",
-                "result": result_dict,
-            })
+            _publish_final("done", "Complete")
+            _predict_state["progress"] = 100.0
+            _predict_state["current_level"] = len(LEVEL_ORDER) - 1
+            _predict_state["level_name"] = LEVEL_ORDER[-1][0]
+            _predict_state["stage_label"] = "Complete"
+            _predict_state["result"] = result_dict
 
         except Exception as exc:
             _emit_log("error", f"Pipeline failed: {exc}")
-            _predict_state.update({
-                "status": "error",
-                "message": str(exc),
-                "error": str(exc),
-            })
+            _publish_final("error", str(exc), error=str(exc))
         finally:
             sys.stdout = orig_stdout
             sys.stderr = orig_stderr
+
+    def _handle_log(self):
+        """GET /api/log — the current job's log file.
+
+        The browser already receives the same text over SSE, so this is for the
+        case SSE cannot cover: a page opened after the run started, or one that
+        reloaded and wants the part it missed. `?tail=N` limits it to the last N
+        lines, which is what a 7-hour run needs — the whole file is megabytes.
+        """
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        try:
+            tail = int((query.get("tail") or ["0"])[0])
+        except ValueError:
+            tail = 0
+
+        path = _predict_state.get("log_path")
+        if not path or not os.path.isfile(path):
+            self._send_json({"error": "No log for the current job yet",
+                             "job_id": _predict_state.get("job_id")}, 404)
+            return
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError as exc:
+            self._send_json({"error": f"Could not read the log: {exc}"}, 500)
+            return
+
+        lines = text.splitlines()
+        truncated = False
+        if tail > 0 and len(lines) > tail:
+            lines = lines[-tail:]
+            truncated = True
+        self._send_json({
+            "job_id": _predict_state.get("job_id"),
+            "log_path": path,
+            "lines": len(lines),
+            "truncated": truncated,
+            "text": "\n".join(lines),
+        })
 
     def _handle_upload(self):
         body = self._read_body()
@@ -621,7 +1777,12 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         self._send_json({"ok": True, "path": tmp, "size": len(body)})
 
     def log_message(self, format, *args):
-        sys.stderr.write(f"[{self.log_date_time_string()}] {format % args}\n")
+        # Write to the process's original stderr, NOT to sys.stderr. A prediction
+        # swaps sys.stderr for the tee that feeds the job log, so using sys.stderr
+        # here interleaved HTTP request lines into the middle of the pipeline's
+        # own log — the very file someone is following in a terminal.
+        (_PROCESS_STDERR or sys.stderr).write(
+            f"[{self.log_date_time_string()}] {format % args}\n")
 
 
 # ── Result builder ───────────────────────────────────────────────
@@ -766,10 +1927,26 @@ def _build_result_dict(result, details, pdb_text, sequence, ss, mfe, elapsed, pd
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8877
     os.chdir(ROOT)
-    server = HTTPServer(("0.0.0.0", port), TorusFoldHandler)
+
+    # Reading the pipeline's defaults means importing it, which pulls in torch and
+    # takes seconds. Do it on a background thread so the first schema request and
+    # the first prediction do not each pay for it while the UI waits.
+    def _warm():
+        n = len(_pipeline_defaults())
+        print(f"  parameter defaults loaded: {n}")
+    threading.Thread(target=_warm, daemon=True).start()
+
+    # ThreadingHTTPServer, not HTTPServer. The SSE log stream holds its
+    # connection open for the whole run, and a single-threaded server serves one
+    # request at a time — so while a browser was streaming, every other request
+    # (including the status polls that drive the progress bar) queued behind it
+    # and the UI appeared frozen. Each connection now gets its own thread.
+    server = ThreadingHTTPServer(("0.0.0.0", port), TorusFoldHandler)
+    server.daemon_threads = True
     print(f"TorusFold server: http://127.0.0.1:{port}/")
     print(f"  Static root: {ROOT}")
     print(f"  Web dir: {WEB_DIR}")
+    print(f"  GET  /api/schema   — tunable parameters, defaults and bounds")
     print(f"  POST /api/predict  — run pipeline")
     print(f"  GET  /api/sse/{{jid}} — SSE streaming")
     print(f"  POST /api/feedback — save feedback")
