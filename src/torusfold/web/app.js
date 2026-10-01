@@ -714,6 +714,50 @@
    */
   var liveMetricsDigest = null;
   var lastMetrics = null;
+  var metricsRetryTimer = null;
+
+  /* Re-ask for the measurements a few times while they are still being computed.
+
+     Bounded: the measurement takes seconds on a large structure, so a handful of
+     attempts covers it, and a page left open for hours does not keep polling. If it
+     has not arrived by then the source note says so rather than the page quietly
+     hammering the server. */
+  var metricsRetryLeft = 0;
+  var metricsRetryDigest = null;
+  // Budget for one structure: the analysis takes seconds, so a handful of attempts
+  // covers it. Reset whenever a different structure appears, because that is a new
+  // measurement with its own wait.
+  var METRICS_RETRY_BUDGET = 10;
+  function resetMetricsRetry() {
+    metricsRetryLeft = METRICS_RETRY_BUDGET;
+    if (metricsRetryTimer) { clearTimeout(metricsRetryTimer); metricsRetryTimer = null; }
+  }
+  function scheduleMetricsRetry(digest) {
+    // A different structure means a new measurement: give it a fresh budget.
+    if (digest && digest !== metricsRetryDigest) {
+      metricsRetryDigest = digest;
+      resetMetricsRetry();
+    }
+    if (metricsRetryTimer) return;
+    if (metricsRetryLeft <= 0) {
+      if (metricsRetryLeft === 0) {
+        metricsRetryLeft = -1;      // stop; do not re-arm
+        var note = $('live-metrics-source');
+        if (note) {
+          note.hidden = false;
+          note.textContent = 'the current structure is still being measured';
+        }
+      }
+      return;
+    }
+    metricsRetryLeft--;
+    metricsRetryTimer = setTimeout(function () {
+      metricsRetryTimer = null;
+      fetch('/api/current').then(function (r) { return r.json(); }).then(function (s) {
+        if (s && s.metrics) renderLiveMetrics(s.metrics);
+      }).catch(function () { /* the next attempt or nothing */ });
+    }, 2500);
+  }
 
   /* Hand the viewer the per-residue series the server measured.
 
@@ -735,11 +779,33 @@
   function renderLiveMetrics(metrics) {
     if (!metrics || !metrics.live) return;
     var src = metrics.source || {};
-    // Only re-render when the underlying structure changed; the heartbeat arrives
-    // every few seconds and re-running eleven renderers for identical numbers is
-    // pure work.
-    var key = src.name + '|' + (metrics.physical && metrics.physical.radius_of_gyration_A);
+
+    /* Nothing to show yet: the server measures on a worker thread because the
+       analysis costs seconds on a large structure. Do NOT render in that state.
+
+       This was the bug that left every panel on "--" for a whole run. The first
+       poll arrived before the measurement existed, the panels were rendered from
+       that placeholder payload, and the cache key was recorded — so when the real
+       numbers landed seconds later the key looked unchanged and the render was
+       skipped. The placeholder had overprinted the data and nothing said so.
+       Waiting for real values means the panels simply fill in a few seconds later. */
+    if (metrics.pending) {
+      // Ask again shortly. There is no SSE stream on an idle page — the heartbeat
+      // only flows while a job runs — so without this the panels would stay empty
+      // until the reader reloaded, which is exactly what happened: the measurement
+      // finishes a few seconds after the page asks for it, and nobody asks again.
+      scheduleMetricsRetry(metrics.for_digest);
+      return;
+    }
+
+    // Keyed on the structure's digest, not on its name and a measurement: those two
+    // are identical before and after a measurement completes for the same file, so
+    // keying on them cannot detect "fresh numbers have arrived".
+    var key = (metrics.for_digest || '') + '|' + (src.name || '') + '|' +
+              (metrics.stale ? 'stale' : 'fresh');
     if (key === liveMetricsDigest) return;
+    // Stale figures are the previous structure's. Shown once, labelled, and then
+    // superseded — not re-rendered on every heartbeat.
     liveMetricsDigest = key;
 
     if (TF.Panels) {
@@ -764,10 +830,16 @@
     var note = $('live-metrics-source');
     if (note) {
       note.hidden = false;
-      note.textContent = src.delivered
-        ? 'measured from the delivered model (' + (src.atoms || 0) + ' atoms) — not from a run'
-        : 'measured live from level ' + (src.level || '?') + ' · ' + (src.name || '') +
-          ' · ' + (src.atoms || 0) + ' atoms';
+      if (metrics.stale) {
+        note.textContent = 'measured from the previous structure — the current one ' +
+          'is still being measured';
+      } else if (src.delivered) {
+        note.textContent = 'measured from the delivered model (' + (src.atoms || 0) +
+          ' atoms) — not from a run';
+      } else {
+        note.textContent = 'measured live from stage ' + (src.level || '?') + ' · ' +
+          (src.name || '') + ' · ' + (src.atoms || 0) + ' atoms';
+      }
     }
   }
 

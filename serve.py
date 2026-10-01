@@ -2386,18 +2386,28 @@ def _live_metrics(stage):
         if not fresh and not already:
             _LIVE_METRICS["computing"] = digest
             threading.Thread(
-                target=_compute_live_metrics,
-                args=(dict(stage), digest),
+                target=_compute_live_metrics,                args=(dict(stage), digest),
                 daemon=True,
                 name="torusfold-metrics",
             ).start()
     if fresh:
         return cached
-    # Not measured yet: hand back the previous measurement, tagged with what it was
-    # measured from, so the panel can say so rather than imply it is current.
+    # Not measured yet. Hand back the previous measurement if there is one, tagged
+    # with the digest it was measured from and marked stale, so a client can tell
+    # "these numbers belong to the structure before this one" from "this is current".
+    #
+    # Without the tag the client cannot notice the moment fresh numbers arrive: the
+    # payload looks identical before and after the background pass completes, because
+    # the two carry the same source name and the same measurements. That is what left
+    # the panels showing "--" for the whole of a run — the first poll rendered the
+    # placeholders, the measurement landed seconds later, and nothing told the page
+    # to look again.
     if cached:
-        return cached
-    return {"live": True, "pending": True,
+        out = dict(cached)
+        out["stale"] = True
+        out["for_digest"] = _LIVE_METRICS["digest"]
+        return out
+    return {"live": True, "pending": True, "for_digest": digest,
             "source": {"name": stage.get("name"), "level": stage.get("level")}}
 
 
