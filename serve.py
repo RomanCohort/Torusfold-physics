@@ -2616,6 +2616,41 @@ def _print_tool_summary():
                                      "CG_TO_ALLATOM_COEFF unset; the wrapper will"
                                      " search the isRNAcirc tree for the templates"))
 
+    # PyRosetta, with its licence terms. It is not a download — it has to be
+    # obtained under a licence the user arranges — so "absent" and "you must
+    # license this" are different messages, and only the second is actionable.
+    # Reported here because it appeared in no report at all before: Level 2.6 could
+    # be quietly skipped and nothing said why.
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "tools"))
+        import _pyrosetta as _pj
+        _p = _pj.probe()
+        if _p.get("available"):
+            print("    %-15s ok        %s" % ("PyRosetta", _p.get("path") or ""))
+        else:
+            print("    %-15s %-9s %s" % ("PyRosetta", "not found",
+                                         _p.get("why", "")))
+        for _line in _wrap_text(_p.get("licence", ""), 66):
+            print("      ! %s" % _line)
+    except Exception:
+        pass
+
+
+def _wrap_text(text, width):
+    """Wrap a note onto lines of at most `width`, on word boundaries."""
+    words = str(text).split()
+    lines = []
+    current = ""
+    for w in words:
+        if current and len(current) + 1 + len(w) > width:
+            lines.append(current)
+            current = w
+        else:
+            current = (current + " " + w).strip()
+    if current:
+        lines.append(current)
+    return lines or [""]
+
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8877
@@ -2626,7 +2661,6 @@ def main():
     # the first prediction do not each pay for it while the UI waits.
     def _warm():
         n = len(_pipeline_defaults())
-        print(f"  parameter defaults loaded: {n}")
     threading.Thread(target=_warm, daemon=True).start()
 
     # ThreadingHTTPServer, not HTTPServer. The SSE log stream holds its
@@ -2644,6 +2678,13 @@ def main():
     # and simply produces a worse ensemble — so the only place this was visible
     # was a line in the job log, minutes in.
     _print_tool_summary()
+    # After the tool table, so a background thread cannot interleave its output
+    # into the middle of it. This line used to be printed by the warm-up thread
+    # and landed between the tools and the PyRosetta note.
+    try:
+        print(f"  parameter defaults loaded: {len(_pipeline_defaults())}")
+    except Exception:
+        pass
     print(f"  GET  /api/schema   — tunable parameters, defaults and bounds")
     print(f"  POST /api/predict  — run pipeline")
     print(f"  GET  /api/sse/{{jid}} — SSE streaming")

@@ -145,8 +145,28 @@ export CG_TO_ALLATOM_COEFF="C:/path/to/IsRNA2/coeff"             # coefficient d
 
 ### PyRosetta — conditional full-atom refinement (Linux/WSL)
 
-Optional; used by `pyrosetta_refine.py`. Install per your PyRosetta license
-(<https://www.pyrosetta.org>).
+Optional; used by `pyrosetta_refine.py`, which Level 2.6 calls as a Python import
+inside WSL.
+
+> **PyRosetta is licensed software. Obtain a licence from
+> <https://www.pyrosetta.org> before installing it.**
+>
+> It is free of charge for academic and other non-commercial use, but that still
+> requires a licence key that you request yourself. Commercial use requires a paid
+> licence. It is not on PyPI and not on conda-forge, so nothing in this repository
+> can download or install it, and this repository neither bundles it nor ships a
+> licence for it.
+>
+> Running an unlicensed copy is not a configuration this project supports. If you
+> are not covered by a licence, leave PyRosetta out: Level 2.6 is **skipped, not
+> failed**, without it, and the rest of the pipeline is unaffected.
+
+Check whether it is available, and see the licence note, with either:
+
+```bash
+python tools/configure_deps.py discover     # the PyRosetta row carries the note
+python tools/install_deps.py --skip-downloads --skip-git
+```
 
 ### structRFM — multi-task DL heads
 

@@ -432,13 +432,14 @@ MANUAL_TOOLS = [
     {
         "id": "rsrnasp1",
         "label": "rsRNASP1 (RNA statistical potential)",
-        "why": "Source is public at https://github.com/Tan-group/rsRNASP1, but it builds "
-               "with a Makefile and gcc for Linux and ships no Windows binary and no pip "
-               "package. NOT INTEGRATED: isrnaclong.py writes \"rsrnasp1\": None into the "
-               "result, so the interface's rsRNASP1 row can never show a value. Building "
-               "it under WSL and calling it would be new work, not configuration.",
-        "env": "(none — no wrapper reads an environment variable for this)",
-        "integrated": False,
+        "why": "Linux-only C++ build (Makefile + gcc), so it runs via WSL. INTEGRATED: "
+               "isrnaclong.py scores the final all-atom structure and writes the value "
+               "into the result, and the interface shows it. Build it with "
+               "tools/build_rsrnasp.py, or point TORUSFOLD_RSRNASP at a checkout. "
+               "Absent, the score row reads n/a rather than failing the run.",
+        "env": "TORUSFOLD_RSRNASP (optional; defaults to ~/tools/rsRNASP1 inside WSL)",
+        "integrated": True,
+        "wsl_probe": "_rsrnasp1",
     },
     {
         "id": "dfire",
@@ -468,6 +469,25 @@ MANUAL_TOOLS = [
                "location if the module is vendored elsewhere.",
         "env": "TORUSFOLD_LOCIPARSE (optional)",
         "integrated": True,
+    },
+    # ── Licensed software ────────────────────────────────────────────────────
+    # Kept apart from the "manual steps" list because the instruction is different.
+    # A manual step means "find this and point a variable at it"; this means "obtain
+    # a licence", and no amount of searching satisfies it. It appeared in no report
+    # at all before, so Level 2.6 could be skipped with nothing saying why.
+    {
+        "id": "pyrosetta",
+        "label": "PyRosetta (Level 2.6 full-atom refinement)",
+        "why": "Licensed software, obtain it yourself from https://www.pyrosetta.org — "
+               "academic and other non-commercial use is free of charge but still needs "
+               "a licence key that you request, and commercial use needs a paid licence. "
+               "It is not on PyPI and not on conda-forge, so nothing in this repository "
+               "can fetch it, and an unlicensed copy is not a configuration this "
+               "repository supports. It runs on the Linux side of WSL as a Python "
+               "import. Level 2.6 is skipped, not failed, when it is absent.",
+        "env": "(none — a Python import inside WSL, not an executable path)",
+        "licensed": True,
+        "wsl_probe": "_pyrosetta",
     },
 ]
 
@@ -1023,7 +1043,14 @@ def run(python: str, skip_downloads: bool = False, skip_git: bool = False,
 
     for tool in MANUAL_TOOLS:
         entry = dict(tool)
-        entry["detected"] = detect_tool(tool["id"])
+        # WSL-only tools live on the Linux side, where a Windows path probe cannot
+        # see them. Asking detect_tool() alone reported PyRosetta as "not detected"
+        # on a machine where it is installed and importable, and rsRNASP1 as absent
+        # after it had been built — the report was wrong in both directions.
+        if tool.get("wsl_probe"):
+            entry["detected"] = _detect_in_wsl(tool["wsl_probe"])
+        else:
+            entry["detected"] = detect_tool(tool["id"])
         summary["manual"].append(entry)
 
     # A tool that is present but was reported as a manual step is not a missing
@@ -1033,6 +1060,34 @@ def run(python: str, skip_downloads: bool = False, skip_git: bool = False,
 
     emit(event="summary", **summary)
     return summary
+
+
+def _detect_in_wsl(prober: str) -> Optional[str]:
+    """Where a WSL-only tool lives, or None.
+
+    Two of them are checked in completely different ways — rsRNASP1 by running a
+    binary, PyRosetta by importing a module — so the caller names the prober and
+    this dispatches. Returns None rather than raising: a missing tool is a normal
+    report, not an error.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        if prober == "_pyrosetta":
+            import _pyrosetta as mod
+            probe = mod.probe()
+            if probe.get("available"):
+                return probe.get("path") or "importable in WSL"
+            return None
+        # Default: the rsRNASP1 wrapper, which resolves its own root.
+        if os.path.join(REPO, "src") not in sys.path:
+            sys.path.insert(0, os.path.join(REPO, "src"))
+        from torusfold.scheme2 import rsrnasp_quality as rq
+        probe = rq.available()
+        return probe.get("root") if probe.get("available") else None
+    except Exception:                                        # noqa: BLE001
+        return None
 
 
 def detect_tool(key: str) -> Optional[str]:
@@ -1166,16 +1221,40 @@ def main(argv: Optional[List[str]] = None) -> int:
         for m in _unintegrated:
             print("   %-16s [not integrated]" % m["id"])
             print("        %s" % m.get("why", ""))
-    # Bundled with the repository: nothing to install, and listing it as a manual
-    # step would print "NOT FOUND" for something that needs no finding.
-    _bundled = [m for m in summary["manual"] if m.get("integrated") is True]
-    if _bundled:
+    # Licensed software. Its own section on purpose: "NOT FOUND" would suggest that
+    # looking harder would fix it, and for this the instruction is to obtain a
+    # licence. Printed whether or not it is installed, because the licence applies
+    # either way and a user who already has a copy still needs to know the terms.
+    _licensed = [m for m in summary["manual"] if m.get("licensed")]
+    if _licensed:
+        print("Licensed software — you must obtain this yourself:")
+        for m in _licensed:
+            state = ("detected at %s" % m["detected"]) if m.get("detected") else "not detected"
+            print("   %-16s [%s]" % (m["id"], state))
+            print("        %s" % m.get("why", ""))
+    # Integrated, but not necessarily in-tree. Two very different situations were
+    # sharing one heading: lociPARSE ships here and needs nothing, while rsRNASP1
+    # also produces a value the pipeline uses but only after `git clone && make`
+    # under WSL. Calling that "no installation needed" was wrong.
+    _in_tree = [m for m in summary["manual"]
+                if m.get("integrated") is True and not m.get("licensed")
+                and m.get("id") == "lociparse"]
+    _built = [m for m in summary["manual"]
+              if m.get("integrated") is True and not m.get("licensed")
+              and m.get("id") != "lociparse"]
+    if _in_tree:
         print("Bundled with this repository (no installation needed):")
-        for m in _bundled:
+        for m in _in_tree:
             print("   %-16s [in-tree]" % m["id"])
             print("        %s" % m.get("why", ""))
+    if _built:
+        print("Integrated, but has to be built or obtained separately:")
+        for m in _built:
+            state = ("present at %s" % m["detected"]) if m.get("detected") else "not present"
+            print("   %-16s [%s]" % (m["id"], state))
+            print("        %s" % m.get("why", ""))
     _manual = [m for m in summary["manual"]
-               if m.get("integrated") is None]
+               if m.get("integrated") is None and not m.get("licensed")]
     print("Manual steps still required:")
     for m in _manual:
         state = ("already present at %s" % m["detected"]) if m.get("detected") else "NOT FOUND"

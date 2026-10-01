@@ -151,6 +151,27 @@ TOOLS = [
         "hints": ["rsRNASP1", "rsrnasp1"],
         "wsl_only": True,
     },
+    {
+        "key": "pyrosetta",
+        "title": "PyRosetta (Level 2.6 full-atom refinement)",
+        "env": [],
+        "probe": None,
+        "levels": "Level 2.6 conditional PyRosetta refinement",
+        "required": False,
+        # Licensed software that cannot be fetched, and it lives on the Linux side
+        # of WSL, so neither the filesystem probe nor the search applies. Before
+        # this entry existed, PyRosetta appeared in no report at all: a user could
+        # run every check this repository offers and never learn that Level 2.6
+        # needed something they have to obtain under a licence.
+        "note": "Licensed software — obtain it yourself from https://www.pyrosetta.org "
+                "(free for academic/non-commercial use, but a licence key is still "
+                "required; commercial use is paid). Not on PyPI and not on "
+                "conda-forge, so no installer here can fetch it. Runs as a Python "
+                "import inside WSL. Level 2.6 is skipped, not failed, without it.",
+        "hints": ["pyrosetta", "PyRosetta"],
+        "wsl_only": True,
+        "wsl_probe": "_pyrosetta",
+    },
 ]
 
 # Python packages the pipeline imports directly. `module` is what to try.
@@ -585,18 +606,33 @@ def discover(roots: List[str], verbose: bool = False) -> Dict:
         # search are all the wrong question. Ask the wrapper that has to invoke it,
         # which probes inside WSL where the binary actually lives.
         if tool.get("wsl_only"):
+            probe = None
             try:
                 sys.path.insert(0, SRC)
-                from torusfold.scheme2 import rsrnasp_quality as _rs
-                probe = _rs.available()
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                # Which prober to use is the tool's own choice: two WSL-only tools
+                # are checked in completely different ways, one by running a binary
+                # and one by importing a Python module.
+                prober = tool.get("wsl_probe")
+                if prober == "_pyrosetta":
+                    import _pyrosetta as _pj
+                    probe = _pj.probe()
+                else:
+                    from torusfold.scheme2 import rsrnasp_quality as _rs
+                    probe = _rs.available()
             except Exception as exc:                     # noqa: BLE001
                 probe = {"available": False, "why": "check failed: %s" % exc}
             if probe.get("available"):
-                entry["resolved"] = probe.get("root")
+                # rsRNASP1 reports `root`; the PyRosetta prober reports `path`.
+                entry["resolved"] = probe.get("root") or probe.get("path")
                 entry["source"] = "wsl"
                 entry["reason"] = "reachable inside %s" % (probe.get("distro") or "WSL")
             else:
                 entry["reason"] = probe.get("why", "not available")
+            # The licence text travels with the result, so any report that prints a
+            # PyRosetta row can also print what obtaining it involves.
+            if probe.get("licence"):
+                entry["licence"] = probe["licence"]
             entry["wsl_probe"] = probe
             entry.update({"usable": bool(probe.get("available"))})
             result["tools"].append(entry)
@@ -860,6 +896,22 @@ def write_activate_bat(env: Dict[str, str], path: str) -> None:
         f.write("\n".join(lines) + "\n")
 
 
+def _wrap(text: str, width: int) -> List[str]:
+    """Wrap a note onto lines of at most `width`, on word boundaries."""
+    words = str(text).split()
+    lines: List[str] = []
+    current = ""
+    for w in words:
+        if current and len(current) + 1 + len(w) > width:
+            lines.append(current)
+            current = w
+        else:
+            current = (current + " " + w).strip()
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
 def _no_interpreter_advice() -> List[str]:
     """What to do when no candidate interpreter can run the pipeline.
 
@@ -949,6 +1001,12 @@ def render(result: Dict) -> str:
             out.append("          %s" % t.get("reason", ""))
         if t.get("candidates") and len(t["candidates"]) > 1:
             out.append("          also found: %s" % ", ".join(t["candidates"][1:4]))
+        # A tool that is licensed rather than downloadable says so here, in the
+        # report, not only in a document: "absent" and "you must obtain a licence"
+        # are different instructions and the second is easy to miss.
+        if t.get("licence"):
+            for line in _wrap(t["licence"], 68):
+                out.append("          ! %s" % line)
 
     out.append("")
     out.append("Interpreters")
