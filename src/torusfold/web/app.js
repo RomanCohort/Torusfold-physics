@@ -592,6 +592,80 @@
         runLogPathWrap.hidden = true;
       }
     }
+
+    showStructure(state.structure);
+  }
+
+  /* Show the latest finished checkpoint in the 3D panel.
+   *
+   * A prediction leaves a chain of progressively better PDBs, so the panel can
+   * show the structure being built instead of staying empty for the whole run.
+   * Only a CHANGE is acted on: the heartbeat arrives every few seconds and
+   * reloading the same structure would churn the Mol* plugin for nothing.
+   */
+  var shownStructure = null;
+  var shownDigest = null;
+  function showStructure(stage) {
+    var labelEl = $('viewer-stage');
+    var levelEl = $('viewer-stage-level');
+    var descEl = $('viewer-stage-desc');
+    var sameEl = $('viewer-stage-same');
+
+    if (!stage) return;
+    // Keyed on the file, not its contents: the label must follow the stage even
+    // when the coordinates did not change.
+    var key = stage.name + '|' + stage.mtime;
+    if (key === shownStructure) return;
+    shownStructure = key;
+
+    if (labelEl) {
+      labelEl.hidden = false;
+      if (levelEl) levelEl.textContent = 'Level ' + stage.level;
+      if (descEl) descEl.textContent = stage.desc || stage.name;
+    }
+
+    // Stages pass the same coordinates forward, so a new stage can be the same
+    // molecule under a new name. Say so rather than reloading it and letting the
+    // view sit still, which would look like the viewer had frozen. Gated on the
+    // viewer already holding something: after a refresh the digest cache is empty
+    // and the restored checkpoint still has to be loaded.
+    var unchanged = !!(shownDigest && stage.digest && stage.digest === shownDigest);
+    if (sameEl) sameEl.hidden = !unchanged;
+    if (unchanged) return;
+    shownDigest = stage.digest || null;
+
+    fetch('/api/structure/' + stage.name.split('/').map(encodeURIComponent).join('/'))
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.text();
+      })
+      .then(function (pdb) {
+        if (!viewer) viewer = new CircRNAViewer('viewer');
+        TF.Viewer = TF.Viewer || {};
+        TF.Viewer.instance = viewer;
+        // updateStructure, not mount: the scalar/stat cards belong to the finished
+        // result and must not be re-rendered on every checkpoint, and the camera
+        // must not move — the point is that this is the same molecule improving.
+        return viewer.updateStructure(pdb);
+      })
+      .catch(function (e) {
+        if (window.console) console.warn('checkpoint load failed:', e.message);
+      });
+  }
+
+  /* Exposed so the checkpoint path can be driven directly: the stages that hand the
+     same coordinates forward only occur deep inside a multi-hour run, and this is
+     the branch that decides whether the panel reloads or says "unchanged". */
+  TF.App.showStructure = showStructure;
+
+  /* The idle path into the 3D panel: ask which structure is the newest one on
+     disk and show it. Reached on load when the server has no job, so a finished
+     prediction is still on screen after a refresh instead of an empty panel that
+     looks like the run was lost. */
+  function showLastStructure() {
+    fetch('/api/structure').then(function (r) { return r.json(); }).then(function (s) {
+      if (s && s.available) showStructure(s);
+    }).catch(function () { /* panel stays as it was */ });
   }
 
   /* A page refresh loses the job id the browser was holding. Rather than
@@ -599,7 +673,12 @@
      conflict anyway — ask the server what it is doing and re-attach. */
   function reconnectToRunningJob() {
     fetch('/api/current').then(function (r) { return r.json(); }).then(function (s) {
-      if (!s.has_job) return;
+      if (!s.has_job) {
+        /* No run in progress, but a finished one may still be lying in the output
+           directory. Show its last checkpoint instead of an empty 3D panel. */
+        showLastStructure();
+        return;
+      }
       applyRunState(s);
       if (s.job_id) {
         currentJobId = s.job_id;

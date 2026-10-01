@@ -11,11 +11,13 @@ import json
 import re
 import time
 import uuid
+import hashlib
+import email.utils
 import threading
 import tempfile
 import numpy as np
 from http.server import HTTPServer, ThreadingHTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, unquote
 
 # Changes on every process start. The browser compares it against the value it
 # remembered, so "your job is gone because the server restarted" is a different
@@ -472,7 +474,6 @@ _PUBLIC_KEYS = (
     "fraction", "weights", "plan", "log_path",
 )
 
-
 def _model_source_ids():
     """The model hosts the installer accepts, plus "auto".
 
@@ -496,6 +497,32 @@ def _model_source_ids():
 
 
 _MODEL_SOURCE_CACHE = {}
+
+
+def _viewer_module():
+    """The checkpoint-tracking module, imported from tools/ on first use."""
+    global _VIEWER_MOD
+    if _VIEWER_MOD is None:
+        script_dir = os.path.join(ROOT, "tools")
+        if script_dir not in sys.path:
+            sys.path.insert(0, script_dir)
+        import viewer_stage as _vs
+        _VIEWER_MOD = _vs
+    return _VIEWER_MOD
+
+
+_VIEWER_MOD = None
+
+
+def _viewer_stage(output_dir):
+    """The newest finished checkpoint, or None. Never raises: the 3D panel is not
+    worth failing a status poll over."""
+    try:
+        mod = _viewer_module()
+        started = _predict_state.get("started_at")
+        return mod.newest_structure(output_dir, run_started_at=started)
+    except Exception:                                    # noqa: BLE001
+        return None
 
 
 def _deps_payload():
@@ -565,6 +592,17 @@ def _public_state():
         )
 
     out["log_count"] = len(_log_entries)
+    # Which checkpoint the 3D view should be showing. Published with the run state
+    # so the viewer advances on the heartbeat it already receives, rather than
+    # polling a second endpoint for it.
+    stage = _viewer_stage(os.path.join(ROOT, "output_web"))
+    if stage:
+        out["structure"] = {"level": stage["level"], "name": stage["name"],
+                            "desc": stage["desc"], "atoms": stage["atoms"],
+                            "mtime": stage["mtime"],
+                            "digest": stage.get("digest", "")}
+    else:
+        out["structure"] = None
     return out
 
 
@@ -1054,6 +1092,12 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         elif path in ("/api/deps", "/deps"):
             self._send_json(_deps_payload())
             return
+        elif path in ("/api/structure", "/structure") or path.startswith("/api/structure/"):
+            # Both forms: without a name it reports which checkpoint is current,
+            # with one it serves those bytes. Matching only the trailing-slash form
+            # sent the bare path to the static file handler.
+            self._handle_structure(path)
+            return
         elif path in ("/api/log", "/log"):
             self._handle_log()
             return
@@ -1105,9 +1149,35 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         content_type = ct_map.get(ext, "application/octet-stream")
         with open(file_path, "rb") as f:
             data = f.read()
+
+        # Revalidate every time instead of letting the browser guess.
+        #
+        # Without validators a browser applies heuristic caching and can serve a
+        # stale app.js long after the file changed, with no way to notice — which
+        # is exactly what happened while developing this: an edit appeared to do
+        # nothing because the old script was still in the cache. `no-cache` means
+        # "check with me first", not "do not store", so unchanged files still cost
+        # only a 304.
+        digest = hashlib.sha1(data).hexdigest()
+        etag = '"%s"' % digest
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
+
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "no-cache")
+        try:
+            self.send_header("Last-Modified",
+                             email.utils.formatdate(os.path.getmtime(file_path),
+                                                    usegmt=True))
+        except OSError:
+            pass
         self._set_cors()
         self.end_headers()
         self.wfile.write(data)
@@ -1770,6 +1840,69 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             "truncated": truncated,
             "text": "\n".join(lines),
         })
+
+    def _handle_structure(self, path):
+        """GET /api/structure[/{name}] — the best finished structure so far.
+
+        Without a name this reports which checkpoint is current, so the viewer can
+        follow a run: a prediction leaves progressively better PDBs in the output
+        directory, and showing them turns the empty 3D panel into the one thing
+        that actually communicates progress.
+
+        With a name it serves that file's bytes. The name is checked against the
+        known stage list rather than joined onto a path: this endpoint reads from
+        disk, and a caller-supplied path would make it a file-read primitive for
+        anything on the machine.
+        """
+        name = ""
+        if path.startswith("/api/structure/"):
+            # The caller percent-escapes the name; stage paths can contain a
+            # directory separator, and the allowlist below is what actually
+            # constrains the request.
+            name = unquote(path[len("/api/structure/"):]).strip()
+        out_dir = os.path.join(ROOT, "output_web")
+
+        if not name:
+            stage = _viewer_stage(out_dir)
+            if not stage:
+                self._send_json({"available": False,
+                                 "reason": "no finished structure yet"})
+                return
+            self._send_json({"available": True, "level": stage["level"],
+                             "name": stage["name"], "desc": stage["desc"],
+                             "atoms": stage["atoms"], "bytes": stage["bytes"],
+                             "mtime": stage["mtime"],
+                             "digest": stage.get("digest", "")})
+            return
+
+        allowed = {s[1] for s in _viewer_module().VIEWER_STAGES}
+        if name not in allowed:
+            self._send_json({"error": "unknown structure: %r" % name,
+                             "allowed": sorted(allowed)}, 404)
+            return
+        # The name came from the URL, so confirm it still resolves inside the
+        # output directory before opening it.
+        target = _viewer_module()._abs(out_dir, name)
+        out_real = os.path.realpath(out_dir)
+        if not os.path.realpath(target).startswith(out_real + os.sep):
+            self._send_json({"error": "path escapes the output directory"}, 400)
+            return
+        if not os.path.isfile(target):
+            self._send_json({"error": "not written yet", "name": name}, 404)
+            return
+        try:
+            with open(target, "rb") as f:
+                data = f.read()
+        except OSError as exc:
+            self._send_json({"error": "could not read: %s" % exc}, 500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "chemical/x-pdb")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self._set_cors()
+        self.end_headers()
+        self.wfile.write(data)
 
     def _handle_upload(self):
         body = self._read_body()

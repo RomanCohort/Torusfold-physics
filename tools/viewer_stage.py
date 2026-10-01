@@ -1,0 +1,170 @@
+"""Track the best finished structure the pipeline has written so far.
+
+A run leaves a chain of progressively better PDBs in the output directory, so the
+3D view can show real progress instead of staying empty until the end. Something
+has to decide which of them is both (a) the furthest along and (b) actually
+complete, and that is this.
+
+"(b) complete" is not a formality: `_write_coords_pdb` opens the file and writes
+records into it, so a reader can arrive mid-write and see a truncated structure.
+A file is only offered once its final record is on disk.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import threading
+import time
+from typing import Dict, List, Optional, Tuple
+
+# Candidates in order of improvement, earliest first. Each entry is
+# (level label, path relative to the output directory, what it is). The label is
+# what the viewer shows, so it names the stage rather than the file.
+#
+# Paths are relative because not every structure lands at the top level: Level 1
+# writes into vfold3d/ and Level 2 works inside cg2aa/.
+#
+# This list is what the pipeline actually WRITES, which is fewer stages than it
+# computes. Levels 3 and 4 keep their coordinates in memory as arrays and leave no
+# file behind, so on a long run the newest displayable structure can be hours old.
+# That is a property of the pipeline, not of this list, and inventing a file to
+# fill the gap would be showing something that does not exist.
+VIEWER_STAGES: List[Tuple[str, str, str]] = [
+    ("1", "vfold3d/assembled.pdb", "segmented prediction, assembled"),
+    ("1.5", "level1_5_relaxed.pdb", "coarse-grained, globally relaxed"),
+    ("2", "_final_cg_for_aa.pdb", "folding round complete"),
+    ("2.5", "final_allatom.pdb", "CG to all-atom placement"),
+    ("2.6", "final_allatom_refined.pdb", "PyRosetta refined"),
+    ("5", "level5_cg.pdb", "Amber refinement input"),
+    ("5", "level5_amber.pdb", "Amber14-OL3 refined"),
+    ("5.5", "level5_ppr.pdb", "base-pair repair applied"),
+    ("5.5", "isrnaclong_final.pdb", "final structure"),
+]
+
+_PDB_COMPLETE_MARKERS = ("END", "ENDMDL")
+_state_lock = threading.Lock()
+_state: Dict[str, object] = {"signature": None, "result": None, "at": 0.0}
+
+
+def _abs(output_dir: str, rel: str) -> str:
+    """Join a registry path onto the output directory.
+
+    Registry paths are written with forward slashes so they read the same on every
+    platform; split and re-join rather than relying on both separators being
+    accepted.
+    """
+    return os.path.join(output_dir, *rel.split("/"))
+
+
+def _is_complete(path: str) -> bool:
+    """Has this PDB finished being written?
+
+    Read the tail rather than the whole file: these reach tens of megabytes and
+    this is called on every status poll.
+    """
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return False
+    if size < 64:
+        return False
+    try:
+        with open(path, "rb") as f:
+            tail_len = min(512, size)
+            f.seek(size - tail_len)
+            tail = f.read(tail_len)
+    except OSError:
+        return False
+    text = tail.decode("ascii", "replace")
+    return any(m in text for m in _PDB_COMPLETE_MARKERS)
+
+
+def _atom_count(path: str) -> int:
+    """ATOM records in a file, or 0 if it cannot be read.
+
+    Only used to reject a file that parsed as complete but holds nothing, so the
+    cost is paid once per changed file rather than per poll.
+    """
+    n = 0
+    try:
+        with open(path, "r", errors="replace") as f:
+            for line in f:
+                if line.startswith("ATOM"):
+                    n += 1
+    except OSError:
+        return 0
+    return n
+
+
+def _digest(path: str) -> str:
+    """SHA-1 of a file, or '' if unreadable.
+
+    Stages hand the same coordinates forward: `_final_cg_for_aa.pdb` is written as
+    a byte-for-byte copy of what Level 1.5 left behind, so a run can report a new
+    stage whose geometry is identical to the last one. The digest lets the viewer
+    tell "a new structure arrived" from "the same structure was renamed", which
+    are very different things to be looking at.
+    """
+    h = hashlib.sha1()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return ""
+    return h.hexdigest()
+
+
+def newest_structure(output_dir: str, run_started_at: Optional[float] = None) -> Optional[Dict]:
+    """The furthest-along finished structure in `output_dir`, or None.
+
+    `run_started_at` guards against a stale file from a previous run being shown
+    as the current one: a file older than the run that is producing it cannot
+    belong to that run.
+    """
+    if not output_dir or not os.path.isdir(output_dir):
+        return None
+
+    # Cheap signature so the expensive checks only run when something changed.
+    # Keyed on the relative path, not the basename: two stages can share a
+    # filename in different subdirectories.
+    try:
+        entries = []
+        for _level, rel, _desc in VIEWER_STAGES:
+            p = _abs(output_dir, rel)
+            if os.path.isfile(p):
+                st = os.stat(p)
+                entries.append((rel, int(st.st_mtime), st.st_size))
+    except OSError:
+        return None
+    if not entries:
+        return None
+    signature = tuple(entries)
+
+    with _state_lock:
+        if _state.get("signature") == signature:
+            return _state.get("result")  # type: ignore[return-value]
+
+    best = None
+    for level, rel, desc in VIEWER_STAGES:
+        path = _abs(output_dir, rel)
+        if not os.path.isfile(path):
+            continue
+        if run_started_at and os.path.getmtime(path) < run_started_at - 5:
+            continue
+        if not _is_complete(path):
+            continue
+        atoms = _atom_count(path)
+        if atoms < 1:
+            continue
+        best = {"level": level, "name": rel, "desc": desc,
+                "path": path, "atoms": atoms, "bytes": os.path.getsize(path),
+                "mtime": os.path.getmtime(path)}
+
+    # Hashed once, for the winner only: only the returned structure is compared.
+    if best is not None:
+        best["digest"] = _digest(best["path"])
+
+    with _state_lock:
+        _state.update({"signature": signature, "result": best, "at": time.time()})
+    return best

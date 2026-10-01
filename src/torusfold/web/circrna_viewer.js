@@ -120,6 +120,30 @@
      * @param {string} pdb   PDB string
      * @param {object} fp    fingerprint JSON object
      */
+    /* Replace the displayed structure without touching the rest of the UI.
+     *
+     * `mount()` is the full path: it creates the plugin, hides the placeholder and
+     * schedules the scalar/stat cards. A run in progress produces a new checkpoint
+     * every few minutes, and calling mount() for each of them would re-render
+     * those cards repeatedly and reset the representation the user picked.
+     *
+     * Camera is left alone on purpose. Reframing on every checkpoint makes the
+     * structure appear to jump, and the whole point is that the same molecule is
+     * getting better — a steady camera is what shows that.
+     */
+    async updateStructure(pdb) {
+      if (!this.viewer) {
+        // Nothing to update yet; fall back to a full mount so the first
+        // checkpoint of a run still appears.
+        return this.mount(pdb, this.fp || {});
+      }
+      this.pdb = pdb;
+      await this.viewer.loadStructureFromData(pdb, 'pdb', { dataLabel: 'circRNA' });
+      const ph = document.getElementById('viewer-placeholder');
+      if (ph) ph.style.display = 'none';
+      return undefined;
+    }
+
     async mount(pdb, fp) {
       this.pdb = pdb;
       this.fp = fp;

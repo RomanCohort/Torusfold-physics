@@ -289,6 +289,15 @@ try{
         <small>Submit a sequence, or load a local PDB</small>
       </div>
 
+      <!-- Which checkpoint is on screen. A run leaves progressively better
+           structures in the output directory, so this names the stage rather
+           than the file. -->
+      <div id="viewer-stage" hidden>
+        <span class="vs-level" id="viewer-stage-level"></span>
+        <span class="vs-desc" id="viewer-stage-desc"></span>
+        <span class="vs-same" id="viewer-stage-same" hidden title="This stage received the coordinates from the previous one unchanged">geometry unchanged</span>
+      </div>
+
       <div id="repr-controls">
         <label class="chip-field">Representation
           <select id="repr-select">
@@ -575,7 +584,7 @@ The SSE stream carries live pipeline output once one is running.
 
 <!-- ═══════════════ SCRIPTS ═══════════════ -->
 <script src="/web/molstar.js"></script>
-<script src="/web/circrna_viewer.js?v=20260822"></script>
+<script src="/web/circrna_viewer.js"></script>
 <script src="/web/modules/charts.js"></script>
 <script src="/web/modules/console.js"></script>
 <script src="/web/modules/panels.js"></script>
@@ -583,6 +592,6 @@ The SSE stream carries live pipeline output once one is running.
 <script src="/web/modules/feedback.js"></script>
 <script src="/web/modules/minigame.js"></script>
 <script src="/web/modules/setup.js"></script>
-<script src="/web/app.js?v=20260822"></script>
+<script src="/web/app.js"></script>
 </body>
 </html>

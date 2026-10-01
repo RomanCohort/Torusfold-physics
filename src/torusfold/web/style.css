@@ -609,6 +609,31 @@ input[type="range"]::-moz-range-thumb{
 #viewer-placeholder span{font-size:var(--t-md);color:var(--ink-2)}
 #viewer-placeholder small{font-size:var(--t-xs);color:var(--ink-3);letter-spacing:.02em}
 
+/* Which checkpoint is on screen. Sits opposite the placeholder's top-left
+   nothing, so it does not compete with the title plate in the static viewer. */
+#viewer-stage{
+  position:absolute;top:var(--sp-3);right:var(--sp-3);z-index:6;
+  display:flex;align-items:baseline;gap:8px;
+  padding:6px 10px;background:color-mix(in srgb,var(--chassis) 92%,transparent);
+  border:1px solid var(--hair-2);border-radius:5px;backdrop-filter:blur(8px);
+  pointer-events:none;max-width:60%;
+}
+.vs-level{
+  font-family:var(--font-mono);font-size:var(--t-xs);color:var(--accent);
+  letter-spacing:.02em;flex-shrink:0;
+}
+.vs-desc{
+  font-size:var(--t-xs);color:var(--ink-3);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+/* The stage advanced but handed the previous coordinates forward, so nothing on
+   screen moved. Without this the viewer looks stuck. */
+.vs-same{
+  font-family:var(--font-mono);font-size:var(--t-xs);flex-shrink:0;
+  padding:1px 6px;border-radius:3px;letter-spacing:.02em;
+  color:var(--ink-3);background:var(--well);border:1px solid var(--hair-2);
+}
+
 #repr-controls{
   position:absolute;left:var(--sp-3);bottom:var(--sp-3);z-index:6;
   display:flex;align-items:center;gap:var(--sp-3);
