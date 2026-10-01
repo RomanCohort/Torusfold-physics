@@ -296,3 +296,38 @@ it produced, with the numbers that matter:
    byte layout -- each cost real time and each is now a paragraph instead of a rediscovery.
 
 
+## 2026-10-01 — The fitted field reaches the pipeline, and it runs on the GPU
+
+The tables the loop fitted were **never what the production pipeline sampled**: `torch_gpu_refine.py`
+called `cg_energy_forces(pos, pairs, pw)` with no potentials at all — the analytic field inside
+`torch_cgsim` — while everything Boltzmann-inverted lived in the calibration harness. The table
+potentials were moreover cpu-only by an explicit deferral in `cg_potentials.make_potential`:
+*"supporting cuda means moving the table tensors and the interpolation together, not just this call, so
+it is left until something needs it"*.
+
+**Now.** `TORUSFOLD_CG_TABLES=<file>` makes the pipeline's CG stage take the tabulated potentials
+(unset = the analytic field, unchanged), and the tables **follow the coordinates' device**:
+`force_reference.table_for` returns the installed record with only `U` moved, cached per device, and
+`use_table_file` clears the per-device copies when it installs a new one. The cpu numbers are
+**bit-identical**, pinned in `tests/test_table_potential_device.py` against goldens captured before
+the change.
+
+**Which table.** `results/production_tables.npz`, composed by `scripts/build_production_tables.py`
+from the campaign: **bb_bond and dihedral from the converged 9-round tables**, **angle from the
+pre-campaign refit** (every campaign update made it worse: implied sigma 0.3218 -> 0.1307 while the
+sampled sigma fell only 16 percent), and **stack not injected at all** (an exact function of the other
+two; `torch_cgsim`'s stack spring is zero for the same reason). The builder asserts the two sources
+share `lo`/`binw`, so the mix cannot silently combine different grids.
+
+**GPU verification, on this machine**, with the ROCm torch build (`2.12.0a0+rocm7.13.0a20260313`,
+AMD Radeon 8060S): `scripts/verify_cg_gpu.py` evaluates the tabulated field on one structure on cpu
+and on cuda — **E identical to the last bit, forces agreeing to 3.7e-16 relative**. The cpu build of
+torch (circrna3d env) has no CUDA and skips that half.
+
+**What this does not settle**: the shipped dihedral table is the campaign's, so it carries the
+edge-mass deficit (-0.18 at full pool) that the basis work showed is a Chebyshev problem rather than a
+rounds problem; the angle's table is the pre-campaign one, i.e. the best available and not a converged
+object. Both would be refit by the per-coordinate rules that work argues for.
+
+
+

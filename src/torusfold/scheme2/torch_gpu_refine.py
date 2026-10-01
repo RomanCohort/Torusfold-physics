@@ -66,6 +66,42 @@ def torch_gpu_refine(
         BOND_P_NEXT,
     )
     from .torch_cgsim import BatchedREMD2D, cg_energy_forces
+
+    # THE PRODUCTION TABLES, WHEN SOMETHING NAMES THEM. Unset (the default) keeps the analytic field
+    # this pipeline has always run. Set to a table file -- results/production_tables.npz is the one
+    # scripts/build_production_tables.py composes -- and the CG energy calls below take the fitted
+    # tabulated potentials instead, exactly as the calibration harness builds them
+    # (cg_potentials.build_potential_kwargs). The device is not special-cased anywhere: the tables
+    # follow the coordinates (force_reference.table_for), so a cuda run gets a cuda copy of U.
+    _cg_table_kw = {}
+    _cg_table_path = os.environ.get("TORUSFOLD_CG_TABLES", "").strip()
+    if _cg_table_path:
+        _scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))))), "scripts")
+        if _scripts not in sys.path:
+            sys.path.insert(0, _scripts)
+        import cg_potentials as _P  # noqa: E402
+        _pots, _cg_table_kw = _P.build_potential_kwargs(_cg_table_path)
+        print("  [torch_gpu_refine] CG tables from " + _cg_table_path + ": "
+              + ", ".join(str(c) for c, _, _ in _pots))
+
+    # THE PRODUCTION TABLES, WHEN SOMETHING NAMES THEM. Unset (the default) keeps the analytic field
+    # this pipeline has always run. Set to a table file -- results/production_tables.npz is the one
+    # scripts/build_production_tables.py composes -- and the CG energy calls below take the fitted
+    # tabulated potentials instead, exactly as the calibration harness builds them
+    # (cg_potentials.build_potential_kwargs). The device is not special-cased anywhere: the tables
+    # follow the coordinates (force_reference.table_for), so a cuda run gets a cuda copy of U.
+    _cg_table_kw = {}
+    _cg_table_path = os.environ.get("TORUSFOLD_CG_TABLES", "").strip()
+    if _cg_table_path:
+        _scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))))), "scripts")
+        if _scripts not in sys.path:
+            sys.path.insert(0, _scripts)
+        import cg_potentials as _P  # noqa: E402
+        _pots, _cg_table_kw = _P.build_potential_kwargs(_cg_table_path)
+        print("  [torch_gpu_refine] CG tables from " + _cg_table_path + ": "
+              + ", ".join(str(c) for c, _, _ in _pots))
     from .physical_relaxation import relax_structure
 
     t0 = time.time()
@@ -164,7 +200,7 @@ def torch_gpu_refine(
                 opt = torch.optim.Adam([pos_3bead], lr=1e-3)
                 for step in range(2000):
                     opt.zero_grad()
-                    e, f = cg_energy_forces(pos_3bead, pairs_t, pw)
+                    e, f = cg_energy_forces(pos_3bead, pairs_t, pw, **_cg_table_kw)
                     if not torch.isfinite(e).all():
                         raise RuntimeError(f"pre-fold stage {stage + 1} energy not finite")
                     # Take the gradient from the returned force, not from e.sum().backward().
@@ -193,7 +229,7 @@ def torch_gpu_refine(
 
             # extract P coordinates (take bead 0 of every 3)
             with torch.no_grad():
-                final_e_fold, _ = cg_energy_forces(pos_3bead, pairs_t, pw)
+                final_e_fold, _ = cg_energy_forces(pos_3bead, pairs_t, pw, **_cg_table_kw)
                 final_e_fold = final_e_fold.item()
             final_p_coords = pos_3bead[:, 0::3, :].squeeze(0).cpu().numpy() * 10.0  # nm->A
             if not np.isfinite(final_e_fold) or not np.all(np.isfinite(final_p_coords)):

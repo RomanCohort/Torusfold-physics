@@ -211,6 +211,46 @@ def describe(spec, coord=None):
     return repr(spec)
 
 
+def build_potential_kwargs(table_path, wall_k=2000.0, coords=("bb_bond", "angle", "dihedral")):
+    """(pots, pot_kw) for one CG energy call, built from table_path.
+
+    THE ONE PLACE THIS IS WRITTEN, so the calibration harness and the production pipeline cannot
+    disagree about which field they ran. scripts/ibi_loop.py carries the same three lines for
+    historical reasons (and is being edited elsewhere); consolidate when convenient.
+
+    bb_bond gets the WALL spec because its stored table is flat at both support edges: without the
+    wall there is no restoring force at all outside the fitted range (see force_reference.bond_table).
+    angle and dihedral take the bare table.
+    """
+    use_table_file(str(table_path))
+    pots = []
+    for coord in coords:
+        spec_text = "table_wall:%.6g" % wall_k if coord == "bb_bond" else "table"
+        spec = resolve_spec(spec_text, coord)
+        pots.append((coord, spec, make_potential(coord, spec)))
+    return pots, potential_kwargs(pots)
+
+
+def build_potential_kwargs(table_path, wall_k=2000.0, coords=("bb_bond", "angle", "dihedral")):
+    """(pots, pot_kw) for one CG energy call, built from table_path.
+
+    THE ONE PLACE THIS IS WRITTEN, so the calibration harness and the production pipeline cannot
+    disagree about which field they ran. scripts/ibi_loop.py carries the same three lines for
+    historical reasons (and is being edited elsewhere); consolidate when convenient.
+
+    bb_bond gets the WALL spec because its stored table is flat at both support edges: without the
+    wall there is no restoring force at all outside the fitted range (see force_reference.bond_table).
+    angle and dihedral take the bare table.
+    """
+    use_table_file(str(table_path))
+    pots = []
+    for coord in coords:
+        spec_text = "table_wall:%.6g" % wall_k if coord == "bb_bond" else "table"
+        spec = resolve_spec(spec_text, coord)
+        pots.append((coord, spec, make_potential(coord, spec)))
+    return pots, potential_kwargs(pots)
+
+
 def use_table_file(path, coord=None):
     """Point the table specs at a specific file instead of the shipped one.
 
