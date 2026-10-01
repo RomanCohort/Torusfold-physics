@@ -2256,6 +2256,45 @@ def _build_result_dict(result, details, pdb_text, sequence, ss, mfe, elapsed, pd
     }
 
 
+def _shape_anisotropy(eigenvalues):
+    """Anisotropy of the gyration tensor, from its eigenvalues.
+
+    The panel plots a "Shape Moment" and nothing in this repository ever supplied
+    one, so there is no existing definition to match. Rather than invent a formula
+    and label it with a name that implies a convention, this computes a quantity
+    with a stated meaning: the variance of the normalised eigenvalues, which is the
+    standard measure of how far a shape departs from spherical.
+
+        0    a sphere (all three eigenvalues equal)
+        1    a fully extended rod (one eigenvalue carries everything)
+
+    The previous attempt mapped 1 - 3*sum(p^2), which is the same idea written with
+    the wrong offset: it returns 0 for a sphere but goes negative for anything
+    elongated — it produced -0.56 for a 139 nt trace while claiming to be 0..1.
+    This form cannot leave the range.
+
+    Returns None when it cannot be computed, so the panel shows "--" rather than a
+    plausible-looking number.
+    """
+    try:
+        vals = sorted((abs(float(v)) for v in (eigenvalues or [])
+                       if v is not None), reverse=True)
+        if len(vals) != 3:
+            return None
+        total = sum(vals)
+        if total <= 0:
+            return None
+        p = [v / total for v in vals]
+        mean = sum(p) / 3.0
+        variance = sum((x - mean) ** 2 for x in p) / 3.0
+        # Variance of three non-negative values summing to 1: 0 for
+        # (1/3,1/3,1/3) and 2/9 for (1,0,0), which are its minimum and maximum.
+        # Dividing by 2/9 maps those onto 0 and 1 exactly.
+        return round(variance / (2.0 / 9.0), 4)
+    except (TypeError, ValueError):
+        return None
+
+
 _LIVE_METRICS = {"digest": None, "payload": None, "at": 0.0}
 
 
@@ -2303,11 +2342,18 @@ def _live_metrics(stage):
             import numpy as _np
             closure = float(_np.linalg.norm(coords[p_idx[0]] - coords[p_idx[-1]]))
 
-        # Pair satisfaction: the fraction of WC-complementary pairs that are
-        # actually close enough in space. The sequence comes from the residue
-        # names the parser already returns, in file order.
+        # Pair satisfaction, and everything derived from the same pass. All of it
+        # comes from the PDB alone, so all of it can be shown while a run is going
+        # rather than only at the end.
+        #
+        # The sequence comes from the residue names the parser already returns, in
+        # file order.
         pair_rate = None
         pair_breakdown = None
+        pairing_quality = None
+        pair_range = None
+        pair_dist = None
+        per_residue = None
         try:
             one = {"A": "A", "ADE": "A", "U": "U", "URA": "U",
                    "G": "G", "GUA": "G", "C": "C", "CYT": "C"}
@@ -2317,25 +2363,138 @@ def _live_metrics(stage):
                 if rid != last:
                     seq.append(one.get(rn, "N"))
                     last = rid
-            pairs = [(i, j) for i in range(len(seq)) for j in range(i + 4, len(seq))
-                     if {seq[i], seq[j]} in ({"A", "U"}, {"G", "C"})]
-            if pairs:
-                ps = pa.compute_pair_satisfaction(coords, parsed["residue_ids"],
-                                                  names, parsed["residue_names"])
-                # The function returns `satisfaction_rate`, not a key named after
-                # the panel's field. Reading the wrong name here yielded None while
-                # the metric itself was fine, which is the same class of mistake as
-                # the WC table above.
-                pair_rate = ps.get("satisfaction_rate")
-                pair_breakdown = {
-                    "total_pairs": ps.get("total_pairs"),
-                    "wc_eligible": ps.get("wc_eligible_count"),
-                    "satisfied": ps.get("satisfied_count"),
-                    "mean_pair_distance": ps.get("mean_pair_distance"),
-                }
+
+            ps = pa.compute_pair_satisfaction(coords, parsed["residue_ids"],
+                                              names, parsed["residue_names"])
+            # The function returns `satisfaction_rate`, not a key named after the
+            # panel's field. Reading the wrong name here yielded None while the
+            # metric itself was fine, which is the same class of mistake as the WC
+            # table above.
+            pair_rate = ps.get("satisfaction_rate")
+            pair_breakdown = {
+                "total_pairs": ps.get("total_pairs"),
+                "wc_eligible": ps.get("wc_eligible_count"),
+                "satisfied": ps.get("satisfied_count"),
+                "mean_pair_distance": ps.get("mean_pair_distance"),
+            }
+
+            # Pairing quality: WC against wobble, over the pairs that are actually
+            # close enough to be paired at all.
+            wc = ps.get("satisfied_count") or 0
+            eligible = ps.get("wc_eligible_count") or 0
+            wobble = 0
+            try:
+                n = len(seq)
+                idx = {}
+                for pos, rid in enumerate(dict.fromkeys(parsed["residue_ids"])):
+                    idx[rid] = pos
+                import numpy as _np2
+                p_atoms = [i for i, nm in enumerate(names) if nm == "P"]
+                # Loop variables are named ai/bj, not a/b: `a` holds the analyzer's
+                # result dict for the whole function, and rebinding it here made
+                # every use below it fail with "'int' object has no attribute 'get'".
+                for ai in range(len(p_atoms)):
+                    for bj in range(ai + 1, len(p_atoms)):
+                        ra, rb = parsed["residue_ids"][p_atoms[ai]], parsed["residue_ids"][p_atoms[bj]]
+                        ia, ib = idx.get(ra), idx.get(rb)
+                        if ia is None or ib is None or abs(ia - ib) < 4:
+                            continue
+                        if _np2.linalg.norm(coords[p_atoms[ai]] - coords[p_atoms[bj]]) > 12.0:
+                            continue
+                        pa_, pb_ = seq[ia], seq[ib]
+                        if (pa_, pb_) in (("G", "U"), ("U", "G")):
+                            wobble += 1
+            except Exception:
+                wobble = 0
+            pairing_quality = {
+                "wc_pairs": wc,
+                "wc_pct": round(100.0 * wc / eligible, 1) if eligible else 0.0,
+                "wobble_pairs": wobble,
+                "wobble_pct": round(100.0 * wobble / eligible, 1) if eligible else 0.0,
+                "total": eligible,
+            }
+
+            # Pair distance ranges, straight off the analyzer's own breakdown.
+            br = ps.get("by_range") or {}
+            total_pairs = sum((br.get(k) or {}).get("count", 0)
+                              for k in ("local", "medium", "long")) or 0
+            pair_range = {}
+            for key, label in (("local", "local_lt50"), ("medium", "medium_50_500"),
+                               ("long", "long_gt500")):
+                cnt = (br.get(key) or {}).get("count", 0)
+                pair_range[label] = cnt
+                pair_range[label.replace("local_lt50", "local_pct")
+                                    .replace("medium_50_500", "medium_pct")
+                                    .replace("long_gt500", "long_pct")] = (
+                    round(100.0 * cnt / total_pairs, 1) if total_pairs else 0.0)
+
+            # Distance distribution, for the stacked bar. Buckets are the ones the
+            # panel draws, and the thresholds are its own.
+            satisfied_lt = partial = unsatisfied = 0
+            p_atoms = [i for i, nm in enumerate(names) if nm == "P"]
+            import numpy as _np3
+            idx2 = {}
+            for pos, rid in enumerate(dict.fromkeys(parsed["residue_ids"])):
+                idx2[rid] = pos
+            for ai in range(len(p_atoms)):
+                for bj in range(ai + 1, len(p_atoms)):
+                    ra, rb = parsed["residue_ids"][p_atoms[ai]], parsed["residue_ids"][p_atoms[bj]]
+                    ia, ib = idx2.get(ra), idx2.get(rb)
+                    if ia is None or ib is None:
+                        continue
+                    if {seq[ia], seq[ib]} not in ({"A", "U"}, {"G", "C"}, {"G", "U"}):
+                        continue
+                    if abs(ia - ib) < 4:
+                        continue
+                    d = float(_np3.linalg.norm(coords[p_atoms[ai]] - coords[p_atoms[bj]]))
+                    if d < 15.0:
+                        satisfied_lt += 1
+                    elif d <= 30.0:
+                        partial += 1
+                    else:
+                        unsatisfied += 1
+            pair_dist = {
+                "satisfied_lt15A": {"count": satisfied_lt},
+                "partial_15_30A": {"count": partial},
+                "unsatisfied_gt30A": {"count": unsatisfied},
+            }
+
+            # Per-residue series for the strip charts. Real measurements, not
+            # placeholders: SASA and the B-factor column are both per-atom in the
+            # file, reduced here to one value per residue.
+            try:
+                per_atom_sasa = (a.get("sasa") or {}).get("per_atom_sasa") or []
+                bf = parsed.get("b_factors") or []
+                order = []
+                seen = set()
+                for rid in parsed["residue_ids"]:
+                    if rid not in seen:
+                        seen.add(rid)
+                        order.append(rid)
+                pos_of = {rid: i for i, rid in enumerate(order)}
+                sasa_by_res = [[] for _ in order]
+                b_by_res = [[] for _ in order]
+                for i, rid in enumerate(parsed["residue_ids"]):
+                    k = pos_of.get(rid)
+                    if k is None:
+                        continue
+                    if i < len(per_atom_sasa):
+                        sasa_by_res[k].append(float(per_atom_sasa[i]))
+                    if i < len(bf):
+                        b_by_res[k].append(float(bf[i]))
+                mean = lambda xs: (sum(xs) / len(xs)) if xs else 0.0
+                cols = {"sasa_per_residue": [round(mean(v), 3) for v in sasa_by_res],
+                        "bfactor_per_residue": [round(mean(v), 3) for v in b_by_res]}
+                per_residue = cols
+            except Exception:
+                per_residue = None
         except Exception:
             pair_rate = None
             pair_breakdown = None
+            pairing_quality = None
+            pair_range = None
+            pair_dist = None
+            per_residue = None
 
         payload = {
             "live": True,
@@ -2353,6 +2512,9 @@ def _live_metrics(stage):
                 "clash_score": (a.get("clash") or {}).get("clash_score"),
                 "pair_satisfaction_rate": pair_rate,
                 "pair_breakdown": pair_breakdown,
+                "pair_distance_distribution": pair_dist,
+                "contact_order_pct": None,
+                "contour_length_A": None,
                 "radius_of_gyration_A": a.get("rog"),
                 "asphericity": (a.get("shape") or {}).get("asphericity"),
                 "prolateness": (a.get("shape") or {}).get("prolateness"),
@@ -2365,11 +2527,22 @@ def _live_metrics(stage):
                 "prolateness": (a.get("shape") or {}).get("prolateness"),
                 "rog_A": a.get("rog"),
                 "eigenvalues": (a.get("shape") or {}).get("eigenvalues"),
+                # How far the shape departs from spherical, 0..1. Named
+                # shape_moment because that is the key the panel reads.
+                "shape_moment": _shape_anisotropy((a.get("shape") or {}).get("eigenvalues")),
             },
+            "pairing_quality": pairing_quality,
+            "pair_range": pair_range,
+            "per_residue": per_residue,
             "sequence": {"length": a.get("n_residues"), "n_atoms": a.get("n_atoms")},
         }
     except Exception as exc:                             # noqa: BLE001
-        payload = {"live": True, "error": str(exc)[:200]}
+        # Include the traceback: a bare message from this block cost a round trip
+        # to diagnose once already.
+        import traceback as _tb
+        payload = {"live": True,
+                   "error": "%s: %s" % (type(exc).__name__, exc),
+                   "trace": _tb.format_exc()[-900:]}
 
     with _log_lock:
         _LIVE_METRICS.update({"digest": digest, "payload": payload, "at": time.time()})

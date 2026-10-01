@@ -653,6 +653,25 @@
    * numbers as a finished structure's.
    */
   var liveMetricsDigest = null;
+  var lastMetrics = null;
+
+  /* Hand the viewer the per-residue series the server measured.
+
+     Separate from renderLiveMetrics because the two need different timing: the
+     panel renderers work on any payload, while the viewer's cards need an instance
+     that exists. On first load renderLiveMetrics runs before showStructure has
+     created it. */
+  function applyLiveFingerprint() {
+    var v = TF.Viewer && TF.Viewer.instance;
+    if (!v || typeof v.setFingerprint !== 'function') return;
+    if (!lastMetrics || !lastMetrics.per_residue) return;
+    try {
+      v.setFingerprint({ per_residue: lastMetrics.per_residue,
+                         scalar: lastMetrics.physical || {},
+                         signals: lastMetrics.structural_3d || {} });
+    } catch (e) { console.warn('per-residue cards:', e); }
+  }
+
   function renderLiveMetrics(metrics) {
     if (!metrics || !metrics.live) return;
     var src = metrics.source || {};
@@ -667,7 +686,20 @@
       try { TF.Panels.renderQualityMetrics(metrics); } catch (e) { console.warn('quality metrics:', e); }
       try { TF.Panels.renderPhysical(metrics); } catch (e) { console.warn('physical:', e); }
       try { TF.Panels.renderShape(metrics); } catch (e) { console.warn('shape:', e); }
+      try { TF.Panels.renderPairQuality(metrics); } catch (e) { console.warn('pair quality:', e); }
+      try { TF.Panels.renderPairDist(metrics); } catch (e) { console.warn('pair dist:', e); }
     }
+
+    /* The viewer draws the per-residue cards from its own fingerprint object, and
+       loading a checkpoint passes none — so "Structure statistics" said "No
+       per-residue data" while the server was publishing a series per residue.
+
+       Stored rather than applied here: on first load this runs before the viewer
+       exists, because showStructure creates it asynchronously. Applying it at this
+       point silently did nothing and the cards stayed empty. It is applied again
+       from showStructure once the viewer is up. */
+    lastMetrics = metrics;
+    applyLiveFingerprint();
 
     var note = $('live-metrics-source');
     if (note) {
@@ -730,6 +762,11 @@
         // result and must not be re-rendered on every checkpoint, and the camera
         // must not move — the point is that this is the same molecule improving.
         return viewer.updateStructure(pdb);
+      })
+      .then(function () {
+        // The instance exists only now, so this is the first point at which the
+        // per-residue cards can be filled from what the server measured.
+        applyLiveFingerprint();
       })
       .catch(function (e) {
         if (window.console) console.warn('checkpoint load failed:', e.message);

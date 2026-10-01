@@ -539,6 +539,19 @@
       }).join('');
     }
 
+    /* Replace the fingerprint the readout cards are built from, and redraw them.
+
+       Needed because a checkpoint load carries no fingerprint: the result payload
+       only exists when a run finishes, so on a live or delivered structure the
+       "Structure statistics" card had nothing and said "No per-residue data" while
+       per-residue measurements were available. */
+    setFingerprint(fp) {
+      this.fp = Object.assign({}, this.fp || {}, fp || {});
+      this._renderStatsCards();
+      this._renderScalarCards();
+      return this;
+    }
+
     // 3Dmol sizes its canvas from the container, so a panel resize needs a nudge.
     resize() {
       if (this.viewer && this.viewer.resize) {
