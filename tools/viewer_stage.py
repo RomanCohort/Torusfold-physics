@@ -145,8 +145,21 @@ def newest_structure(output_dir: str, run_started_at: Optional[float] = None) ->
         if _state.get("signature") == signature:
             return _state.get("result")  # type: ignore[return-value]
 
-    best = None
-    for level, rel, desc in VIEWER_STAGES:
+    # Newest first, not furthest-along first.
+    #
+    # The registry is ordered by pipeline depth, so the loop below used to keep
+    # overwriting its choice with each later stage still present on disk. That is
+    # the wrong question while a run is in progress: the stages are not written in
+    # one burst, and between two of them nothing is written for a long time (Level
+    # 3 and 4 keep their coordinates in memory). Showing the deepest file that
+    # exists means the view sits still for that whole stretch, which is what makes
+    # it look lagging.
+    #
+    # The file written most recently is the one that reflects what the run just
+    # did, so that is what gets shown. Depth is only a tie-break, for the case of
+    # several stages written in the same second.
+    candidates = []
+    for order, (level, rel, desc) in enumerate(VIEWER_STAGES):
         path = _abs(output_dir, rel)
         if not os.path.isfile(path):
             continue
@@ -157,9 +170,17 @@ def newest_structure(output_dir: str, run_started_at: Optional[float] = None) ->
         atoms = _atom_count(path)
         if atoms < 1:
             continue
-        best = {"level": level, "name": rel, "desc": desc,
-                "path": path, "atoms": atoms, "bytes": os.path.getsize(path),
-                "mtime": os.path.getmtime(path)}
+        candidates.append({
+            "level": level, "name": rel, "desc": desc, "path": path,
+            "atoms": atoms, "bytes": os.path.getsize(path),
+            "mtime": os.path.getmtime(path), "_order": order,
+        })
+
+    best = None
+    if candidates:
+        candidates.sort(key=lambda c: (c["mtime"], c["_order"]), reverse=True)
+        best = candidates[0]
+        best.pop("_order", None)
 
     # Hashed once, for the winner only: only the returned structure is compared.
     if best is not None:
@@ -168,3 +189,42 @@ def newest_structure(output_dir: str, run_started_at: Optional[float] = None) ->
     with _state_lock:
         _state.update({"signature": signature, "result": best, "at": time.time()})
     return best
+
+
+# The delivered model, shown when no run has produced anything yet.
+#
+# This is not a pipeline stage: it is the committed 2,013 nt result
+# (artifacts/2013nt/isrnaclong_final.pdb, 42,831 atoms), decoded from the shipped
+# viewer rather than re-run. It is offered so the panel has something real in it
+# on first load instead of an empty box, and it is labelled as delivered so it is
+# never mistaken for the output of the run on screen.
+DELIVERED_STRUCTURES = [
+    {
+        "level": "delivered",
+        "name": "artifacts/2013nt/isrnaclong_final.pdb",
+        "desc": "delivered model, 2013 nt (not from this run)",
+    },
+]
+
+
+def delivered_structure(repo_root: str) -> Optional[Dict]:
+    """The committed model for the empty-state view, or None if absent.
+
+    Level "delivered" rather than a number on purpose: it did not come from a
+    level of the current run, and giving it a number would put it on the progress
+    ladder where it does not belong.
+    """
+    for entry in DELIVERED_STRUCTURES:
+        path = os.path.join(repo_root, *entry["name"].split("/"))
+        if not os.path.isfile(path):
+            continue
+        atoms = _atom_count(path)
+        if atoms < 1 or not _is_complete(path):
+            continue
+        return {
+            "level": entry["level"], "name": entry["name"], "desc": entry["desc"],
+            "path": path, "atoms": atoms, "bytes": os.path.getsize(path),
+            "mtime": os.path.getmtime(path), "digest": _digest(path),
+            "delivered": True,
+        }
+    return None

@@ -340,17 +340,15 @@ try{
       <div id="repr-controls">
         <label class="chip-field">Representation
           <select id="repr-select">
-            <!-- Cartoon first because it is the default the viewer starts in: a
-                 53-atom coarse-grained checkpoint under a VDW surface is an
-                 opaque blob, while the backbone trace shows the fold. Keep the
-                 first option in step with _currentRepr in the viewer.
-                 Labelled "Trace" rather than "Cartoon" because 3Dmol's cartoon
-                 is protein secondary structure; for an RNA chain the viewer draws
-                 a backbone trace. -->
-            <option value="cartoon">Trace</option>
+            <!-- Ribbon first because it is the default the viewer starts in, and
+                 because it is the only one that reads as a fold: on the delivered
+                 2,013 nt model (42,831 atoms) the atom-level styles are a solid
+                 mass. "Atoms" is kept for inspecting what was actually built. -->
+            <option value="cartoon">Ribbon</option>
             <option value="ball-stick">Ball &amp; stick</option>
+            <option value="atoms">All atoms</option>
             <option value="spacefill">Spacefill</option>
-            <option value="surface">Surface</option>
+            <option value="surface">Ribbon + surface</option>
           </select>
         </label>
         <span class="chip-sep" aria-hidden="true"></span>

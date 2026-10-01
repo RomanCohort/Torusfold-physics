@@ -550,6 +550,32 @@ def _viewer_stage(output_dir):
         return None
 
 
+# Below this, a "structure" is not a fold: a handful of atoms is a run that was
+# interrupted early, or a stub. Showing the delivered 2,013 nt model is more use
+# than showing ten phosphate atoms, so this decides when that happens.
+_MIN_MEANINGFUL_ATOMS = 40
+
+
+def _display_structure(output_dir):
+    """What the 3D panel should be showing.
+
+    A checkpoint from the current run wins, and so does a substantial result left
+    by a previous one — that is what someone reopening the page wants to see. The
+    committed 2,013 nt model is the fallback for the empty state: no run in
+    progress and nothing substantive on disk. It carries level "delivered" rather
+    than a pipeline level, so it is never read as a stage of the run being watched.
+    """
+    stage = _viewer_stage(output_dir)
+    running = _predict_state.get("status") == "running"
+    if stage and (running or stage.get("atoms", 0) >= _MIN_MEANINGFUL_ATOMS):
+        return stage
+    try:
+        delivered = _viewer_module().delivered_structure(ROOT)
+    except Exception:                                    # noqa: BLE001
+        delivered = None
+    return delivered or stage
+
+
 def _deps_payload():
     """GET /api/deps — what the setup button should offer, and its state.
 
@@ -620,7 +646,7 @@ def _public_state():
     # Which checkpoint the 3D view should be showing. Published with the run state
     # so the viewer advances on the heartbeat it already receives, rather than
     # polling a second endpoint for it.
-    stage = _viewer_stage(os.path.join(ROOT, "output_web"))
+    stage = _display_structure(os.path.join(ROOT, "output_web"))
     if stage:
         out["structure"] = {"level": stage["level"], "name": stage["name"],
                             "desc": stage["desc"], "atoms": stage["atoms"],
@@ -1888,7 +1914,7 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         out_dir = os.path.join(ROOT, "output_web")
 
         if not name:
-            stage = _viewer_stage(out_dir)
+            stage = _display_structure(out_dir)
             if not stage:
                 self._send_json({"available": False,
                                  "reason": "no finished structure yet"})
@@ -1900,17 +1926,25 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
                              "digest": stage.get("digest", "")})
             return
 
-        allowed = {s[1] for s in _viewer_module().VIEWER_STAGES}
-        if name not in allowed:
+        mod = _viewer_module()
+        allowed = {s[1] for s in mod.VIEWER_STAGES}
+        delivered = {d["name"] for d in mod.DELIVERED_STRUCTURES}
+        if name not in allowed and name not in delivered:
             self._send_json({"error": "unknown structure: %r" % name,
-                             "allowed": sorted(allowed)}, 404)
+                             "allowed": sorted(allowed | delivered)}, 404)
             return
         # The name came from the URL, so confirm it still resolves inside the
-        # output directory before opening it.
-        target = _viewer_module()._abs(out_dir, name)
-        out_real = os.path.realpath(out_dir)
-        if not os.path.realpath(target).startswith(out_real + os.sep):
-            self._send_json({"error": "path escapes the output directory"}, 400)
+        # directory it is allowed to come from before opening it. A delivered model
+        # lives under the repository, the stages live under the output directory;
+        # neither may reach outside its own root.
+        if name in delivered:
+            target = mod._abs(ROOT, name)
+            root_real = os.path.realpath(ROOT)
+        else:
+            target = mod._abs(out_dir, name)
+            root_real = os.path.realpath(out_dir)
+        if not os.path.realpath(target).startswith(root_real + os.sep):
+            self._send_json({"error": "path escapes its directory"}, 400)
             return
         if not os.path.isfile(target):
             self._send_json({"error": "not written yet", "name": name}, 404)
