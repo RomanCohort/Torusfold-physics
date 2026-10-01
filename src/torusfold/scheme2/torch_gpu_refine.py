@@ -16,6 +16,41 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 
+_CG_TABLE_KW = None
+
+
+def _cg_potential_kwargs():
+    """The tabulated CG potentials named by TORUSFOLD_CG_TABLES, or {} for the analytic field.
+
+    Unset (the default) keeps the analytic field this pipeline has always run. Set to a table file --
+    results/production_tables.npz is the one scripts/build_production_tables.py composes -- and the CG
+    energy calls in this module take the fitted tabulated potentials instead, exactly as the
+    calibration harness builds them (cg_potentials.build_potential_kwargs). The device is not
+    special-cased anywhere: the tables follow the coordinates (force_reference.table_for), so a cuda
+    run gets a cuda copy of U.
+
+    Built ONCE per process and cached: the potentials close over the installed table, so rebuilding
+    them per call would cost time and invite a mid-run table swap nobody asked for. Set the
+    environment variable before the first refinement call.
+    """
+    global _CG_TABLE_KW
+    if _CG_TABLE_KW is None:
+        path = os.environ.get("TORUSFOLD_CG_TABLES", "").strip()
+        kw = {}
+        if path:
+            import sys                      # this module does not import sys otherwise
+            scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+                os.path.dirname(os.path.abspath(__file__))))), "scripts")
+            if scripts not in sys.path:
+                sys.path.insert(0, scripts)
+            import cg_potentials as _P
+            pots, kw = _P.build_potential_kwargs(path)
+            print("  [torch_gpu_refine] CG tables from " + path + ": "
+                  + ", ".join(str(c) for c, _, _ in pots))
+        _CG_TABLE_KW = kw
+    return _CG_TABLE_KW
+
+
 def torch_gpu_refine(
     input_pdb: str,
     output_dir: str,
@@ -67,41 +102,7 @@ def torch_gpu_refine(
     )
     from .torch_cgsim import BatchedREMD2D, cg_energy_forces
 
-    # THE PRODUCTION TABLES, WHEN SOMETHING NAMES THEM. Unset (the default) keeps the analytic field
-    # this pipeline has always run. Set to a table file -- results/production_tables.npz is the one
-    # scripts/build_production_tables.py composes -- and the CG energy calls below take the fitted
-    # tabulated potentials instead, exactly as the calibration harness builds them
-    # (cg_potentials.build_potential_kwargs). The device is not special-cased anywhere: the tables
-    # follow the coordinates (force_reference.table_for), so a cuda run gets a cuda copy of U.
-    _cg_table_kw = {}
-    _cg_table_path = os.environ.get("TORUSFOLD_CG_TABLES", "").strip()
-    if _cg_table_path:
-        _scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__))))), "scripts")
-        if _scripts not in sys.path:
-            sys.path.insert(0, _scripts)
-        import cg_potentials as _P  # noqa: E402
-        _pots, _cg_table_kw = _P.build_potential_kwargs(_cg_table_path)
-        print("  [torch_gpu_refine] CG tables from " + _cg_table_path + ": "
-              + ", ".join(str(c) for c, _, _ in _pots))
-
-    # THE PRODUCTION TABLES, WHEN SOMETHING NAMES THEM. Unset (the default) keeps the analytic field
-    # this pipeline has always run. Set to a table file -- results/production_tables.npz is the one
-    # scripts/build_production_tables.py composes -- and the CG energy calls below take the fitted
-    # tabulated potentials instead, exactly as the calibration harness builds them
-    # (cg_potentials.build_potential_kwargs). The device is not special-cased anywhere: the tables
-    # follow the coordinates (force_reference.table_for), so a cuda run gets a cuda copy of U.
-    _cg_table_kw = {}
-    _cg_table_path = os.environ.get("TORUSFOLD_CG_TABLES", "").strip()
-    if _cg_table_path:
-        _scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.dirname(os.path.abspath(__file__))))), "scripts")
-        if _scripts not in sys.path:
-            sys.path.insert(0, _scripts)
-        import cg_potentials as _P  # noqa: E402
-        _pots, _cg_table_kw = _P.build_potential_kwargs(_cg_table_path)
-        print("  [torch_gpu_refine] CG tables from " + _cg_table_path + ": "
-              + ", ".join(str(c) for c, _, _ in _pots))
+    _cg_table_kw = _cg_potential_kwargs()
     from .physical_relaxation import relax_structure
 
     t0 = time.time()

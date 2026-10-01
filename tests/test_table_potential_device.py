@@ -94,3 +94,26 @@ def test_installing_a_table_invalidates_the_device_copies():
     z = np.load(refit)
     assert FR.angle_table()["lo"] == float(z["angle__lo"])
     assert FR._DEVICE_TABLES == {}, "a new install must clear the per-device copies"
+
+def test_the_pipeline_switch_builds_the_tables_and_defaults_to_none(monkeypatch):
+    """The switch that makes the pipeline's CG stage take the fitted field, and its default.
+
+    Written after a bug that only appeared when the refiner was CALLED with the switch on -- the
+    module used sys.path without importing sys -- which an import-only check had missed. Calling the
+    helper is what a test has to do.
+    """
+    import torusfold.scheme2.torch_gpu_refine as G
+
+    monkeypatch.delenv("TORUSFOLD_CG_TABLES", raising=False)
+    G._CG_TABLE_KW = None
+    assert G._cg_potential_kwargs() == {}, "unset must mean the analytic field"
+
+    table = REPO / "results" / "production_tables.npz"
+    if not table.exists():
+        pytest.skip("results/production_tables.npz not present")
+    monkeypatch.setenv("TORUSFOLD_CG_TABLES", str(table))
+    G._CG_TABLE_KW = None
+    kw = G._cg_potential_kwargs()
+    assert sorted(kw.keys()) == ["angle_potential", "bond_potential", "dihedral_potential"]
+    G._CG_TABLE_KW = None
+
