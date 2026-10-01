@@ -249,9 +249,11 @@ try{
     <div class="card" id="progress-card" style="display:none">
       <h2 class="card-title">Pipeline progress</h2>
 
-      <!-- Headline: where the run is, how long it has taken, how long is left.
-           The ETA is extrapolated from measured stage boundaries, so it starts
-           as a range and narrows; it never pretends to a precision it lacks. -->
+      <!-- Headline: which stage of how many, what it is doing, how long so far and
+           how long is left. There is deliberately no whole-run percentage: that
+           figure was a modelled estimate, and next to the step counts the pipeline
+           prints it read as a contradiction rather than as a different quantity.
+           A stage count is a fact, so that is what is shown. -->
       <div class="run-head">
         <div class="run-stage">
           <span class="run-level" id="run-level">—</span>
@@ -263,22 +265,20 @@ try{
         </div>
       </div>
 
+      <!-- This stage's own progress only. Filled from the step counts the stage
+           reports, and left empty for the stages that report none — an empty bar
+           is honest, a modelled one is not. -->
       <div class="progress-bar-wrap">
         <div class="progress-bar-fill" id="progress-bar-fill" style="width:0%"></div>
       </div>
       <div class="progress-meta">
         <span id="run-confidence">estimating from 0 stage boundaries</span>
-        <span id="run-pct">0%</span>
+        <span id="run-stage-progress">this stage —</span>
       </div>
 
-      <!-- What the running stage reports about itself, which is a different
-           quantity from the percentage above: that one is modelled across the
-           whole run from a weight table, this one is the stage's own step count.
-           Shown side by side so they cannot be mistaken for each other. -->
-      <div class="run-stage-progress" id="run-stage-progress" hidden></div>
-
-      <!-- The full stage ladder: 12 boundaries for the 6 numbered pipeline
-           levels. Costs are server-side, so the bar and this list agree. -->
+      <!-- The full stage ladder: 12 boundaries, so the count in the header has a
+           visible referent. Its widths are the modelled costs; it is a map of the
+           pipeline, not a progress reading. -->
       <div class="run-ladder" id="run-ladder"></div>
 
       <div class="run-actions">

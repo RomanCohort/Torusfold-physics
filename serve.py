@@ -395,6 +395,12 @@ def _note_stage(level_name, label):
     _predict_state.update({
         "current_level": idx,
         "level_name": level_name,
+        # "Stage k of n", which is what the interface shows instead of a global
+        # percentage. A stage count is a fact; the percentage was a modelled
+        # estimate that could not be reconciled with the step counts the pipeline
+        # prints, and showing both invited exactly that comparison.
+        "stage_index": idx + 1,
+        "stage_total": len(ordered),
         "stage_label": label,
         "message": label,
         "progress": round(fraction * 100, 1),
@@ -591,6 +597,7 @@ _PUBLIC_KEYS = (
     "message", "error", "elapsed", "eta", "stages", "levels", "started_at",
     "finished_at", "sequence_length", "result_ready", "server_generation",
     "fraction", "weights", "plan", "log_path", "stage_progress",
+    "stage_index", "stage_total",
 )
 
 def _model_source_ids():

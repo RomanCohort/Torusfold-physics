@@ -457,7 +457,6 @@
   var runElapsed = $('run-elapsed');
   var runRemaining = $('run-remaining');
   var runConfidence = $('run-confidence');
-  var runPct = $('run-pct');
   // The running stage's own step count, distinct from the modelled percentage.
   var runStageProgress = $('run-stage-progress');
   var runLadder = $('run-ladder');
@@ -577,12 +576,16 @@
      produce an identical view from the same payload. */
   function applyRunState(state) {
     if (!state) {
-      if (runLevel) runLevel.textContent = '—';
+      if (runLevel) { runLevel.textContent = '—'; runLevel.title = ''; }
       if (runLabel) runLabel.textContent = 'Waiting for the first stage…';
       if (runElapsed) runElapsed.textContent = '0:00';
       if (runRemaining) runRemaining.textContent = 'measuring…';
       if (runConfidence) runConfidence.textContent = 'estimating from 0 stage boundaries';
-      if (runPct) runPct.textContent = '0%';
+      if (runStageProgress) { runStageProgress.textContent = 'this stage —'; runStageProgress.title = ''; }
+      if (progressBarFill) {
+        progressBarFill.style.width = '0%';
+        progressBarFill.classList.remove('indeterminate');
+      }
       if (runJob) runJob.textContent = '';
       if (runLadder) buildLadder(null, -1);
       renderPlan(null);
@@ -602,7 +605,13 @@
     renderPlan(state.plan);
 
     if (runLevel) {
-      runLevel.textContent = state.level_name != null ? 'Level ' + state.level_name : '—';
+      // "Stage 5 of 12" rather than "Level 3.5". The count is a fact and it is what
+      // the ladder below draws; the level name is kept in the tooltip for anyone
+      // cross-referencing the pipeline documentation.
+      var k = state.stage_index, n = state.stage_total;
+      runLevel.textContent = (k && n) ? ('Stage ' + k + ' / ' + n)
+                                      : (state.level_name != null ? 'Level ' + state.level_name : '—');
+      runLevel.title = state.level_name != null ? ('pipeline level ' + state.level_name) : '';
     }
     if (runLabel) {
       runLabel.textContent = state.stage_label || state.message || '—';
@@ -610,34 +619,44 @@
       runLabel.classList.toggle('is-done', state.status === 'done');
     }
     if (runElapsed) runElapsed.textContent = fmtClock(state.elapsed);
-    if (runPct) runPct.textContent = (state.progress == null ? 0 : state.progress) + '%';
-    if (progressBarFill && state.progress != null) {
-      progressBarFill.style.width = Math.max(state.progress, state.status === 'running' ? 1 : 0) + '%';
-    }
 
-    /* The stage's own progress, next to the modelled percentage.
+    /* The bar shows THIS STAGE, nothing else.
      *
-     * These are two different quantities and the panel used to show only the
-     * second. `state.stage_progress` is what the running stage reports about
-     * itself — "5000 / 200000 steps" — while `state.progress` is that ratio
-     * multiplied by this stage's estimated share of the whole run, from a
-     * hand-written weight table. So the bar can read 40% while the stage is 2.5%
-     * through its own steps, and both numbers are "right": one counts modelled
-     * work across the run, the other counts this stage's steps. Showing only the
-     * first made it look like the pipeline and the display disagreed.
+     * It used to show a whole-run percentage: the stage's own ratio multiplied by
+     * its estimated share of the run, from a hand-written weight table. That made
+     * the bar and the step counts the pipeline prints look like they contradicted
+     * each other — the stage could be 99% through its steps while the bar read 49%,
+     * because the bar had the later stages still ahead of it. Both numbers were
+     * correct and neither could be made to match.
+     *
+     * So the bar now measures the only thing that is actually measurable while a
+     * stage runs: how far through that stage we are. Stages that report no progress
+     * of their own leave it empty, which is honest — a modelled bar would be a
+     * guess wearing the costume of a measurement.
      */
+    var sp = state.stage_progress;
+    var stageRatio = (sp && sp.total) ? sp.ratio : null;
+    if (progressBarFill) {
+      if (stageRatio == null) {
+        progressBarFill.style.width = (state.status === 'running' ? 1 : 0) + '%';
+        progressBarFill.classList.add('indeterminate');
+      } else {
+        progressBarFill.classList.remove('indeterminate');
+        progressBarFill.style.width = Math.max(1, stageRatio * 100) + '%';
+      }
+    }
     if (runStageProgress) {
-      var sp = state.stage_progress;
-      if (sp && sp.total) {
-        runStageProgress.hidden = false;
+      if (stageRatio == null) {
+        runStageProgress.textContent = state.status === 'running'
+          ? 'this stage — no step count reported'
+          : 'this stage —';
+        runStageProgress.title = 'This stage does not report progress of its own, ' +
+          'so the bar stays empty rather than showing an estimate.';
+      } else {
         runStageProgress.textContent = 'this stage: ' + fmtCount(sp.step) + ' / ' +
           fmtCount(sp.total) + '  (' + (sp.ratio * 100).toFixed(1) + '%)';
-        runStageProgress.title = 'Steps the stage has reported. The percentage ' +
-          'above is modelled across the whole run, weighted where each stage ' +
-          'roughly sits in a ~7 h reference run — it is an estimate, not a count. ' +
-          'This stage was modelled at ' + sp.modelled_pct + '% of the run.';
-      } else {
-        runStageProgress.hidden = true;
+        runStageProgress.title = 'Steps this stage has reported. The bar shows the ' +
+          'same number, relative to this stage only — not to the whole run.';
       }
     }
 

@@ -517,16 +517,17 @@ input[type="range"]::-moz-range-thumb{
   display:flex;justify-content:space-between;gap:10px;margin-top:6px;
   font-family:var(--font-mono);font-size:var(--t-xs);color:var(--ink-3);
 }
-#run-pct{color:var(--ink-2)}
+/* The running stage's own step count. It is a measurement the pipeline reports, so
+   it sits in the readout row rather than being styled as a caption. */
+#run-stage-progress{color:var(--ink-2)}
+#run-stage-progress::before{content:'▸ ';color:var(--ink-3)}
 
-/* The running stage's own step count. Deliberately quieter than the percentage
-   above it: this one is a measurement the pipeline makes, that one is an estimate
-   this server makes, and the visual weight should not imply otherwise. */
-.run-stage-progress{
-  margin-top:5px;font-family:var(--font-mono);font-size:var(--t-xs);
-  color:var(--ink-3);letter-spacing:.01em;
+/* A stage that reports no progress of its own leaves the bar nearly empty and
+   desaturated, so an unmeasurable stage does not read as a stalled one. */
+.progress-bar-fill.indeterminate{
+  background:repeating-linear-gradient(115deg,var(--hair-2) 0 6px,transparent 6px 12px);
+  opacity:.7;
 }
-.run-stage-progress::before{content:'▸ '}
 
 /* Stage ladder. Each segment is as wide as that stage's share of the run, so
    the bar shows where the time actually goes. Widths are set as percentages
