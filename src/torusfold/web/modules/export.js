@@ -19,37 +19,45 @@
     return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   }
 
-  /** Export screenshot from Mol* viewport */
+  /** Export a screenshot of the viewport.
+   *
+   * The viewer renders to a canvas, so the image is read straight off it. A
+   * WebGL canvas cannot be read back once its drawing buffer has been handed to
+   * the compositor, which is the usual cause of an all-black or empty PNG; the
+   * viewer keeps `preserveDrawingBuffer` on for this reason. */
   Export.screenshot = async function () {
     const viewer = TF.Viewer && TF.Viewer.instance;
-    if (!viewer || !viewer.plugin) {
+    if (!viewer) {
       TF.App && TF.App.showToast('No structure loaded', 'error');
       return;
     }
 
     try {
-      // Method 1: Mol* viewport screenshot API
-      const helpers = viewer.plugin.helpers;
-      if (helpers && helpers.viewportScreenshot) {
-        const dataUri = await helpers.viewportScreenshot.getImageDataUri();
-        const response = await fetch(dataUri);
-        const blob = await response.blob();
-        downloadBlob(blob, 'torusfold_' + timestamp() + '.png');
-        TF.App && TF.App.showToast('Screenshot saved', 'success');
-        return;
+      if (typeof viewer.toPNGURI === 'function') {
+        const dataUri = viewer.toPNGURI();
+        if (dataUri) {
+          const response = await fetch(dataUri);
+          const blob = await response.blob();
+          downloadBlob(blob, 'torusfold_' + timestamp() + '.png');
+          TF.App && TF.App.showToast('Screenshot saved', 'success');
+          return;
+        }
       }
     } catch (e) {
-      console.warn('Mol* screenshot failed, trying fallback:', e);
+      console.warn('viewport screenshot failed, trying canvas read:', e);
     }
 
-    // Method 2: Direct canvas read
+    // Fallback: read the canvas the viewer is drawing into.
     try {
-      const canvas = viewer.plugin.canvas3d && viewer.plugin.canvas3d.webgl && viewer.plugin.canvas3d.webgl.gl.canvas;
+      const host = document.getElementById('viewer');
+      const canvas = host && host.querySelector('canvas');
       if (canvas) {
         canvas.toBlob(function (blob) {
           if (blob) {
             downloadBlob(blob, 'torusfold_' + timestamp() + '.png');
             TF.App && TF.App.showToast('Screenshot saved (fallback)', 'success');
+          } else {
+            TF.App && TF.App.showToast('Screenshot not available', 'error');
           }
         }, 'image/png');
         return;

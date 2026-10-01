@@ -37,7 +37,20 @@
 
   function startAutoRotate() {
     const viewer = TF.Viewer && TF.Viewer.instance;
-    if (!viewer || !viewer.plugin) return;
+    if (!viewer) return;
+
+    // 3Dmol: rotate the scene and redraw. One call, no camera state to poke at.
+    if (typeof viewer.rotateBy === 'function') {
+      function spin() {
+        if (!_autoRotate) return;
+        try { viewer.rotateBy(0.005); } catch (e) { /* viewer gone */ }
+        _autoRotateRAF = requestAnimationFrame(spin);
+      }
+      _autoRotateRAF = requestAnimationFrame(spin);
+      return;
+    }
+
+    if (!viewer.plugin) return;
 
     const plugin = viewer.plugin;
     let angle = 0;

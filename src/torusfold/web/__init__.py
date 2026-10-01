@@ -1,10 +1,14 @@
 """TorusFold web assets — hand-written SPA (no build step).
 
-Served by ``server/api.py``: ``GET /`` returns ``index.html``; ``GET
-/web/{name}`` returns ``app.js`` / ``style.css`` / ``circrna_viewer.js``.
+Served by ``serve.py``: ``GET /`` returns ``index.html``; ``GET /web/{name}``
+returns any file in this directory (``app.js``, ``style.css``, ``panels.css``,
+the ``modules/`` scripts, and the vendored ``3Dmol-min.js``).
 
-The Mol* viewer logic in ``circrna_viewer.js`` is extracted from the IGEM
-``html_renderer.py`` HTML_TEMPLATE (Mol* 5.10.1, five compatibility fixes
-preserved). The data contract matches: ``PDB_DATA`` string + ``FP`` JSON
+Structures are drawn with 3Dmol.js, wrapped by ``circrna_viewer_3dmol.js``. The
+data contract matches the backend: a ``PDB_DATA`` string plus an ``FP`` JSON
 object (per_residue arrays + scalar singletons + coloring_schemes list).
+
+The previous Mol* implementation (``circrna_viewer.js`` plus the 4.8 MB
+``molstar.js`` and ``molstar.css``) has been removed; it is in the git history if
+it is ever needed.
 """

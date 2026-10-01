@@ -601,7 +601,7 @@
    * A prediction leaves a chain of progressively better PDBs, so the panel can
    * show the structure being built instead of staying empty for the whole run.
    * Only a CHANGE is acted on: the heartbeat arrives every few seconds and
-   * reloading the same structure would churn the Mol* plugin for nothing.
+   * reloading the same structure would churn the 3D viewer for nothing.
    */
   var shownStructure = null;
   var shownDigest = null;
@@ -914,7 +914,7 @@
       // Render all panels
       if (TF.Panels) TF.Panels.renderAll(res);
 
-      // Mount Mol* viewer
+      // Mount the 3D viewer
       try {
         if (!viewer) viewer = new CircRNAViewer('viewer');
         TF.Viewer = TF.Viewer || {};
@@ -934,7 +934,7 @@
         // Show minigame toolbar
         if (TF.MiniGame) TF.MiniGame.show();
       } catch (e) {
-        console.error('Mol* mount failed:', e);
+        console.error('viewer mount failed:', e);
       }
 
       predictBtn.disabled = false;
@@ -978,7 +978,7 @@
           // Trigger real-time analysis via SSE
           startPdbAnalysis(pdbText, file.name);
         } catch (err) {
-          showToast('Mol* load failed: ' + err.message, 'error');
+          showToast('PDB load failed: ' + err.message, 'error');
         }
       });
     });

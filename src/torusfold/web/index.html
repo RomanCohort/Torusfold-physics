@@ -7,7 +7,6 @@
 <meta name="description" content="TorusFold — physics-based 3D structure prediction for long circular RNA.">
 <title>TorusFold — circRNA 3D Structure Prediction</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%230b0e0d'/><circle cx='16' cy='16' r='8.5' fill='none' stroke='%234fd1c5' stroke-width='2.5'/><circle cx='16' cy='16' r='2.5' fill='%23e8c9a0'/></svg>">
-<link rel="stylesheet" href="/web/molstar.css">
 <link rel="stylesheet" href="/web/style.css">
 <link rel="stylesheet" href="/web/panels.css">
 <script>
@@ -301,10 +300,17 @@ try{
       <div id="repr-controls">
         <label class="chip-field">Representation
           <select id="repr-select">
-            <option value="surface">Surface</option>
-            <option value="cartoon">Cartoon</option>
+            <!-- Cartoon first because it is the default the viewer starts in: a
+                 53-atom coarse-grained checkpoint under a VDW surface is an
+                 opaque blob, while the backbone trace shows the fold. Keep the
+                 first option in step with _currentRepr in the viewer.
+                 Labelled "Trace" rather than "Cartoon" because 3Dmol's cartoon
+                 is protein secondary structure; for an RNA chain the viewer draws
+                 a backbone trace. -->
+            <option value="cartoon">Trace</option>
             <option value="ball-stick">Ball &amp; stick</option>
             <option value="spacefill">Spacefill</option>
+            <option value="surface">Surface</option>
           </select>
         </label>
         <span class="chip-sep" aria-hidden="true"></span>
@@ -583,8 +589,11 @@ The SSE stream carries live pipeline output once one is running.
 </div>
 
 <!-- ═══════════════ SCRIPTS ═══════════════ -->
-<script src="/web/molstar.js"></script>
-<script src="/web/circrna_viewer.js"></script>
+<!-- 3Dmol draws the structures. Mol* (4.8 MB, with its own expand/controls/settings
+     chrome) is no longer loaded: the centre panel only needs to draw a structure
+     and recolor it. Keep this order — the viewer class needs $3Dmol defined. -->
+<script src="/web/3Dmol-min.js"></script>
+<script src="/web/circrna_viewer_3dmol.js"></script>
 <script src="/web/modules/charts.js"></script>
 <script src="/web/modules/console.js"></script>
 <script src="/web/modules/panels.js"></script>
