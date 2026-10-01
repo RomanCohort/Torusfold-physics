@@ -725,7 +725,7 @@ def _chebyshev_design(centre, lo, hi, K):
 def moment_correction(table, counts, n, n_outside, p_ref, K=DEFAULT_CORRECTION_K, gain=1.0,
                       max_outside_frac=DEFAULT_MAX_OUTSIDE_FRAC,
                       max_step_kbt=DEFAULT_MAX_STEP_KBT, tol_kbt=DEFAULT_TOL_KBT,
-                      ridge_rel=DEFAULT_RIDGE_REL):
+                      ridge_rel=DEFAULT_RIDGE_REL, design=None, ridge_form="trace"):
     """One round of the relative-entropy (moment-matching) operator. Returns an UpdateResult.
 
     The returned object is the SAME type plan_update returns, with the same statuses and the same
@@ -763,7 +763,18 @@ def moment_correction(table, counts, n, n_outside, p_ref, K=DEFAULT_CORRECTION_K
         return UpdateResult(table=None, dU=np.zeros(nbins), diagnostics=diag,
                             status=STATUS_REFUSED, reason=REFUSE_SUPPORT_DRIFT)
 
-    A, _x = _chebyshev_design(centre, lo, hi, int(K))
+    if design is None:
+        A, _x = _chebyshev_design(centre, lo, hi, int(K))
+    else:
+        # A PLUGGABLE DESIGN, added 2026-10-01 for the two-lever arm: the same operator, a basis that
+        # can carry the target's edge mass (docs/plan_c_basis_family.md 3.2 -- on the dihedral a
+        # Chebyshev refit delivers 0.378 less implied edge mass than its target holds and cycles,
+        # while every B-spline arm is within 0.012 and converges). K follows the design's rank so the
+        # diagnostics describe what was actually fitted.
+        A = np.asarray(design, dtype=float)
+        if A.ndim != 2 or A.shape[0] != nbins:
+            raise ValueError(f"design has shape {A.shape}, the table has {nbins} bins")
+        K = int(A.shape[1])
     p = np.asarray(p_ref, dtype=float)
     p = p / p.sum()
     w_sim = counts / counts.sum()

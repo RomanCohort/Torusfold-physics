@@ -103,6 +103,7 @@ import boltzmann_bonded as B              # noqa: E402
 import cg_potentials as P                 # noqa: E402
 import ibi_bonded as I                    # noqa: E402
 import ibi_core as IC                     # noqa: E402
+import plan_c_basis as PB                 # noqa: E402
 import torusfold.scheme2.torch_cgsim as C  # noqa: E402
 
 # Which table defines p_ref. IBI_LOOP_REF points it at a refit; the reference is the loop's
@@ -114,6 +115,43 @@ OUT_ROOT = Path(os.environ.get("IBI_LOOP_OUT", str(REPO / "results" / "ibi_loop"
 # The three coordinates cg_potentials can inject.
 UPDATED = ("bb_bond", "angle", "dihedral")
 CARRIED = ("stack",)
+
+# STACK IS NOT A COORDINATE THE LOOP CAN CONTROL, and that is a property of the MODEL, not a policy
+# choice. src/torusfold/scheme2/torch_cgsim.py (K_STACK = 0.0, around line 203) records it, and the
+# parts that matter here are:
+#
+#   1. the stack coordinate is the P(i)-P(i+2) distance, an EXACT DERIVED quantity:
+#      |P(i)-P(i+2)|^2 = |b_i|^2 + |b_{i+1}|^2 - 2|b_i||b_{i+1}|cos_a, checked against both sides by
+#      scripts/assess_stacking_redundancy.py on 1278 windows to 6.7e-16 nm^2 (R^2 = 1.000000). The two
+#      bond lengths are held by K_BB and cos_a by K_ANGLE, so the term is a THIRD SPRING ON A DERIVED
+#      QUANTITY;
+#   2. ablating it changes nothing physical (funnel rank/gap stay 1.000 / 0.0 while the bonded
+#      subset's force-cap saturation falls from 4.02 to 0.58 per cent);
+#   3. the model cannot express stacking at all: the beads are P, C4-prime and one N9/N1 point -- no
+#      plane, no normal, no rise, no twist. "A term named for stacking that restrains a
+#      backbone-derived distance was not doing that job."
+#
+# So stack's ratio in sim_ref_table is a CONSISTENCY CHECK, not a target: it is bb_bond's and angle's
+# error propagated through that identity. Evidence: on round 3 angle's ratio is 1.228 and stack's 1.189
+# while bb_bond's is 1.004, i.e. stack follows ANGLE; and over nine full-pool rounds its table-implied
+# sigma was constant at 0.12683 while its sampled sigma moved 1.175 -> 1.084 only because the other
+# coordinates moved. Any J that averages it carries a constant |ln(sim/ref)| of about 0.17 that no
+# update can remove, which is why the mean below leaves it out.
+#
+# DO NOT add a stack_potential kwarg to "make stack controllable": that would hang a fourth spring on a
+# derived quantity. Handling stacking means adding degrees of freedom (planes, normals, more beads per
+# residue), which is a different model and not a fitting problem.
+UNCONTROLLED = ("stack",)
+
+# WHICH COORDINATES J AVERAGES OVER: the ones the loop is actually converging. Stack is outside by
+# construction (it is not in UPDATED); a frozen coordinate is outside by choice.
+_FREEZE_RAW = os.environ.get("IBI_LOOP_FREEZE", "")
+FROZEN = tuple(x.strip() for x in _FREEZE_RAW.split(",") if x.strip())
+_BAD_FREEZE = [c for c in FROZEN if c not in UPDATED]
+if _BAD_FREEZE:
+    raise SystemExit(f"IBI_LOOP_FREEZE names {_BAD_FREEZE}, which are not updated coordinates; "
+                     f"the legal names are {list(UPDATED)}")
+CONTROLLED = tuple(c for c in UPDATED if c not in FROZEN)
 
 # 40 ps at dt = 0.002 ps; see the docstring for why it is not shorter.
 DEFAULT_BURN_STEPS = 20000
@@ -174,6 +212,36 @@ RELAX_STEPS = int(os.environ.get("IBI_LOOP_RELAX", 0))
 # when this file changes under it -- the same reason RELAX_STEPS is read per worker.
 OPERATOR = os.environ.get("IBI_LOOP_OPERATOR", "table")
 CORRECTION_K = int(os.environ.get("IBI_LOOP_CORRECTION_K", "8"))
+
+# PER-COORDINATE RULES (the two-lever arm, 2026-10-01; docs/plan_c_basis_family.md section 5). An
+# empty string means "the operator above, for every coordinate" -- today's behaviour -- and that
+# default path is bit-identical: tests/test_ibi_driver_rules.py pins it against golden digests
+# captured before this block existed.
+#
+#   IBI_LOOP_RULE_DIHEDRAL=bspline16   the moment operator with a B-spline design (this many functions,
+#     with IBI_LOOP_RULE_BSPLINE_M) and an EIGENVALUE-relative ridge, instead of Chebyshev K=8 with the
+#     trace-relative one. The target stays p_ref: same rule, a basis that can carry the dihedral's edge
+#     mass. Measured on seven chains: a Chebyshev refit delivers 0.378 less implied edge mass than its
+#     target holds and its step cycles (corr -0.94, amplitude growing), while every B-spline arm is
+#     within 0.012 of the target and converges.
+#   IBI_LOOP_RULE_ANGLE=selfconsistent   the angle is REFITTED to the ensemble the field itself
+#     produced, through plan_c_basis.fit on the Chebyshev K=8 design. It is a REPLACEMENT, not an
+#     increment: under a self-consistent target the increment kBT*ln(p_sim/p_ref) is identically zero,
+#     and a loop that used it would report a fixed point it reached by construction. It does not consume
+#     p_ref at all, so the "p_ref comes from the reference and is never recomputed" invariant -- which
+#     is a statement about what the INCREMENT is measured against -- is untouched.
+#   IBI_LOOP_RULE_RIDGE                relative ridge for the bspline16 rule (default 1e-3).
+RULE_BY_COORD = {
+    "angle": os.environ.get("IBI_LOOP_RULE_ANGLE", "").strip().lower(),
+    "dihedral": os.environ.get("IBI_LOOP_RULE_DIHEDRAL", "").strip().lower(),
+}
+RULE_BSPLINE_M = int(os.environ.get("IBI_LOOP_RULE_BSPLINE_M", "16"))
+RULE_RIDGE_REL = float(os.environ.get("IBI_LOOP_RULE_RIDGE", "1e-3"))
+# The self-consistent refit uses the C2s pipeline's own ridge (plan_c_loop.RIDGE_REL, trace-relative),
+# so the full-pool angle arm is the same rule as the seven-chain C2s8/CA16 arms and not a new one.
+RULE_C2S_RIDGE_REL = float(os.environ.get("IBI_LOOP_RULE_C2S_RIDGE", "1e-1"))
+RULE_C2S_SUPPORT_FRAC = float(os.environ.get("IBI_LOOP_RULE_C2S_SUPPORT", "1e-3"))
+RULE_C2S_TAPER_DECADES = float(os.environ.get("IBI_LOOP_RULE_C2S_TAPER", "2.0"))
 
 # --- task checkpointing, and the watchdog that reads it --------------------------------------
 #
@@ -298,6 +366,7 @@ def save_task_result(done_dir, idx, r):
         scalars[f"n_total__{c}"] = int(r["n_total"][c])
     np.savez(task_npz(done_dir, idx),
              joint_J=np.float64(np.nan if r["joint_J"] is None else r["joint_J"]),
+             joint_J_all=np.float64(np.nan if r.get("joint_J_all") is None else r["joint_J_all"]),
              joint_J_table=np.float64(np.nan if r.get("joint_J_table") is None
                                       else r["joint_J_table"]),
              sim_ref_table=np.asarray([np.nan if v is None else v
@@ -319,10 +388,14 @@ def load_task_result(done_dir, idx):
     # Both keys are optional on read: tasks written before 2026-09-21 do not carry them, and a
     # replay of those rounds must not invent a number (None, not nan, so the round json says
     # "not measured" rather than "measured as nan").
+    # OPTIONAL ON READ: a task file written before 2026-10-01 has no joint_J_all, and replaying it
+    # must not fail -- the campaign's own checkpoints have to stay loadable.
+    ja = float(z["joint_J_all"]) if "joint_J_all" in z.files else float("nan")
     jt = float(z["joint_J_table"]) if "joint_J_table" in z.files else float("nan")
     srt = (list(np.asarray(z["sim_ref_table"], dtype=float)) if "sim_ref_table" in z.files
            else [float("nan")] * len(B.COORDS))
     return {"counts": {c: z[f"counts__{c}"] for c in B.COORDS},
+            "joint_J_all": None if ja != ja else ja,
             "joint_J_table": None if jt != jt else jt,
             "sim_ref_table": [None if v != v else float(v) for v in srt],
             "n_outside": {c: int(z[f"n_outside__{c}"]) for c in B.COORDS},
@@ -515,7 +588,11 @@ def _sample_one(task):
                            log=lambda *a, **k: None)
     finally:
         stop_hb.set()
-    _wv, _wj = IC.simref(res.acc, tab, skip=res.skip)
+    # TWO Js. joint_J is the mean over the CONTROLLED coordinates -- what the loop is converging;
+    # joint_J_all is the old four-coordinate mean, kept so this arm can be read against rounds 0-8 of
+    # the campaign. See UNCONTROLLED above for why stack is not in the first one.
+    _wv, _wj = IC.simref(res.acc, tab, skip=res.skip, only=CONTROLLED)
+    _av, _aj = IC.simref(res.acc, tab, skip=res.skip)
     _u, _o = IC.j_denominator(res.acc, tab, skip=res.skip)
     # THE SAME RESIDUAL AGAINST THE TABLE'S OWN DISTRIBUTION, reported beside the old one and read
     # by nothing in the update path (ibi_core.implied_sigma, Part 5 of the IBI findings). Both are
@@ -532,6 +609,7 @@ def _sample_one(task):
         "n_outside": {c: int(res.n_outside[c]) for c in B.COORDS},
         "n_total": {c: int(res.n_total[c]) for c in B.COORDS},
         "joint_J": None if _wj != _wj else float(_wj),
+        "joint_J_all": None if _aj != _aj else float(_aj),
         "j_coords": [_u, _o],
         "residues": L,
         "seconds": time.time() - t0,
@@ -586,6 +664,92 @@ def check_bins_agree(tables, ref_tables, what, coords=UPDATED):
 
 
 # ----------------------------------------------------------------------------- main
+# --------------------------------------------------------------------------- the update, per coordinate
+def update_one_coord(coord, table, counts, n_tot, n_out, p_ref, hist, hist_norm, hist_by_coord,
+                     rule=""):
+    """One coordinate's update for one round: (UpdateResult, the rule that ran).
+
+    THE DEFAULT PATH IS THE CODE THAT PRODUCED EVERY TABLE IN results/ibi_relax, moved here verbatim so
+    it can be tested without running a round. tests/test_ibi_driver_rules.py pins it against golden
+    digests captured before this function existed (plan_update 5a65353e88b5acd9, moment_correction
+    1ece619997c290b5 on a deterministic synthetic input), and pins that calling with no rule is the same
+    call the loop used to make inline.
+
+    The two rules the two-lever arm needs, and what each one is NOT:
+
+      bspline16       the moment operator with a B-spline design and an eigenvalue-relative ridge. Same
+                      operator, same target (p_ref), a basis that can carry the dihedral's edge mass.
+      selfconsistent  a REPLACEMENT refit of the ensemble the field itself produced, through
+                      plan_c_basis.fit on the Chebyshev K=8 design with the C2s pipeline's ridge. It
+                      does not touch p_ref: an increment against a self-consistent target is
+                      identically zero, which is why this is a fit and not a correction.
+    """
+    rule = (rule or "").strip().lower()
+    if rule == "bspline16":
+        A = PB.design_bspline(table["centre"], float(table["lo"]), float(table["hi"]),
+                              int(RULE_BSPLINE_M))
+        res = I.moment_correction(table, counts, n_tot, n_out, p_ref, K=int(RULE_BSPLINE_M),
+                                  gain=GAIN_BY_COORD[coord], design=A,
+                                  ridge_rel=RULE_RIDGE_REL, ridge_form="eig")
+        _norm = float(res.diagnostics.get("moment_norm", float("nan")))
+        if _norm == _norm:
+            _div, _msg = I.divergence_check(hist_norm[coord], _norm)
+            if _div:
+                res = I.UpdateResult(table=None, dU=np.zeros(len(table["U"])),
+                                     diagnostics=dict(res.diagnostics, message=_msg),
+                                     status=I.STATUS_REFUSED, reason=I.REFUSE_DIVERGENCE)
+            hist_norm[coord].append(_norm)
+        return res, rule
+    if rule == "selfconsistent":
+        p_ens = I.probability_from_counts(np.asarray(counts, dtype=float), pseudo=I.DEFAULT_PSEUDO)
+        target = -B.KBT * np.log(np.clip(p_ens, 1e-300, None))
+        target = target - target.min()
+        A, _x = I._chebyshev_design(table["centre"], float(table["lo"]), float(table["hi"]),
+                                    int(CORRECTION_K))
+        U_new, diag = PB.fit(A, table, counts, U_target=target, ridge_rel=RULE_C2S_RIDGE_REL,
+                             ridge_form="trace", gain=GAIN_BY_COORD[coord],
+                             support_frac=RULE_C2S_SUPPORT_FRAC,
+                             taper_decades=RULE_C2S_TAPER_DECADES)
+        U_new = np.asarray(U_new, dtype=float)
+        dU = U_new - np.asarray(table["U"], dtype=float)
+        diag = dict(diag, method="selfconsistent_refit", coord=coord,
+                    max_abs_dU=float(np.abs(dU).max()))
+        _norm2 = float(diag.get("mass_weighted_std_dU", float("nan")))
+        if _norm2 == _norm2:
+            _div2, _msg2 = I.divergence_check(hist_norm[coord], _norm2)
+            if _div2:
+                return I.UpdateResult(table=None, dU=np.zeros(len(table["U"])),
+                                      diagnostics=dict(diag, message=_msg2),
+                                      status=I.STATUS_REFUSED,
+                                      reason=I.REFUSE_DIVERGENCE), rule
+            hist_norm[coord].append(_norm2)
+        return I.UpdateResult(table=dict(table, U=U_new), dU=dU, diagnostics=diag,
+                              status=I.STATUS_OK), rule
+    if OPERATOR == "moments":
+        # Plan B' (docs/plan_b_coupled_update.md): the table keeps its shape and the correction is
+        # low-order -- d_k = eta_k (<T_k>_sim - <T_k>_ref), the relative entropy's gradient. The
+        # divergence guard is the SAME rule plan_update applies, fed the moment norm instead of
+        # max|dU|, so a coupled step that starts growing is caught by the same instrument rather than
+        # by a second opinion.
+        res = I.moment_correction(table, counts, n_tot, n_out, p_ref, K=CORRECTION_K,
+                                  gain=GAIN_BY_COORD[coord])
+        _norm = float(res.diagnostics.get("moment_norm", float("nan")))
+        if _norm == _norm:
+            _div, _msg = I.divergence_check(hist_norm[coord], _norm)
+            if _div:
+                res = I.UpdateResult(table=None, dU=np.zeros(len(table["U"])),
+                                     diagnostics=dict(res.diagnostics, message=_msg),
+                                     status=I.STATUS_REFUSED, reason=I.REFUSE_DIVERGENCE)
+            hist_norm[coord].append(_norm)
+        return res, OPERATOR
+    res = I.plan_update(table, hist, p_ref, history=hist_by_coord[coord],
+                        gain=GAIN_BY_COORD[coord], smooth_bins=(B.SMOOTH_WIDTH - 1) // 2)
+    # AN UNRECOGNISED RULE RUNS THE OPERATOR, AND REPORTS THE OPERATOR. Echoing the unknown string
+    # would put a rule name in the round json that no code path implements -- measured by
+    # test_unknown_rule_falls_back_to_the_default_path, which caught exactly that.
+    return res, OPERATOR
+
+
 def main():
     n_struct = _opt(1, 7)
     n_rounds = _opt(2, 4)
@@ -673,9 +837,12 @@ def main():
           f"= {_N_WORKERS * _N_THREADS} of {os.cpu_count()} logical CPUs")
     print(f"  {nrep} replicas, {nsteps} steps = {nsteps * 0.002:.0f} ps, burn {burn} = "
           f"{burn * 0.002:.0f} ps, window {(nsteps - burn) * 0.002:.0f} ps at stride {stride}")
+    _rules = {c: RULE_BY_COORD.get(c, "") for c in UPDATED if RULE_BY_COORD.get(c, "")}
     print(f"  friction {friction}/ps, 300 K, constraints ON, wall_k {WALL_K:g}, gain " + " ".join(f"{c}={GAIN_BY_COORD[c]:g}" for c in UPDATED)
           + (f", relax {RELAX_STEPS} steps" if RELAX_STEPS else "")
-          + (f", operator {OPERATOR}" + (f" (K={CORRECTION_K})" if OPERATOR == "moments" else "")))
+          + (f", operator {OPERATOR}" + (f" (K={CORRECTION_K})" if OPERATOR == "moments" else ""))
+        + (", per-coordinate rules " + " ".join(f"{c}={r}" for c, r in _rules.items())
+           if _rules else ""))
     # Truncated: the all-chains pool is 867 names, which buries the rest of the header. The full
     # list is recoverable from the round json's per_structure entries.
     _ls = [len(s["pos"]) for s in structs]
@@ -844,8 +1011,13 @@ def main():
             js = [r["joint_J"] for r in mine if r["joint_J"] is not None]
             jtxt = "nan" if not js else (f"{min(js):.4f}-{max(js):.4f}" if len(js) > 1
                                          else f"{js[0]:.4f}")
+            # J4 is the OLD four-coordinate mean, printed beside J so a line can be read against the
+            # campaign's records without a second lookup.
+            j4 = [r.get("joint_J_all") for r in mine if r.get("joint_J_all") is not None]
+            j4txt = "nan" if not j4 else (f"{min(j4):.4f}-{max(j4):.4f}" if len(j4) > 1
+                                          else f"{j4[0]:.4f}")
             n = sum(r["n_total"]["bb_bond"] for r in mine)
-            print(f"    {s['name']:9s} L={len(s['pos']):4d}  J {jtxt}  n={n}  "
+            print(f"    {s['name']:9s} L={len(s['pos']):4d}  J {jtxt}  J4 {j4txt}  n={n}  "
                   f"({len(mine)} chunks, max {max(r['seconds'] for r in mine):.0f} s)")
 
         updates = {}
@@ -853,6 +1025,28 @@ def main():
             counts = sum((r["counts"][c] for r in results), np.zeros(len(tables[c]["U"]), np.int64))
             n_out = sum(r["n_outside"][c] for r in results)
             n_tot = sum(r["n_total"][c] for r in results)
+            if c in FROZEN:
+                # FROZEN (IBI_LOOP_FREEZE): the table is carried unchanged, the potential is STILL
+                # built from it so the sampler keeps running under the frozen field, and the coordinate
+                # keeps being measured and reported -- the record has to show what the untouched
+                # reading was. Measured 2026-10-01 on the full pool: the angle's SAMPLED marginal is
+                # already close to the reference (sigma 9 per cent off, edge mass within 0.01) while
+                # every update pushes the TABLE away from the sampler -- the table operator plateaus
+                # after about 20 per cent, and the moment operator drove implied sigma 0.3218 -> 0.1307
+                # (-59 per cent) against a sampler that followed only -16 per cent. So "do not touch
+                # it" is a control arm with evidence behind it, and no guard bookkeeping applies: a
+                # coordinate that never updates has no correction history to diverge.
+                _ci = list(B.COORDS).index(c)
+                _rt = [r["sim_ref_table"][_ci] for r in results
+                       if r.get("sim_ref_table") and r["sim_ref_table"][_ci] is not None]
+                _meas = float(np.mean(_rt)) if _rt else float("nan")
+                updates[c] = {"status": "frozen", "rule": "frozen", "reason": "IBI_LOOP_FREEZE",
+                              "max_abs_dU": 0.0, "n_samples": int(n_tot), "n_outside": int(n_out),
+                              "measured_sim_ref_table": None if _meas != _meas else _meas}
+                print(f"  update {c:9s} frozen   table carried; measured sim/ref_table "
+                      f"{_meas:.4f}  n={n_tot}" if _meas == _meas
+                      else f"  update {c:9s} frozen   table carried; no measured ratio")
+                continue
             hist = I.SimHistogram(counts=counts, n=n_tot, n_outside=n_out,
                                   lo=float(tables[c]["lo"]), hi=float(tables[c]["hi"]),
                                   nbins=len(tables[c]["U"]))
@@ -872,28 +1066,16 @@ def main():
             # piecewise linear, so an unsmoothed correction re-injects exactly the random force
             # field that heats the sampler. See boltzmann_bonded.SMOOTH_WIDTH: the bin convention
             # there is a WINDOW WIDTH while smooth_correction's is +-bins, hence the conversion.
-            if OPERATOR == "moments":
-                # Plan B' (docs/plan_b_coupled_update.md): the table keeps its shape and the
-                # correction is low-order -- d_k = eta_k (<T_k>_sim - <T_k>_ref), the relative
-                # entropy's gradient. The divergence guard is the SAME rule plan_update applies,
-                # fed the moment norm instead of max|dU|, so a coupled step that starts growing is
-                # caught by the same instrument rather than by a second opinion.
-                res = I.moment_correction(tables[c], counts, n_tot, n_out, p_ref[c],
-                                          K=CORRECTION_K, gain=GAIN_BY_COORD[c])
-                _norm = float(res.diagnostics.get("moment_norm", float("nan")))
-                if _norm == _norm:
-                    _div, _msg = I.divergence_check(hist_norm[c], _norm)
-                    if _div:
-                        res = I.UpdateResult(table=None, dU=np.zeros(len(tables[c]["U"])),
-                                             diagnostics=dict(res.diagnostics, message=_msg),
-                                             status=I.STATUS_REFUSED, reason=I.REFUSE_DIVERGENCE)
-                    hist_norm[c].append(_norm)
-            else:
-                res = I.plan_update(tables[c], hist, p_ref[c], history=hist_by_coord[c],
-                                    gain=GAIN_BY_COORD[c], smooth_bins=(B.SMOOTH_WIDTH - 1) // 2)
+            # THE DISPATCH IS PER COORDINATE NOW (2026-10-01, the two-lever arm). With no rule set this
+            # is one call into update_one_coord, whose default branch is the same moment/plan_update
+            # dispatch that produced every table in results/ibi_relax; the golden digests in
+            # tests/test_ibi_driver_rules.py pin that the default path did not move.
+            res, rule_used = update_one_coord(c, tables[c], counts, n_tot, n_out, p_ref[c], hist,
+                                              hist_norm, hist_by_coord,
+                                              rule=RULE_BY_COORD.get(c, ""))
             entry = {"ok": bool(res.ok), "converged": bool(res.converged),
                      "max_abs_dU": float(res.max_abs_dU), "n_samples": int(n_tot),
-                     "n_outside": int(n_out)}
+                     "n_outside": int(n_out), "rule": str(rule_used)}
             hist_by_coord[c].append(float(res.max_abs_dU))
             try:
                 new_table = res.require_table()
@@ -907,10 +1089,15 @@ def main():
                   f"kBT={entry['max_abs_dU'] / B.KBT:.4f}  n={entry['n_samples']} "
                   f"outside={entry['n_outside']}"
                   + ("" if entry["status"] == "applied" else f"\n      {entry.get('reason','')}"))
-            if OPERATOR == "moments":
+            if "moment_norm" in res.diagnostics:
+                # Any moment-based rule prints this: the production moments operator, and the
+                # B-spline variant the two-lever arm runs on the dihedral.
                 print(f"      moments  |d<T>|max={res.diagnostics['moment_norm']:.4f}  "
                       f"estimated dS = -{res.diagnostics['rel_entropy_drop_kbt']:.4f} kBT  "
-                      f"K={CORRECTION_K}")
+                      f"K={res.diagnostics.get('K', CORRECTION_K)}  rule={rule_used}")
+            elif "mass_weighted_std_dU" in res.diagnostics:
+                print(f"      refit    mass-weighted std={res.diagnostics['mass_weighted_std_dU']:.4f} "
+                      f"kJ/mol  ridge={res.diagnostics.get('ridge_rel')}  rule={rule_used}")
             if new_table is not None:
                 tables[c] = dict(tables[c], U=np.asarray(new_table["U"], dtype=float))
         for c in CARRIED:

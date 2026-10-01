@@ -273,7 +273,7 @@ reference gap by a factor of eight in the residual). Any full-pool change theref
 per-coordinate on the evidence so far, and that is exactly the trade-off written into failure mode 2 of
 section 5.
 
-## 5. The full-pool validation: proposal (NOT launched -- this is the account the operator approves)
+## 5. The full-pool validation: proposal, and its launch (the account the operator approves)
 
 ### 5.1 What would be validated, now that C has said which lever is which
 
@@ -413,6 +413,35 @@ quantity that the whole loop's update is built on, and the angle is the one coor
 rule has a fixed point at full pool. The recommendation is unchanged and now better informed: **run the
 three-round version if the angle's drift is to be settled, the two-round version if only the dihedral's
 gap is; either way step 0 is already done and costs nothing further.**
+
+### 5.7 Launched 2026-10-01: the two-lever arm, and what its launcher has to survive
+
+Launched as the scheduled task **`plan_c_armA`**, output `results/ibi_armA` (the campaign record
+`results/ibi_relax` is never written by it). Command line: 867 chains, 2 rounds, 1 replica, 32500
+steps, stride 5, burn 20000 -- the campaign protocol -- with `IBI_LOOP_OPERATOR=moments`,
+`IBI_LOOP_RULE_DIHEDRAL=bspline16`, `IBI_LOOP_RULE_ANGLE=selfconsistent`, 32 workers at one torch
+thread each. Launcher: `results/plan_c/run_armA.cmd` (CRLF), which carries the one-round,
+three-round and freeze-control variants as comments so the knobs live in one place.
+
+Two defences are in that launcher because the failure was measured, not imagined. Four attempts on
+2026-10-01 ended with **no parent process at all**: 120 orphaned spawn workers, children dying at
+startup with `PermissionError [WinError 5]` inside `reduction.duplicate` (a child cannot duplicate a
+handle from a parent that no longer exists), and one run terminated with exit code -1 -- the code
+`Stop-Process -Force` leaves behind, i.e. a sweep aimed at `python.exe` from outside the task. So:
+(1) the run uses `python_ibiA.exe`, a copy of the venv interpreter under a private name in the same
+directory, which `multiprocessing.spawn` propagates to every worker through `sys.executable`, so a
+name-based sweep misses the whole tree; (2) the launcher loops, because the driver resumes by design
+(it skips tasks already on disk), so a silent death costs a retry instead of the round. Success is
+judged by `results/ibi_armA/round1.json` existing, **not** by an exit code: after a pool collapse the
+driver exits 0, and a launcher that trusted it would report success having produced nothing -- which
+is what this launcher's first version did.
+
+Live evidence from the smoke gate (12 chains, 2 rounds, 2000 steps, short-burn stamp; wiring
+evidence, never a result): both rounds applied `bb_bond/moments`, `angle/selfconsistent` (max |dU|
+26.66 then 10.03) and `dihedral/bspline16` (4.45 then 2.99); with `IBI_LOOP_FREEZE=angle` the round
+file records `status="frozen"`, `rule="frozen"`, `reason="IBI_LOOP_FREEZE"` and a measured
+sim/ref_table of 0.9831 over 143520 samples while the other two coordinates were updated; and
+`joint_J` and `joint_J_all` differ in every round file, as their two definitions require.
 
 ## 6. Reproduce
 

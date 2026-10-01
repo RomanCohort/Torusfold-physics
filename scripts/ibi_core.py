@@ -170,7 +170,7 @@ def simref_table(acc, tab, skip=()):
     return vals, (float(np.mean(js)) if js else float("nan"))
 
 
-def simref(acc, tab, skip=()):
+def simref(acc, tab, skip=(), only=None):
     """(per-coordinate sim/ref values, joint J) from a moments accumulator.
 
     J is the mean over the coordinates of |ln(sim/ref)|. Returned in B.COORDS order, with nan for
@@ -191,8 +191,15 @@ def simref(acc, tab, skip=()):
     res.j_coords; see j_denominator.
     """
     skip = set(skip)
+    only = None if only is None else set(only)
     vals = [float("nan") if c in skip else sim_ref_ratio(acc, c, tab) for c in B.COORDS]
-    js = [abs(float(np.log(r))) for r in vals if r == r and r > 0]
+    # "only" restricts the MEAN, not the values: added 2026-10-01 because J's job is to score what the
+    # loop is converging, and two kinds of coordinate are outside that -- a derived observable (stack,
+    # see ibi_loop.UNCONTROLLED) and a coordinate the operator deliberately froze (IBI_LOOP_FREEZE).
+    # The four-coordinate mean is still reported beside it as joint_J_all, so rounds from before this
+    # change stay comparable. Default None reproduces the old mean bit for bit.
+    js = [abs(float(np.log(r))) for c, r in zip(B.COORDS, vals)
+          if r == r and r > 0 and (only is None or c in only)]
     return vals, (float(np.mean(js)) if js else float("nan"))
 
 
