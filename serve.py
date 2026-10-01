@@ -417,66 +417,94 @@ def _note_stage(level_name, label):
     })
 
 
-def _estimate_remaining(anchors, elapsed, current_level=None, entered=None, weights=None):
-    """Seconds left, from the measured wall time at each stage boundary.
+def _estimate_remaining(anchors, elapsed, current_level=None, entered=None, weights=None,
+                        measured_frac=None):
+    """Seconds left, from measured wall time at stage boundaries.
 
-    Two independent estimates are combined, because either alone is wrong in a
-    way the other catches:
+    The measured anchors are the estimate. The weight table is a fallback used only
+    while no stage has been measured at all, and nothing else consults it.
 
-      * the median of (elapsed / fraction) over the boundaries reached so far.
-        This is what actually predicts total duration.
-      * the elapsed time of the stage currently running, divided by its share of
-        the work. That is a LOWER BOUND, since only part of the stage is done.
-        Without it the median collapses the moment a run of cheap stages
-        completes and an expensive one starts — the failure that made the first
-        version of this report "2s left" for eighty seconds.
+    Why the weights had to stop feeding the estimate: they are a guess about the
+    relative cost of the stages, and on this machine they were wrong by a factor of
+    five for metadynamics — modelled at 33% of a run against a measured ~7%. Mixing
+    a measured rate with a guessed one produced an estimate that moved for reasons
+    the user could not see, and "the number jumped" is indistinguishable from "the
+    number is broken".
 
-    The result is a range: one or two boundaries cannot support more precision
-    than that, and a confident wrong ETA is worse than an honest wide one.
+    The measured rate is a completed-work-weighted mean of (elapsed / fraction) over
+    the boundaries reached, not a plain median. A boundary counts for how much of
+    the run it represents: metadynamics finishing is far better evidence about this
+    machine than Level 0 finishing, and a median would weight them the same.
+
+    Everything degrades honestly rather than guessing: with no usable boundary the
+    answer is either a weight-based projection labelled as such, or "measuring".
     """
-    usable = [(f, s) for f, s in anchors if f > 0.001]
-    if not usable:
-        return {"state": "measuring", "confidence": "none", "remaining_low": None,
-                "remaining_high": None, "total_est": None,
-                "basis": "no stage has been reached yet"}
+    now = time.time()
+    usable = [(f, s) for f, s in anchors if f > 0.001 and s > 0.5]
+    measured_frac = measured_frac if measured_frac is not None else (
+        max((f for f, _ in usable), default=0.0) if usable else 0.0)
 
-    rates = [s / f for f, s in usable if s > 0.5]
-    if not rates:
-        return {"state": "measuring", "confidence": "none", "remaining_low": None,
-                "remaining_high": None, "total_est": None,
-                "basis": "elapsed time is too small to extrapolate from"}
+    def _range(total, confidence, basis, state="estimated"):
+        remaining = max(0.0, total - elapsed)
+        # The band narrows as more of the run is actually behind us and widens when
+        # the boundaries disagree, which is the honest shape of this quantity.
+        spread = 1.6 if confidence == "none" else (
+            1.2 if confidence == "low" else (0.75 if confidence == "medium" else 0.45))
+        return {
+            "state": state,
+            "confidence": confidence,
+            "remaining_low": round(remaining * max(0.25, 1.0 - spread / 2)),
+            "remaining_high": round(remaining * min(3.0, 1.0 + spread / 2)),
+            "total_est": round(total),
+            "basis": basis,
+            "progress_basis": round(measured_frac, 3),
+        }
 
-    rates.sort()
-    mid = rates[len(rates) // 2]
+    if usable:
+        # Weight each boundary by the work it represents.
+        num = sum(s for _f, s in usable)
+        den = sum(f for f, _s in usable)
+        rate = num / den if den > 0 else None
+        if rate:
+            total = rate
+            # A stage that has already run longer than the measured rate implies
+            # raises the estimate. A stage half-done cannot lower it, so this is a
+            # lower bound, not a second opinion.
+            #
+            # Derived from the measured rate and the stage's WIDTH, deliberately not
+            # from its weight: reading weights here would put the guess back into an
+            # estimate whose whole point is that it no longer uses them.
+            last_f = max(f for f, _s in usable)
+            if last_f < 0.995 and elapsed > 0:
+                width = 1.0 - last_f
+                inside = max(0.0, elapsed - max(s for f, s in usable if f <= last_f + 1e-9))
+                if inside > 30.0 and width > 1e-6:
+                    total = max(total, (inside / width) * 1.0 + elapsed)
+            conf = "high" if measured_frac >= 0.5 else (
+                "medium" if measured_frac >= 0.15 else "low")
+            basis = ("extrapolated from %d measured stage boundary(ies), covering "
+                     "%.0f%% of the run" % (len(usable), measured_frac * 100))
+            if total > rate * 1.05:
+                basis += "; the stage now running is overrunning that, so it was raised"
+            return _range(total, conf, basis)
 
-    # Lower bound from the stage currently running: only part of it is done, so
-    # elapsed/share underestimates its total, never overestimates it.
-    bound = 0.0
-    if current_level and entered and weights and weights.get(current_level, 0.0) > 1e-6:
-        inside = max(0.0, time.time() - entered)
-        bound = inside / weights[current_level]
-
-    total = max(mid, bound)
-    spread = (rates[-1] - rates[0]) / mid if len(rates) > 1 else 1.6
-    spread = min(spread, 3.0)
-    # Wide early, narrowing as boundaries accumulate.
-    shrink = 1.0 + 0.5 * len(rates)
-    lo = max(0.25, 1.0 - 0.5 * spread / shrink)
-    hi = min(3.0, 1.0 + 0.5 * spread / shrink)
-
-    remaining = max(0.0, total - elapsed)
-    basis = "extrapolated from %d stage boundary(ies)" % len(rates)
-    if bound > mid:
-        basis += "; the running stage already exceeds that, so the estimate was raised"
-    return {
-        "state": "estimated",
-        "confidence": "low" if len(rates) < 3 else ("medium" if len(rates) < 6 else "high"),
-        "remaining_low": round(remaining * lo),
-        "remaining_high": round(remaining * hi),
-        "total_est": round(total),
-        "basis": basis,
-        "progress_basis": round(max(f for f, _ in usable), 3),
-    }
+    # No measurement yet. Project from the weights, and say that is what this is.
+    if weights and current_level:
+        here = weights.get(current_level, 0.0)
+        if here > 1e-6 and elapsed > 5:
+            total = elapsed / here
+            return _range(total, "none",
+                          "projected from the weight table: no stage has finished "
+                          "yet, so there is nothing measured to extrapolate from",
+                          state="projected")
+    if weights:
+        total = elapsed / max(0.02, (weights.get("0", 0.0) + weights.get("1", 0.0)))
+        return _range(total, "none",
+                      "projected from the weight table: no stage has finished yet",
+                      state="projected")
+    return {"state": "measuring", "confidence": "none", "remaining_low": None,
+            "remaining_high": None, "total_est": None,
+            "basis": "no stage has been reached yet"}
 
 
 def _maybe_emit_progress(pub, every=60.0):

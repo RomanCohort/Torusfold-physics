@@ -650,6 +650,12 @@
       // A single number would claim precision the anchor points do not support,
       // so the range is shown as-is.
       else runRemaining.textContent = fmtClock(eta.remaining_low) + '–' + fmtClock(eta.remaining_high);
+      // "projected" means nothing has been measured yet and this came from the
+      // weight table. Marked in the text, not only in the tooltip: it is the
+      // difference between a measurement and a guess.
+      if (eta.state === 'projected' && eta.remaining_low != null) {
+        runRemaining.textContent = '~' + runRemaining.textContent;
+      }
       runRemaining.title = eta.basis || '';
       runRemaining.dataset.confidence = eta.confidence || 'none';
     }
