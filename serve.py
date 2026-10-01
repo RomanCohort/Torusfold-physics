@@ -32,6 +32,31 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(ROOT, "src")
 WEB_DIR = os.path.join(SRC, "torusfold", "web")
 
+# Publish .env.local into this process, so the pipeline can see it.
+#
+# The setup button and `configure_deps.py write` record where the external tools
+# and the interpreter live, and `start.bat` loads that file before launching the
+# server. Starting serve.py directly bypasses that, and the consequence is silent
+# rather than loud: the wrappers read their ROOT variables at import time, so with
+# nothing set they build relative paths and every predictor fails with
+# "checkpoint not found" — while the files are sitting exactly where the setup
+# recorded them.
+#
+# The reader lives in tools/_env.py because the dependency report needs the same
+# behaviour, and two copies of this had already drifted apart.
+def _load_env_local(path):
+    script_dir = os.path.join(ROOT, "tools")
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
+    try:
+        import _env
+        return _env.apply(ROOT)
+    except ImportError:
+        return []
+
+
+_APPLIED_ENV = _load_env_local(os.path.join(ROOT, ".env.local"))
+
 # Optional: env TF_SCHEME2_SRC points to an additional scheme2 source directory.
 # This repo's src/ already contains most scheme2 modules; inject an extra path only when needed.
 SCHEME2_SRC = os.environ.get("TF_SCHEME2_SRC", "")
@@ -2063,6 +2088,53 @@ def _build_result_dict(result, details, pdb_text, sequence, ss, mfe, elapsed, pd
     }
 
 
+_TOOL_SUMMARY = [
+    # (label, env var holding the root, relative path that must exist under it,
+    #  whether the pipeline is meaningfully degraded without it)
+    ("RhoFold+",       "RHOFOLD_ROOT",       os.path.join("pretrained", "rhofold_pretrained_params.pt"), True),
+    ("RNAbpFlow",      "RNABPFLOW_ROOT",     os.path.join("checkpoint", "RNA3DB.ckpt"),                 True),
+    ("DivideFold",     "TF_DIVIDEFOLD_ROOT", None,                                                      True),
+    ("trRosettaRNA2",  "TRRNA2_RUNNER",      None,                                                      False),
+    ("isRNAcirc",      "ISRNACIRC_BIN_DIR",  None,                                                      True),
+]
+
+
+def _print_tool_summary():
+    """One line per external tool: is it configured, and does the path exist.
+
+    This exists because an unset ROOT variable does not stop the pipeline. Each
+    predictor is called inside a try, so a missing one is skipped and the run
+    produces a worse ensemble with no visible error on this side — the only trace
+    was a line in the job log that appears minutes into a run. Reporting it at
+    startup turns a silent quality loss into something the operator sees before
+    pressing Predict.
+    """
+    if _APPLIED_ENV:
+        print("  .env.local: %d variable(s) applied (%s)"
+              % (len(_APPLIED_ENV), ", ".join(sorted(_APPLIED_ENV)[:4])
+                 + (", ..." if len(_APPLIED_ENV) > 4 else "")))
+    else:
+        print("  .env.local: not present (or already in the environment)")
+
+    for label, var, subpath, required in _TOOL_SUMMARY:
+        root = os.environ.get(var, "").strip()
+        if not root:
+            state = "NOT SET"
+        else:
+            probe = os.path.join(root, subpath) if subpath else root
+            if os.path.exists(probe):
+                state = "ok"
+            elif os.path.isdir(root) or os.path.isfile(root):
+                # The directory is right but the expected file under it is not.
+                state = "root ok, %s MISSING" % (subpath or "path")
+            else:
+                state = "path does not exist"
+        if state == "ok":
+            print("    %-15s ok        %s" % (label, root))
+        else:
+            print("    %-15s %-9s %s" % (label, state, root or "(%s unset)" % var))
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8877
     os.chdir(ROOT)
@@ -2085,6 +2157,11 @@ def main():
     print(f"TorusFold server: http://127.0.0.1:{port}/")
     print(f"  Static root: {ROOT}")
     print(f"  Web dir: {WEB_DIR}")
+    # Printing which external tools resolved, at startup, is the point: every
+    # predictor fails quietly when its ROOT variable is unset — the run continues
+    # and simply produces a worse ensemble — so the only place this was visible
+    # was a line in the job log, minutes in.
+    _print_tool_summary()
     print(f"  GET  /api/schema   — tunable parameters, defaults and bounds")
     print(f"  POST /api/predict  — run pipeline")
     print(f"  GET  /api/sse/{{jid}} — SSE streaming")

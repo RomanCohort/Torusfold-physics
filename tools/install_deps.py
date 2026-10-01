@@ -232,16 +232,53 @@ def survey_environments(extra: Optional[List[str]] = None) -> Dict:
             "conda": _conda_exe(), "count": len(probes)}
 
 
+def _conda_env_for(python: str) -> Optional[str]:
+    """The conda environment directory this interpreter belongs to, or None.
+
+    A conda distribution on PATH is not evidence that a given interpreter is a
+    conda environment. `conda install -p` was previously aimed at whatever
+    directory the interpreter sat in, so on a machine that has conda AND a normal
+    python.org installation, choosing the latter made conda target
+    `C:\\Python312` — not an environment, which either errors out or creates one
+    there. The interpreter has to actually live inside a conda prefix, or conda
+    is the wrong installer for it.
+    """
+    if not python:
+        return None
+    target = os.path.normcase(os.path.abspath(python))
+    for root in CONDA_ROOTS:
+        if not root:
+            continue
+        base = os.path.normcase(os.path.abspath(root))
+        # base environment
+        if target == os.path.join(base, "python.exe"):
+            return root
+        # a named environment directly under <root>\envs
+        envs = os.path.join(base, "envs")
+        if target.startswith(os.path.normcase(os.path.abspath(envs)) + os.sep):
+            rest = target[len(os.path.normcase(os.path.abspath(envs))) + 1:]
+            name = rest.split(os.sep)[0]
+            if name:
+                return os.path.join(envs, name)
+    return None
+
+
 def install_into_environment(python: str, missing: List[str], use_conda: bool = True) -> Dict:
     """Install the named imports into one interpreter.
 
     conda first for the scientific stack, because mixing a pip torch into a conda
     environment is how you get two BLAS libraries and a segfault; pip as the
     fallback because a couple of these packages are not on the conda channels.
+
+    conda is only used when the target interpreter is itself a conda environment.
+    For a plain Python installation there is nothing for conda to target and pip
+    is the only correct installer — which matters because ViennaRNA and dm-tree
+    have no conda-forge Windows build at all, so pip does the work either way.
     """
     by_import = {p[0]: p for p in PIPELINE_PACKAGES}
     result = {"installed": [], "failed": []}
-    conda = _conda_exe() if use_conda else None
+    install_with_conda = _conda_exe() if use_conda else None
+    conda_env = _conda_env_for(python) if install_with_conda else None
     for name in missing:
         spec = by_import.get(name)
         if not spec:
@@ -249,10 +286,8 @@ def install_into_environment(python: str, missing: List[str], use_conda: bool = 
         _, conda_name, pip_name, required, why = spec
         step_start("pkg:" + name, "%s (%s)" % (pip_name, why))
         cmd = None
-        if conda and shutil.which is not None:
-            # -p targets the environment by path, which is the only reliable way
-            # when the environment is not the active one.
-            cmd = [conda, "install", "-y", "-p", os.path.dirname(os.path.dirname(python)),
+        if install_with_conda and conda_env:
+            cmd = [install_with_conda, "install", "-y", "-p", conda_env,
                    "-c", "conda-forge", conda_name]
         try:
             if cmd:
@@ -388,6 +423,51 @@ MANUAL_TOOLS = [
                "GitHub-hosted; the team checkout is named DivideFold-main. The runner "
                "script (scripts/_dd_runner.py) ships with this repository.",
         "env": "TF_DIVIDEFOLD_ROOT",
+    },
+    # ── Scoring functions ────────────────────────────────────────────────────
+    # These are listed for a reason beyond "no download source": none of them is
+    # wired into the pipeline at all. The report used to omit them entirely, so a
+    # reader could reasonably conclude that the three score rows in the interface
+    # were backed by something. They are not — see the "not integrated" notes.
+    {
+        "id": "rsrnasp1",
+        "label": "rsRNASP1 (RNA statistical potential)",
+        "why": "Source is public at https://github.com/Tan-group/rsRNASP1, but it builds "
+               "with a Makefile and gcc for Linux and ships no Windows binary and no pip "
+               "package. NOT INTEGRATED: isrnaclong.py writes \"rsrnasp1\": None into the "
+               "result, so the interface's rsRNASP1 row can never show a value. Building "
+               "it under WSL and calling it would be new work, not configuration.",
+        "env": "(none — no wrapper reads an environment variable for this)",
+        "integrated": False,
+    },
+    {
+        "id": "dfire",
+        "label": "DFIRE (RNA scoring function)",
+        "why": "No download URL recorded in this repository. NOT INTEGRATED: nothing in "
+               "the pipeline computes it and no result key named DFIRE is emitted, so the "
+               "interface's DFIRE row can never show a value.",
+        "env": "(none)",
+        "integrated": False,
+    },
+    {
+        "id": "3drnascore",
+        "label": "3dRNAscore",
+        "why": "The authors distribute it as a web server and a REST API "
+               "(http://melolab.org/supmat.html) rather than a local binary. NOT "
+               "INTEGRATED: no result key named 3drnascore is emitted, so the interface's "
+               "3dRNAscore row can never show a value.",
+        "env": "(none)",
+        "integrated": False,
+    },
+    {
+        "id": "lociparse",
+        "label": "lociPARSE (pMoL / pNuL)",
+        "why": "Bundled with this repository as src/torusfold/scheme2/loci_quality.py and "
+               "implemented in numpy, so it needs no installation and is the one quality "
+               "score that does produce a value. TORUSFOLD_LOCIPARSE overrides its "
+               "location if the module is vendored elsewhere.",
+        "env": "TORUSFOLD_LOCIPARSE (optional)",
+        "integrated": True,
     },
 ]
 
@@ -1077,8 +1157,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("Paths to set:")
         for k, v in summary["paths"].items():
             print("   %-22s %s" % (k, v))
+    # Scoring functions that the interface displays but the pipeline never
+    # computes. Kept out of the manual list above because "NOT FOUND" would be the
+    # wrong message: installing them changes nothing until something calls them.
+    _unintegrated = [m for m in summary["manual"] if m.get("integrated") is False]
+    if _unintegrated:
+        print("Shown in the interface but not computed by the pipeline:")
+        for m in _unintegrated:
+            print("   %-16s [not integrated]" % m["id"])
+            print("        %s" % m.get("why", ""))
+    # Bundled with the repository: nothing to install, and listing it as a manual
+    # step would print "NOT FOUND" for something that needs no finding.
+    _bundled = [m for m in summary["manual"] if m.get("integrated") is True]
+    if _bundled:
+        print("Bundled with this repository (no installation needed):")
+        for m in _bundled:
+            print("   %-16s [in-tree]" % m["id"])
+            print("        %s" % m.get("why", ""))
+    _manual = [m for m in summary["manual"]
+               if m.get("integrated") is None]
     print("Manual steps still required:")
-    for m in summary["manual"]:
+    for m in _manual:
         state = ("already present at %s" % m["detected"]) if m.get("detected") else "NOT FOUND"
         print("   %-16s [%s]" % (m["id"], state))
         if not m.get("detected"):

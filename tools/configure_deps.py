@@ -35,6 +35,17 @@ from typing import Dict, List, Optional, Tuple
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Publish .env.local before anything reads a tool variable. Without this the
+# wrapper check below imports the wrappers with an empty environment, they build
+# relative paths, and the report claims RhoFold+ and RNAbpFlow are missing while
+# both checkpoints are present at the recorded locations.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import _env
+    _APPLIED_ENV = _env.apply(REPO)
+except ImportError:                     # pragma: no cover - file always ships
+    _APPLIED_ENV = []
+
 # ── What each tool is, and how to tell whether it is present ─────────────────
 #
 # `probe` is a path relative to the tool's root. It is chosen to be the file the
@@ -159,15 +170,65 @@ PIPELINE_IMPORTS = ["numpy", "scipy", "RNA", "torch", "openmm",
 # Interpreters worth testing, in preference order. The names are generic
 # conventions (conda envs live under anaconda3/envs or ana/envs); none of them is
 # a hard-coded requirement, and any failure just moves on to the next.
+#
+# A plain python.org installation is included deliberately and is listed FIRST.
+# The whole dependency set the pipeline needs has Windows wheels on PyPI —
+# numpy, scipy, ViennaRNA, OpenMM and torch all publish win_amd64 builds for
+# CPython 3.10 through 3.14 — so conda is a convenience, not a requirement. An
+# earlier version of this list contained only conda paths, which meant a machine
+# with a normal Python installation found nothing and was told to install conda.
 CANDIDATE_INTERPRETERS = [
+    # python.org installs, including the per-user default location.
+    os.path.expanduser(r"~\AppData\Local\Programs\Python\Python314\python.exe"),
+    os.path.expanduser(r"~\AppData\Local\Programs\Python\Python313\python.exe"),
+    os.path.expanduser(r"~\AppData\Local\Programs\Python\Python312\python.exe"),
+    os.path.expanduser(r"~\AppData\Local\Programs\Python\Python311\python.exe"),
+    r"C:\Python314\python.exe",
+    r"C:\Python313\python.exe",
+    r"C:\Python312\python.exe",
+    r"C:\Python311\python.exe",
+    # The official "py" launcher, which resolves whatever is actually installed.
+    os.path.expanduser(r"~\AppData\Local\Programs\Python\Launcher\py.exe"),
+    # conda distributions, in the layouts seen in practice.
     r"C:\ana\envs\comfyui\python.exe",
     r"C:\ana\envs\circrna3d\python.exe",
     r"C:\ana\envs\bio\python.exe",
+    r"C:\ana\python.exe",
     r"C:\anaconda3\python.exe",
     r"C:\ProgramData\anaconda3\python.exe",
+    r"C:\miniconda3\python.exe",
+    r"C:\ProgramData\miniconda3\python.exe",
     os.path.expanduser(r"~\miniconda3\python.exe"),
     os.path.expanduser(r"~\anaconda3\python.exe"),
+    os.path.expanduser(r"~\miniforge3\python.exe"),
+    os.path.expanduser(r"~\.conda\python.exe"),
 ]
+
+
+def find_conda() -> Optional[str]:
+    """Where conda lives, if it does. Used only to report the options.
+
+    Returns the conda executable path, or None on a machine without a conda
+    distribution. Nothing in the pipeline requires conda; this exists so the
+    setup advice can name the right command for the machine it is running on.
+    """
+    from shutil import which
+    found = which("conda")
+    if found:
+        return found
+    for exe in (
+        r"C:\ana\Scripts\conda.exe",
+        r"C:\anaconda3\Scripts\conda.exe",
+        r"C:\ProgramData\anaconda3\Scripts\conda.exe",
+        r"C:\miniconda3\Scripts\conda.exe",
+        r"C:\ProgramData\miniconda3\Scripts\conda.exe",
+        os.path.expanduser(r"~\anaconda3\Scripts\conda.exe"),
+        os.path.expanduser(r"~\miniconda3\Scripts\conda.exe"),
+        os.path.expanduser(r"~\miniforge3\Scripts\conda.exe"),
+    ):
+        if os.path.isfile(exe):
+            return exe
+    return None
 
 
 def check_interpreters() -> List[Dict]:
@@ -185,7 +246,7 @@ def check_interpreters() -> List[Dict]:
     out = []
     # A tiny helper keeps the probe readable and avoids nested-quote escaping.
     helper = (
-        "import importlib.util as u, json\n"
+        "import importlib.util as u, json, sys\n"
         "def safe(m):\n"
         "    try: return u.find_spec(m)\n"
         "    except Exception: return None\n"
@@ -197,13 +258,16 @@ def check_interpreters() -> List[Dict]:
         "           'cuda_available': bool(torch.cuda.is_available())}\n"
         "except Exception as exc:\n"
         "    gpu = {'error': repr(exc)}\n"
-        "print(json.dumps({'missing': missing, 'torch': gpu}))\n"
+        "print(json.dumps({'missing': missing, 'torch': gpu,\n"
+        "                  'py': list(sys.version_info[:3]),\n"
+        "                  'exe': sys.executable}))\n"
     ) % (PIPELINE_IMPORTS,)
 
     for exe in CANDIDATE_INTERPRETERS:
         if not os.path.isfile(exe):
             continue
-        entry = {"path": exe, "usable": False, "missing": None, "torch": None}
+        entry = {"path": exe, "usable": False, "missing": None, "torch": None,
+                 "py": None, "resolved": None}
         try:
             p = subprocess.run([exe, "-c", helper], capture_output=True, text=True,
                                timeout=180)
@@ -212,6 +276,10 @@ def check_interpreters() -> List[Dict]:
                 data = json.loads(last)
                 entry["missing"] = data["missing"]
                 entry["torch"] = data["torch"]
+                entry["py"] = data.get("py")
+                # py.exe is a launcher: report which interpreter it actually chose,
+                # otherwise the table shows two "py.exe" rows that look identical.
+                entry["resolved"] = data.get("exe")
                 entry["usable"] = not data["missing"]
         except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
             entry["error"] = str(exc)[:120]
@@ -676,6 +744,55 @@ def write_activate_bat(env: Dict[str, str], path: str) -> None:
         f.write("\n".join(lines) + "\n")
 
 
+def _no_interpreter_advice() -> List[str]:
+    """What to do when no candidate interpreter can run the pipeline.
+
+    Deliberately does not lead with "install Anaconda". Every dependency the
+    pipeline imports — numpy, scipy, ViennaRNA, OpenMM, torch and the RhoFold+
+    helpers — publishes a Windows wheel on PyPI for CPython 3.10-3.14, so a
+    python.org installer plus pip is sufficient. conda is offered second, for a
+    machine that already has it, because it is genuinely convenient for a
+    PyTorch build matched to a particular GPU.
+    """
+    out = []
+    out.append("")
+    out.append("  No interpreter here can run the pipeline.")
+    out.append("")
+    out.append("  Option 1 - plain Python (no Anaconda needed, ~25 MB download)")
+    out.append("    1. Install Python 3.12 or newer from https://www.python.org/downloads/")
+    out.append("       Tick \"Add python.exe to PATH\" in the installer.")
+    out.append("    2. Open a NEW terminal, then run:")
+    out.append("         python -m pip install --upgrade pip")
+    out.append("         python -m pip install numpy scipy ViennaRNA openmm \\")
+    out.append("             matplotlib ml_collections biopython dm-tree einops \\")
+    out.append("             gemmi freesasa pandas transformers")
+    out.append("         python -m pip install torch")
+    out.append("       Every one of those has a Windows wheel; no compiler is required.")
+    out.append("    3. For an AMD GPU, install the ROCm build of torch instead of the")
+    out.append("       default one - see https://pytorch.org/get-started/locally/")
+    out.append("    4. Re-run:  start.bat --setup")
+    conda = find_conda()
+    out.append("")
+    if conda:
+        out.append("  Option 2 - the conda you already have  (%s)" % conda)
+        out.append("        conda create -n torusfold -c conda-forge python=3.12 \\")
+        out.append("            numpy scipy openmm pytorch matplotlib pandas \\")
+        out.append("            biopython einops gemmi")
+        out.append("        conda activate torusfold")
+        out.append("        pip install ViennaRNA dm-tree freesasa transformers")
+        out.append("      ViennaRNA is not on conda-forge for Windows and dm-tree has no")
+        out.append("      conda-forge build, so those two come from pip either way.")
+    else:
+        out.append("  Option 2 - Anaconda / Miniconda")
+        out.append("      Not installed on this machine. It is not required: Option 1")
+        out.append("      installs everything. If you prefer conda anyway, get Miniconda")
+        out.append("      from https://docs.conda.io/en/latest/miniconda.html and then")
+        out.append("      run the commands in Option 1 with `pip` from that environment.")
+    out.append("")
+    out.append("  Either way, finish with:  python tools\\configure_deps.py write")
+    return out
+
+
 def render(result: Dict) -> str:
     out = []
     tools = result["tools"]
@@ -726,12 +843,17 @@ def render(result: Dict) -> str:
         torch_info = i.get("torch") or {}
         gpu = "GPU" if torch_info.get("cuda_available") else "cpu"
         ver = torch_info.get("torch") or torch_info.get("error") or "no torch"
-        out.append("  %s %-52s %s" % (mark, i["path"], gpu))
+        pyv = ".".join(str(x) for x in i["py"]) if i.get("py") else "?"
+        out.append("  %s %-48s py%-7s %s" % (mark, i["path"], pyv, gpu))
+        # py.exe is a launcher, so the path in the table is not the interpreter
+        # that ran the probe. Name the one it resolved to.
+        if i.get("resolved") and os.path.normcase(i["resolved"]) != os.path.normcase(i["path"]):
+            out.append("          -> %s" % i["resolved"])
         if i.get("missing"):
             out.append("          missing: %s" % ", ".join(i["missing"]))
         out.append("          torch: %s" % ver)
     if not result.get("interpreter"):
-        out.append("  none of the candidate interpreters can run the pipeline")
+        out.extend(_no_interpreter_advice())
 
     out.append("")
     out.append("Python packages in the running interpreter")

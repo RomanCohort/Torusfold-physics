@@ -44,13 +44,27 @@ if exist "activate_deps.bat" call "activate_deps.bat" >nul 2>&1
 set "PY="
 if defined TORUSFOLD_PYTHON if exist "%TORUSFOLD_PYTHON%" set "PY=%TORUSFOLD_PYTHON%"
 if not defined PY (
+  REM python.org installs first: the pipeline does not need conda, and a machine
+  REM with a normal Python installation was previously told to install Anaconda.
   for %%P in (
+    "%LOCALAPPDATA%\Programs\Python\Python314\python.exe"
+    "%LOCALAPPDATA%\Programs\Python\Python313\python.exe"
+    "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
+    "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
+    "C:\Python314\python.exe"
+    "C:\Python313\python.exe"
+    "C:\Python312\python.exe"
+    "C:\Python311\python.exe"
     "C:\ana\envs\comfyui\python.exe"
     "C:\ana\envs\circrna3d\python.exe"
     "C:\ana\envs\bio\python.exe"
+    "C:\anaconda3\python.exe"
+    "C:\ProgramData\anaconda3\python.exe"
+    "C:\miniconda3\python.exe"
+    "C:\ProgramData\miniconda3\python.exe"
     "%USERPROFILE%\miniconda3\python.exe"
     "%USERPROFILE%\anaconda3\python.exe"
-    "C:\ProgramData\miniconda3\python.exe"
+    "%USERPROFILE%\miniforge3\python.exe"
   ) do (
     if not defined PY if exist %%P set "PY=%%~P"
   )
@@ -63,10 +77,24 @@ if not defined PY (
   echo.
   echo   No Python found.
   echo.
-  echo   Point this at one that has numpy, ViennaRNA and OpenMM:
+  echo   Python 3.12 or newer is needed. Anaconda is NOT required: every
+  echo   package the pipeline imports has a Windows installer on PyPI.
+  echo.
+  echo   1. Install Python from  https://www.python.org/downloads/
+  echo      Tick "Add python.exe to PATH" in the installer.
+  echo   2. Open a NEW terminal and run:
+  echo        python -m pip install numpy scipy ViennaRNA openmm matplotlib
+  echo        python -m pip install ml_collections biopython dm-tree einops
+  echo        python -m pip install gemmi freesasa pandas transformers torch
+  echo      For an AMD GPU use the ROCm build of torch from pytorch.org.
+  echo   3. Run this launcher again.
+  echo.
+  echo   If you already have an interpreter somewhere else:
   echo       set TORUSFOLD_PYTHON=C:\path\to\python.exe
-  echo   or create one:
-  echo       conda create -n torusfold -c conda-forge python=3.11 numpy scipy viennarna openmm pytorch
+  echo   Or with conda, which also works:
+  echo       conda create -n torusfold -c conda-forge python=3.12 numpy scipy openmm pytorch
+  echo       conda activate torusfold
+  echo       pip install ViennaRNA dm-tree freesasa transformers
   echo.
   pause
   exit /b 1

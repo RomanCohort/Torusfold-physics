@@ -1540,12 +1540,29 @@ def isrnaclong_pipeline(
                     # 20-min CG->allatom rebuild). merged_aa is the segmented-assembly
                     # result and retains the global fold + all-atom coordinates. Only fall
                     # back to the RhoFold+ P-only path when merged_aa is absent.
+                    #
+                    # "Exists" is not enough to accept it. An empty file — the shape a
+                    # failed conversion leaves behind — or one left over from an earlier
+                    # run both satisfy exists() and would be fed to the refinement as
+                    # though it were this run's all-atom structure. The file is checked
+                    # for atoms and for having been written during this run.
                     _merged_aa = str(output_path / "cg2aa" / "merged_aa.pdb")
-                    if Path(_merged_aa).exists():
+                    _merged_aa_atoms = _count_pdb_atoms(_merged_aa)
+                    _merged_aa_fresh = (
+                        _merged_aa_atoms > 0
+                        and os.path.getmtime(_merged_aa) >= t0
+                    ) if _merged_aa_atoms > 0 else False
+                    if _merged_aa_fresh:
                         refine_input = _merged_aa
                         if verbose:
-                            print(f"    round 0: using merged_aa.pdb directly (already all-atom, skipping CG->allatom)")
+                            print(f"    round 0: using merged_aa.pdb directly "
+                                  f"({_merged_aa_atoms} atoms, already all-atom, "
+                                  f"skipping CG->allatom)")
                     else:
+                        if verbose and _merged_aa_atoms == 0 and Path(_merged_aa).exists():
+                            print("    round 0: merged_aa.pdb holds no atoms "
+                                  "(the CG->allatom conversion failed); starting from "
+                                  "the assembled coordinates instead")
                         _start_pdb = str(output_path / "start_rhofold.pdb")
                         _coords_start = coords_vfold.copy()
                         if L > 1:
@@ -1839,13 +1856,16 @@ def isrnaclong_pipeline(
                 print(f"    5-bead refinement skipped: {e}")
 
     # ── Level 2.5: CG->allatom after REMD (convert the final CG coordinates to all-atom) ──
+    # Defined here rather than inside the conversion branch: the checkpoint save below
+    # reads it, and a run restored from a checkpoint took the other branch and left it
+    # unbound.
+    _l25_ok = False
     if "final_aa_pdb" in ckpt:
         _final_aa_path = ckpt.get("final_aa_pdb", str(output_path / "final_allatom.pdb"))
         if verbose:
             print(f"\n[Level 2.5] restored from checkpoint: {_final_aa_path}")
     elif best_coords is not None and len(best_coords) == len(sequence):
         _final_aa_path = str(output_path / "final_allatom.pdb")
-        _l25_ok = False
         if verbose:
             print(f"\n[Level 2.5] CG->all-atom after REMD: {_final_aa_path}")
         try:
@@ -1855,10 +1875,17 @@ def isrnaclong_pipeline(
             _cg2aa_t0 = time.time()
             cg_to_allatom(_tmp_cg, _final_aa_path, sequence)
             _cg2aa_elapsed = time.time() - _cg2aa_t0
+            _l25_atoms = _count_pdb_atoms(_final_aa_path)
             if verbose:
-                _sz = os.path.getsize(_final_aa_path) / 1024
-                print(f"    all-atom output: {_final_aa_path} ({_sz:.0f} KB)")
-            _l25_ok = True
+                _sz = os.path.getsize(_final_aa_path) / 1024 if os.path.exists(_final_aa_path) else 0
+                print(f"    all-atom output: {_final_aa_path} ({_sz:.0f} KB, {_l25_atoms} atoms)")
+            # A converter that exits 0 without writing atoms is not a success. The
+            # checkpoint must not record it as one, or the next run restores an empty
+            # structure and skips the conversion entirely.
+            if _l25_atoms > 0:
+                _l25_ok = True
+            elif verbose:
+                print("    all-atom output holds no atoms; Level 2.5 is NOT complete")
 
             # ── Level 2.5b: post-conversion CG->AA relaxation (far-pair restraints prevent drifting apart) ──
             # run one short relaxation with the far_pairs restraints immediately after
@@ -1891,7 +1918,10 @@ def isrnaclong_pipeline(
                     "cg_atoms": len(best_coords),
                     "aa_atoms": _n_aa_atoms,
                     "conversion_time": float(_cg2aa_elapsed),
-                    "success": True,
+                    # Derived from the atom count, not asserted. This said True even
+                    # when the conversion had written nothing, so the diagnostics file
+                    # reported success for the failure it was meant to record.
+                    "success": _n_aa_atoms > 0,
                 }
                 _diag_cg2aa_path = output_path / "_plots" / "03_level2_5_cg2aa_diag.json"
                 _diag_cg2aa_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3058,20 +3088,48 @@ def _write_coords_pdb(coords, sequence, output_path):
         f.write("\n".join(lines))
 
 
+def _count_pdb_atoms(path) -> int:
+    """ATOM records in a PDB file, or 0 if it is missing or unreadable.
+
+    Used to tell "a structure was written" from "a file was written". A failed
+    conversion leaves a syntactically valid PDB containing nothing but a header
+    and END, which is indistinguishable from a real result by existence alone.
+    """
+    n = 0
+    try:
+        with open(path, "r", errors="replace") as f:
+            for line in f:
+                if line.startswith("ATOM"):
+                    n += 1
+    except OSError:
+        return 0
+    return n
+
+
 def _merge_allatom_pdbs(aa_pdb_paths, seg_list, output_path, full_sequence):
     """Merge the segmented all-atom PDBs into one complete all-atom PDB in residue order.
 
     Copy the original ATOM lines verbatim (preserving PDB column alignment), changing
     only the residue numbering.
+
+    Raises ValueError when no segment contributed atoms. A segment whose CG->all-atom
+    conversion failed arrives here as None and is skipped, so a run in which every
+    segment failed used to write a file containing just a HEADER and END and report
+    success. That file then satisfied the caller's `exists()` test, was handed to the
+    refinement as though it were an all-atom structure, and the failure surfaced much
+    later as a confusing error — or not at all. Refusing to produce the file turns the
+    failure back into a failure at the point it happened.
     """
     lines = ["HEADER    isRNAcircLong merged allatom"]
     atom_idx = 0
     res_offset = 0
+    n_segments_used = 0
 
     for seg_idx, (aa_pdb, seg) in enumerate(zip(aa_pdb_paths, seg_list)):
         if aa_pdb is None:
             continue
         seg_res_count = 0
+        seg_atoms = 0
         with open(aa_pdb) as f:
             for line in f:
                 if not line.startswith("ATOM"):
@@ -3084,6 +3142,7 @@ def _merge_allatom_pdbs(aa_pdb_paths, seg_list, output_path, full_sequence):
                     local_res = seg_res_count + 1
                 global_res = res_offset + local_res
                 atom_idx += 1
+                seg_atoms += 1
                 # keep the original PDB column alignment; change only atom serial (7-11)
                 # and resSeq (22-26)
                 new_line = (
@@ -3096,7 +3155,18 @@ def _merge_allatom_pdbs(aa_pdb_paths, seg_list, output_path, full_sequence):
                 lines.append(new_line)
                 seg_res_count = local_res
         res_offset += seg_res_count
+        n_segments_used += 1
+
+    if atom_idx == 0:
+        raise ValueError(
+            "CG->all-atom produced no atoms: all %d segment(s) failed "
+            "(of %d), so there is no all-atom structure to merge. The usual "
+            "cause is CG_to_allatom.exe being unavailable — set "
+            "ISRNACIRC_BIN_DIR to a directory holding it plus its DLLs."
+            % (len(aa_pdb_paths), len(seg_list))
+        )
 
     lines.append("END")
     with open(output_path, "w") as f:
         f.write("\n".join(lines))
+    return atom_idx
