@@ -125,8 +125,24 @@
 /* ═══════════════ BASE ═══════════════ */
 *,*::before,*::after{box-sizing:border-box}
 html{font-size:15px;-webkit-text-size-adjust:100%}
+/* Exactly the viewport, and never taller.
+ *
+ * This was `min-height:100vh`, which sets a floor and no ceiling. With a ceiling
+ * missing, `#main` — `flex:1 1 auto` against a parent whose height was itself
+ * content-driven — fell back to its auto height, so the workspace grew to fit the
+ * left panel instead of the left panel scrolling inside the workspace. The left
+ * panel's content (parameters, progress, sequence) came to 2103px, which made
+ * `#main` 2103px, which pushed 3D canvas to 2103px tall and 1325px above the top
+ * of an 808px viewport: the structure was rendered, every checkpoint loaded, and
+ * completely off-screen. Nothing in the viewer was ever broken.
+ *
+ * A definite height is what makes `flex:1 1 auto` mean "take the leftover space"
+ * rather than "take what you need". `100dvh` after `100vh` for mobile browsers
+ * whose toolbars change the visible height; the first declaration is the fallback
+ * for anything that does not understand the second. */
 body{
-  margin:0;min-height:100vh;display:flex;flex-direction:column;overflow-x:hidden;
+  margin:0;height:100vh;height:100dvh;display:flex;flex-direction:column;
+  overflow:hidden;
   font-family:var(--font-ui);font-size:var(--t-base);line-height:1.55;
   color:var(--ink);background:var(--bg);
   -webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;
@@ -630,6 +646,15 @@ input[type="range"]::-moz-range-thumb{
 #viewer-placeholder svg{color:var(--hair-2)}
 #viewer-placeholder span{font-size:var(--t-md);color:var(--ink-2)}
 #viewer-placeholder small{font-size:var(--t-xs);color:var(--ink-3);letter-spacing:.02em}
+/* The demo button and its qualifier. The button is inside a pointer-events:none
+   overlay, so it has to opt back in or it is unclickable — which is exactly how it
+   would look: present, hoverable-looking, and inert. */
+#viewer-placeholder #btn-demo-structure{
+  pointer-events:auto;margin-top:4px;
+}
+#viewer-placeholder .viewer-placeholder-note{
+  max-width:34ch;line-height:1.5;opacity:.8;
+}
 
 /* Which checkpoint is on screen. Sits opposite the placeholder's top-left
    nothing, so it does not compete with the title plate in the static viewer. */
@@ -729,7 +754,50 @@ input[type="range"]::-moz-range-thumb{
 #tab-sequence:checked ~ .tab-content[data-tab="sequence"],
 #tab-thermo:checked ~ .tab-content[data-tab="thermo"],
 #tab-shape:checked ~ .tab-content[data-tab="shape"],
+#tab-checkpoint:checked ~ .tab-content[data-tab="checkpoint"],
 #tab-console:checked ~ .tab-content[data-tab="console"]{display:block}
+
+/* ── Resume state (checkpoint) ──
+   Every value here is a fact read off the output directory, and the badge is the
+   one thing that decides what the next run does, so it carries the colour. */
+.ckpt-state{
+  display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;
+  padding:9px 10px;margin-bottom:8px;
+  background:var(--well);border:1px solid var(--hair);border-radius:5px;
+}
+.ckpt-badge{
+  font-family:var(--font-mono);font-size:var(--t-2xs);letter-spacing:.04em;
+  text-transform:uppercase;padding:2px 6px;border-radius:3px;
+  background:var(--chassis);border:1px solid var(--hair-2);color:var(--ink-3);
+}
+.ckpt-badge.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,transparent)}
+.ckpt-badge.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 45%,transparent)}
+.ckpt-badge.bad{color:var(--err);border-color:color-mix(in srgb,var(--err) 45%,transparent)}
+.ckpt-line{font-size:var(--t-sm);color:var(--ink-2);line-height:1.45}
+
+.ckpt-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.ckpt-grid .scalar-card .v{font-size:var(--t-md)}
+
+.ckpt-fields{display:flex;flex-wrap:wrap;gap:4px}
+.ckpt-chip{
+  font-family:var(--font-mono);font-size:var(--t-2xs);
+  padding:2px 5px;border-radius:3px;
+  background:var(--well);border:1px solid var(--hair);color:var(--ink-2);
+}
+.ckpt-chip.orphan{color:var(--err);border-color:color-mix(in srgb,var(--err) 40%,transparent)}
+.ckpt-arrays{display:flex;flex-direction:column;gap:3px}
+.ckpt-array{
+  display:flex;justify-content:space-between;gap:8px;
+  font-family:var(--font-mono);font-size:var(--t-2xs);color:var(--ink-2);
+}
+.ckpt-array .sz{color:var(--ink-3)}
+.ckpt-array.missing{color:var(--err)}
+
+.ckpt-actions{display:flex;flex-wrap:wrap;gap:6px}
+.ckpt-note{
+  margin-top:7px;font-size:var(--t-2xs);color:var(--ink-3);line-height:1.5;
+}
+.ckpt-note.is-error{color:var(--err)}
 
 .panel{padding:var(--sp-4) var(--sp-3);border-bottom:1px solid var(--hair)}
 .panel:last-child{border-bottom:none}
@@ -840,6 +908,16 @@ input[type="range"]::-moz-range-thumb{
 .feedback-tag{display:flex;align-items:center;gap:9px;font-size:var(--t-md);color:var(--ink-2);cursor:pointer}
 .feedback-tag:hover{color:var(--ink)}
 .feedback-body .btn-primary{width:100%;margin-top:var(--sp-4)}
+/* What Submit will do, and then what it did. Written as a line of prose rather
+   than a toast because it says where the note went, which is not something a
+   message that disappears in three seconds can carry. */
+.feedback-status{
+  margin-top:10px;padding:8px 10px;border-radius:5px;
+  font-size:var(--t-sm);line-height:1.5;
+  background:var(--well);border:1px solid var(--hair);color:var(--ink-2);
+}
+.feedback-status.is-ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 40%,transparent)}
+.feedback-status.is-warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent)}
 .feedback-history{margin-top:var(--sp-4);padding-top:var(--sp-3);border-top:1px solid var(--hair);
   font-size:var(--t-sm);color:var(--ink-3)}
 
@@ -917,15 +995,27 @@ msp-plugin .msp-plugin{position:static!important}
 #viewer > div{position:static!important;width:100%!important;height:100%!important;overflow:visible!important}
 
 /* ═══════════════ RESPONSIVE ═══════════════ */
-/* Below the width where twelve columns fit, the strip scrolls sideways rather
-   than wrapping onto more rows. Wrapping is what made a twelve-stage pipeline
-   look like a six-stage one: the browser quietly pushed the rest onto rows the
-   reader has no reason to connect to the first. The nth-child border rules that
-   used to live here were written for six tiles and drew the cell borders in the
-   wrong places once there were twelve. */
+/* No fixed minimum on the pipeline tracks.
+ *
+ * These were `minmax(104px,1fr)`, `minmax(96px,1fr)` and `minmax(88px,1fr)`. A
+ * grid track will not shrink below its minmax minimum, and when the minimums add
+ * up to more than the container the grid does not compress — it overflows. At the
+ * 1280px breakpoint twelve 104px columns plus twelve 1px borders need 1260px, and
+ * the strip's container is 1224px, so the last tile sat 24px outside the strip and
+ * was clipped. The media queries then made it worse on narrower viewports rather
+ * than better, which is why this read as "乱" at every size.
+ *
+ * `minmax(0,1fr)` lets the columns take exactly the container's width divided by
+ * twelve. Labels wrap or ellipsize inside a tile; nothing spills out of the strip.
+ *
+ * An earlier note here claimed these minimums "keep the twelve tiles on one
+ * scrollable row". There is no scroll container — `overflow-x:auto` on the strip
+ * never had anything to scroll because a grid that exceeds its box is not made
+ * scrollable by that property alone, and the strip has no other clipping ancestor.
+ * The claim was describing an intention, not the behaviour. */
 @media (max-width:1280px){
   :root{--panel-w:290px;--rail:246px}
-  .pipeline{grid-template-columns:repeat(12,minmax(104px,1fr));overflow-x:auto}
+  .pipeline{grid-template-columns:repeat(12,minmax(0,1fr))}
 }
 @media (max-width:1024px){
   :root{--panel-w:264px;--rail:230px}
@@ -939,15 +1029,20 @@ msp-plugin .msp-plugin{position:static!important}
   .left.collapsed{width:100%;max-height:0}
   aside.collapsed{width:100%;max-height:0}
   .panel-toggle{display:none}
-  #viewer-wrap{min-height:52vh;flex:1 1 auto}
+  /* In the stacked layout the viewport is a row in the scroll, so it needs a real
+     minimum rather than 52vh: 44vh of sequence panel plus the parameters above it
+     can leave the flex item almost nothing. */
+  #viewer-wrap{min-height:max(52vh,320px);flex:1 1 auto}
   .right{flex-direction:column;overflow:visible}
-  .pipeline{grid-template-columns:repeat(12,minmax(96px,1fr))}
+  /* Stacked, the strips are below the fold of the hero, so drop the tags: at this
+     width twelve tiles have 5-8 characters of room each and a clipped tag is noise
+     rather than information. The stage name and number stay. */
+  .pipe-tag{display:none}
   .hero-lede h1{font-size:var(--t-xl)}
 }
 @media (max-width:560px){
   :root{--sp-4:12px}
   .brand-sub{display:none}
-  .pipeline{grid-template-columns:repeat(12,minmax(88px,1fr))}
   .metric-row{grid-template-columns:74px 1fr 46px}
 }
 

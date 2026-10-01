@@ -110,15 +110,31 @@
      * 'P' for nucleic acids, and this pipeline's structures have a P on every
      * residue, so the ribbon path is reachable.
      *
+     * A ribbon can only be traced through backbone carbons, and the coarse-grained
+     * levels write phosphate-only traces, so those are drawn as sticks — a style
+     * that always renders — whatever their length. See _hasBackbone.
+     *
      * Everything else stays as it was. Atom-level styles are kept because they
-     * are the honest view of what the pipeline actually produced — but they are
-     * not the default, because on a 42,831-atom structure they are unreadable and
-     * slower (stick 114 ms, ribbon 210 ms, and stick lights 8% of the canvas
-     * against the ribbon's 15%). */
+     * are the honest view of what the pipeline actually produced. */
     _styleFor(kind) {
       const op = this._surfaceOpacity;
+      // A ribbon needs a backbone to trace; without one 3Dmol draws nothing at
+      // all in cartoon mode. Every kind that builds on `cartoon` has to know
+      // this, not just the cartoon kind itself.
+      const ribbonable = this._hasBackbone();
+      // Very short chains get thicker sticks and larger spheres so a handful of
+      // atoms reads as a structure rather than as specks.
+      const size = this._structureSize();
+      const tiny = size > 0 && size < 100;
+
       switch (kind) {
         case 'surface':
+          if (!ribbonable) {
+            // The VDW surface is what this representation is for; the base style
+            // only needs to be visible underneath it.
+            return tiny ? { stick: { radius: 0.3 }, sphere: { scale: 0.5 } }
+                        : { stick: { radius: 0.14 } };
+          }
           return { cartoon: { ribbon: true }, stick: { radius: 0.1, opacity: Math.max(0.35, op) } };
         case 'ball-stick':
           return { stick: { radius: 0.16 }, sphere: { scale: 0.22 } };
@@ -129,7 +145,55 @@
           return { stick: { radius: 0.12 }, sphere: { scale: 0.14 } };
         case 'cartoon':
         default:
+          if (!ribbonable || tiny) {
+            // No ribbon to build, or too short for one to carry any ink: sticks
+            // and spheres, which draw in both cases.
+            return { stick: { radius: 0.3 }, sphere: { scale: 0.5 } };
+          }
           return { cartoon: { ribbon: true, thickness: 1.4 } };
+      }
+    }
+
+    /* Whether a ribbon can be built from this model at all.
+     *
+     * The deciding factor is not chain length, it is backbone atoms. A ribbon is
+     * traced through the backbone carbons, so a phosphate-only trace — which is
+     * what the coarse-grained levels produce — has nothing to trace and 3Dmol
+     * draws literally nothing: measured on this build, ten phosphate atoms in
+     * cartoon mode covered 0.00% of the canvas, while the same atoms as sticks
+     * covered 6.41%. Level 1 and 1.5 write P-only files, so this is the whole of
+     * the early run, not an edge case.
+     *
+     * Length was the earlier proxy for this and it was a guess that happened to
+     * give the right answer for the wrong reason. Counting the atoms answers the
+     * actual question, and does it for a long P-only chain too. */
+    _hasBackbone() {
+      try {
+        if (!this.model) return false;
+        const n = this.model.selectedAtoms({ elem: 'C' }).length;
+        return n > 0;
+      } catch (e) {
+        // If the selection API is unavailable, assume it can be drawn: falling
+        // back to sticks unnecessarily is a small loss, refusing to draw is a
+        // blank panel.
+        return true;
+      }
+    }
+
+    /* How big the loaded structure is, for style decisions. Prefers residue count
+       because that is what a representation is built along; falls back to atoms. */
+    _structureSize() {
+      try {
+        if (this._residueCount) return this._residueCount;
+        if (!this.model) return 0;
+        const seen = new Set();
+        for (const a of this.model.selectedAtoms({})) {
+          seen.add((a.chain || '') + ':' + a.resi);
+        }
+        this._residueCount = seen.size;
+        return this._residueCount;
+      } catch (e) {
+        return 0;
       }
     }
 
@@ -192,6 +256,9 @@
       try { v.removeAllModels(); } catch (e) { /* none */ }
       this._surfaceId = null;
       this._colorFn = null;
+      // Per-model cache; see the note in updateStructure. A mount is always a
+      // different model from whatever was loaded before.
+      this._residueCount = null;
 
       this.model = v.addModel(pdb, 'pdb');
       // Confidence lives in the B-factor column of the coarse-grained output.
@@ -237,6 +304,17 @@
 
       this.pdb = pdb;
       this.model = v.addModel(pdb, 'pdb');
+      /* The residue count is cached per model and this is a different model, so the
+         cache has to go with the old one.
+
+         It did not, and the consequence was not a stale label: `_styleFor` chooses a
+         representation from the residue count, so loading the 2,013 nt demo after a
+         12-residue leftover kept the count at 12 and asked for the short-chain style
+         — stick radius 0.3 with sphere scale 0.5, chosen for ten to a hundred atoms.
+         On 42,831 atoms that is a solid ball of overlapping spheres, and it is what
+         the panel showed. The file that reads as "atom-level styles are a solid
+         mass" had the same cause. */
+      this._residueCount = null;
       // Rebuild the colour function against the new residue list: the same
       // scheme has to map onto whatever residues this file actually contains.
       this._colorFn = (keepColor && keepColor.__perResidue)

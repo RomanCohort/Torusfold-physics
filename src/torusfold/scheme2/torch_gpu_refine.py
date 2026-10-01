@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
@@ -81,6 +81,7 @@ def torch_gpu_refine(
     use_staged_tri: bool = False,
     tri_stage_config: Optional[dict] = None,
     lambdas: Optional[Tuple[float, ...]] = None,  # added: custom lambda values
+    on_report: Optional[Callable] = None,
 ) -> Tuple[str, float, dict]:
     """torch GPU-accelerated refinement (interface compatible with openmm_gpu_refine).
 
@@ -255,9 +256,31 @@ def torch_gpu_refine(
         # Bug 8 fix: use custom lambdas or defaults
         if lambdas is None:
             lambdas = (1.0, 0.95, 0.90, 0.85, 0.80, 0.75, 0.70, 0.65)
-        n_lam = len(lambdas)
-        n_t = remd_n_replicas // n_lam
-        _lambdas = lambdas
+        # The replica budget is split into a temperature axis and a lambda axis, and
+        # the grid is their product — so both axes have to be at least 1.
+        #
+        # `n_t = remd_n_replicas // n_lam` gave 0 for any budget below the lambda
+        # count, and the failure was not at the division: the grid became 0 x 8 = 0
+        # replicas, and the empty tensor surfaced three frames down as
+        # "amax(): Expected reduction dim to be specified for input.numel() == 0"
+        # from inside SHAKE, during the 500-step relaxation that runs BEFORE the
+        # sampling loop. So REMD failed at its first step of every one of its 8
+        # rounds, `on_report` was never reached, and a caller waiting for per-step
+        # progress frames saw nothing at all — the picture only moved at the fallback
+        # timer's 12-second beat, which reads as "updating, just not live" and gives
+        # no hint that the sampler never ran.
+        #
+        # Trimming the lambda axis instead keeps the temperature axis meaningful,
+        # which is the one the REMD criterion acts on: two replicas differing in
+        # temperature exchange usefully, two differing only in lambda barely do.
+        n_lam = max(1, min(len(lambdas), remd_n_replicas))
+        n_t = max(1, -(-remd_n_replicas // n_lam))          # ceil, so no budget is lost
+        _lambdas = tuple(lambdas)[:n_lam]
+        if verbose and n_lam < len(lambdas):
+            print(f"  [Torch GPU] {remd_n_replicas} replica budget: using {n_t} "
+                  f"temperature(s) x {n_lam} lambda(s) = {n_t * n_lam}; the "
+                  f"remaining {len(lambdas) - n_lam} lambda(s) need replicas this "
+                  f"budget does not have")
 
         all_diags = []
         backup_p_coords = final_p_coords.copy()  # NaN recovery backup
@@ -281,10 +304,20 @@ def torch_gpu_refine(
             use_adaptive_tri_weight=use_adaptive_tri_weight,
             use_staged_tri=use_staged_tri,
             tri_stage_config=tri_stage_config,
+            # Re-stamped per round below: run() reports (round, n_rounds) within a
+            # single call, and this loop makes several calls, so a caller would
+            # otherwise see the count restart at 1 every round.
+            on_report=on_report,
         )
 
         for round_idx in range(n_rounds):
             try:
+                # Re-stamp the callback for this round so the caller sees progress
+                # against the whole call rather than against one round of it.
+                if on_report is not None:
+                    _base = round_idx * max(1, steps_per_round // 500)
+                    remd.on_report = (lambda r, n, e, c, _b=_base, _n=n_rounds:
+                                      on_report(_b + r, _n * n, e, c))
                 # Bug 10 fix: pass the cross-round state instead of re-creating the instance
                 best_coords, best_e, diag = remd.run(
                     final_p_coords, pairs, n_steps=steps_per_round,

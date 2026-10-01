@@ -330,8 +330,13 @@ try{
       <div id="viewer"></div>
       <div id="viewer-placeholder">
         <svg width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 12l2-6 2 4 2-2 2 4"/></svg>
-        <span>No structure loaded</span>
-        <small>Submit a sequence, or load a local PDB</small>
+        <span id="viewer-placeholder-title">No structure loaded</span>
+        <small id="viewer-placeholder-hint">Submit a sequence, or load a local PDB</small>
+        <button class="btn btn-quiet btn-xs" id="btn-demo-structure">
+          View the demo structure
+        </button>
+        <small class="viewer-placeholder-note">The delivered 2,013 nt model
+          (42,831 atoms). It is not from your run — the panels will say so.</small>
       </div>
 
       <!-- Which checkpoint is on screen. A run leaves progressively better
@@ -362,6 +367,14 @@ try{
           <input type="range" id="opacity-slider" min="0.05" max="1" step="0.05" value="0.35" aria-label="Representation opacity">
           <span id="opacity-val">0.35</span>
         </label>
+        <span class="chip-sep" aria-hidden="true"></span>
+        <!-- Always reachable, not only in the empty state: the point of naming it
+             "demo" is that it is something you choose, so it should be available
+             once a run has put its own structure on screen too, for comparison. -->
+        <button class="btn btn-quiet btn-xs" id="btn-demo-structure-toolbar"
+                title="Load the delivered 2,013 nt model (42,831 atoms) — not from your run">
+          Demo structure
+        </button>
       </div>
 
       <div id="minigame-toolbar" class="minigame-toolbar">
@@ -404,6 +417,8 @@ try{
       <label for="tab-thermo" class="tab-label">Thermo</label>
       <input type="radio" name="tab" id="tab-shape" class="tab-radio">
       <label for="tab-shape" class="tab-label">Shape</label>
+      <input type="radio" name="tab" id="tab-checkpoint" class="tab-radio">
+      <label for="tab-checkpoint" class="tab-label">Resume</label>
       <input type="radio" name="tab" id="tab-console" class="tab-radio">
       <label for="tab-console" class="tab-label">Console</label>
 
@@ -570,6 +585,45 @@ try{
           </div>
         </section>
 
+        <!-- Tab: Resume (checkpoint state) -->
+        <section class="tab-content" data-tab="checkpoint">
+          <div class="panel">
+            <h2 class="panel-title">Resume state</h2>
+            <!-- What the next run will do with this output directory. A checkpoint
+                 is only resumed from when the sequence AND every content-bearing
+                 parameter match; otherwise it is kept aside and the run starts from
+                 Level 0. Without this panel the only evidence of that was a log
+                 line, and the file simply being gone from the directory. -->
+            <div id="ckpt-state" class="ckpt-state">
+              <span class="ckpt-badge" id="ckpt-badge">checking…</span>
+              <span class="ckpt-line" id="ckpt-line"></span>
+            </div>
+            <div class="ckpt-grid" id="ckpt-grid"></div>
+          </div>
+          <div class="panel">
+            <h2 class="panel-title">Fields</h2>
+            <div id="ckpt-fields" class="ckpt-fields"><span class="legend">nothing recorded</span></div>
+          </div>
+          <div class="panel">
+            <h2 class="panel-title">Arrays</h2>
+            <div id="ckpt-arrays" class="ckpt-arrays"><span class="legend">no arrays</span></div>
+          </div>
+          <div class="panel" id="ckpt-quarantine-panel" hidden>
+            <h2 class="panel-title">Set aside</h2>
+            <p class="ckpt-note" id="ckpt-quarantine-note"></p>
+            <div id="ckpt-quarantine-extra"></div>
+          </div>
+          <div class="panel">
+            <div class="ckpt-actions">
+              <button class="btn btn-quiet btn-xs" id="ckpt-refresh">Refresh</button>
+              <button class="btn btn-quiet btn-xs" id="ckpt-clean" title="Delete array files that no field references">Clean orphans</button>
+              <button class="btn btn-quiet btn-xs" id="ckpt-drop" title="Remove everything from a level onward, so the next run recomputes it">Roll back…</button>
+              <button class="btn btn-quiet btn-xs" id="ckpt-wipe" title="Delete all resume state; results are kept">Delete</button>
+            </div>
+            <p class="ckpt-note" id="ckpt-action-note"></p>
+          </div>
+        </section>
+
         <!-- Tab: Console -->
         <section class="tab-content" data-tab="console">
           <div class="panel panel-flush">
@@ -631,6 +685,11 @@ The SSE stream carries live pipeline output once one is running.
         <label class="feedback-tag"><input type="checkbox" value="report_issue"> Report issue</label>
       </div>
       <button class="btn btn-primary" id="feedback-submit">Submit feedback</button>
+      <!-- What pressing Submit will actually do. Filled from
+           /api/feedback/status when the modal opens: on a server with no mail
+           account configured, submitting only saves the note here, and saying so
+           before the press is better than a "saved" toast that reads as "sent". -->
+      <div class="feedback-status" id="feedback-status" hidden></div>
       <div class="feedback-history" id="feedback-history"></div>
     </div>
   </div>
@@ -649,6 +708,7 @@ The SSE stream carries live pipeline output once one is running.
 <script src="/web/modules/feedback.js"></script>
 <script src="/web/modules/minigame.js"></script>
 <script src="/web/modules/setup.js"></script>
+<script src="/web/modules/checkpoint.js"></script>
 <script src="/web/app.js"></script>
 </body>
 </html>

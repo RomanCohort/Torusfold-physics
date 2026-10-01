@@ -13,6 +13,7 @@ import time
 import uuid
 import hashlib
 import email.utils
+import fnmatch
 import threading
 import tempfile
 import numpy as np
@@ -640,50 +641,130 @@ def _viewer_module():
 _VIEWER_MOD = None
 
 
-def _viewer_stage(output_dir):
+def _viewer_stage(output_dir, include_scratch=None):
     """The newest finished checkpoint, or None. Never raises: the 3D panel is not
-    worth failing a status poll over."""
+    worth failing a status poll over.
+
+    Scratch files — the run's own working traces — are included only while a job is
+    actually running. They are written last, so with no job they are the newest
+    files in the directory and a newest-wins rule gives them the panel. Deciding it
+    here rather than in the picker keeps the one authority for "is a run happening"
+    in the process that knows.
+    """
     try:
         mod = _viewer_module()
-        started = _predict_state.get("started_at")
-        return mod.newest_structure(output_dir, run_started_at=started)
+        running = _predict_state.get("status") == "running"
+        if include_scratch is None:
+            include_scratch = running
+        started = _predict_state.get("started_at") if running else None
+        return mod.newest_structure(output_dir, run_started_at=started,
+                                    include_scratch=include_scratch)
     except Exception:                                    # noqa: BLE001
         return None
 
 
-# Below this, a "structure" is not a fold: a handful of atoms is a run that was
-# interrupted early, or a stub. Showing the delivered 2,013 nt model is more use
-# than showing ten phosphate atoms, so this decides when that happens.
-_MIN_MEANINGFUL_ATOMS = 40
+# A floor on what counts as a structure worth showing.
+#
+# This was 40, on the theory that a short chain is not drawable. Measured since,
+# and the theory was wrong: 3Dmol draws a five-residue trace as a cartoon at 1.9%
+# canvas coverage and a ten-residue one at 3.4%, so short structures render fine
+# and the floor was hiding real work. A ten-nucleotide test sequence produces
+# coarse-grained traces of ten to a hundred and twenty atoms through Levels 1, 1.5
+# and 2, and every one of them was discarded in favour of the fallback model — so
+# the 3D panel showed the delivered 2,013 nt structure for a whole run.
+#
+# What is left guards against files holding essentially nothing: a failed merge
+# writes a header and an END, and a two-atom "structure" is a broken file rather
+# than a small one.
+_MIN_MEANINGFUL_ATOMS = 4
+
+
+def _demo_stage():
+    """The delivered model, as a stage dict, for measuring on request.
+
+    Served at /api/structure/demo and measured at /api/metrics/demo. It is not part
+    of `_display_structure`'s answer because it must never be chosen automatically:
+    see that function's docstring.
+    """
+    try:
+        d = _viewer_module().delivered_structure(ROOT)
+    except Exception:                                        # noqa: BLE001
+        d = None
+    if not d:
+        return None
+    out = dict(d)
+    out.setdefault("desc", "delivered model, 2013 nt (not from this run)")
+    return out
 
 
 def _display_structure(output_dir):
-    """What the 3D panel should be showing.
+    """What the 3D panel should be showing, or None for "nothing yet".
 
-    A checkpoint from the current run wins, and so does a substantial result left
-    by a previous one — that is what someone reopening the page wants to see. The
-    committed 2,013 nt model is the fallback for the empty state: no run in
-    progress and nothing substantive on disk. It carries level "delivered" rather
-    than a pipeline level, so it is never read as a stage of the run being watched.
+    The rule is one question: is a run happening?
 
-    The atom floor applies while a run IS in progress too, not only when idle. A
-    ten-residue fragment is not a structure worth looking at — 3Dmol's cartoon draws
-    nothing at all for a chain that short, so the panel is a blank canvas — and
-    accepting one because a run happened to be going is how a stub left by an
-    interrupted run came to be shown in place of the delivered model, leaving the
-    3D panel empty with the placeholder already hidden.
+      - Yes — show what it has produced so far, including the working traces.
+      - No  — show a result a previous run left, and only that.
+
+    The distinction matters because "newest file wins" is right during a run and
+    wrong outside one. Scratch traces are rewritten every few seconds, so they are
+    always the newest, and with no job running they are leftovers from a run that is
+    over — a stopped test produced a 10-atom trace that sat in the panel in place of
+    the result, because it was written more recently than the result was.
+
+    The delivered 2,013 nt model is deliberately NOT the fallback here. It is a
+    showcase, not an output: it is not from the run being watched, and putting a
+    42,831-atom structure in the panel unasked says "this is your result" while the
+    run it belongs to is nothing to do with it. It is served on request at
+    `/api/structure/demo`, which is what the panel's button calls. "Nothing yet" is
+    the honest answer, and the placeholder has somewhere to say so.
     """
-    stage = _viewer_stage(output_dir)
+    running = _predict_state.get("status") == "running"
+    stage = _viewer_stage(output_dir, include_scratch=running)
     if stage and stage.get("atoms", 0) >= _MIN_MEANINGFUL_ATOMS:
         return stage
-    try:
-        delivered = _viewer_module().delivered_structure(ROOT)
-    except Exception:                                    # noqa: BLE001
-        delivered = None
-    # Fall back to the checkpoint only when there is nothing better: a run gets to
-    # show its own structure from the first usable one, and below the floor the
-    # delivered model is the more useful thing to be looking at.
-    return delivered or stage
+    if running:
+        return None
+    # A finished result from a previous run, scratch files excluded. There is no
+    # further fallback: an empty panel that says why beats a borrowed structure.
+    return _viewer_stage(output_dir, include_scratch=False)
+
+
+def _ckpt_report(output_dir):
+    """GET /api/checkpoint — the resume state of an output directory.
+
+    Read-only by construction: it goes through `checkpoint_report`, which parses the
+    manifest without judging it. Loading through a CheckpointStore would evaluate
+    resumability, and declining to resume moves the file aside, so an inspector that
+    did that would quarantine a good checkpoint the moment someone looked at it.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "src"))
+    from torusfold.scheme2 import checkpoint_store as cs
+    return cs.checkpoint_report(output_dir)
+
+
+def _ckpt_wipe(output_dir):
+    """Delete the resume state in a directory. Returns how many files went.
+
+    Only the checkpoint's own files, by name: the manifest, its quarantine copy, and
+    the `ckpt_*.npy` arrays. PDBs, result JSON and `_final_*.npz` are results — the
+    thing the run was for — and a "delete the checkpoint" button that removed them
+    would be destroying work under a label that does not say so.
+    """
+    sys.path.insert(0, os.path.join(ROOT, "src"))
+    from torusfold.scheme2 import checkpoint_store as cs
+    patterns = (cs.MANIFEST_NAME, cs.MANIFEST_NAME + ".tmp", cs.QUARANTINE_NAME,
+                "ckpt_*.npy", "_ckpt_*_tmp.npy")
+    removed = 0
+    if os.path.isdir(output_dir):
+        for name in os.listdir(output_dir):
+            if not any(fnmatch.fnmatch(name, pat) for pat in patterns):
+                continue
+            try:
+                os.remove(os.path.join(output_dir, name))
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def _deps_payload():
@@ -1307,6 +1388,9 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             self._handle_feedback()
         elif path in ("/api/install-deps", "/install-deps"):
             self._handle_install_deps()
+        elif path in ("/api/checkpoint/clean", "/api/checkpoint/delete",
+                      "/api/checkpoint/rollback"):
+            self._handle_checkpoint_action(path)
         else:
             self._send_json({"error": f"Unknown POST endpoint: {path}"}, 404)
 
@@ -1332,11 +1416,43 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         elif path in ("/api/deps", "/deps"):
             self._send_json(_deps_payload())
             return
+        elif path in ("/api/metrics/demo", "/metrics/demo"):
+            # The measurements for the demo structure, which the panel asks for when
+            # the reader loads it. Without this the readout would keep describing
+            # whatever the idle page was showing — a leftover from a previous run —
+            # while a 42,831-atom model sat in the 3D panel. The numbers and the
+            # picture have to be the same structure.
+            stage = _demo_stage()
+            if not stage:
+                self._send_json({"error": "the delivered model is not in this "
+                                          "checkout"}, 404)
+                return
+            self._send_json({"demo": True, "structure": {
+                "level": "delivered", "name": stage["name"], "desc": stage["desc"],
+                "atoms": stage["atoms"], "digest": stage.get("digest", ""),
+            }, "metrics": _metrics_within(stage)})
+            return
         elif path in ("/api/structure", "/structure") or path.startswith("/api/structure/"):
             # Both forms: without a name it reports which checkpoint is current,
             # with one it serves those bytes. Matching only the trailing-slash form
             # sent the bare path to the static file handler.
             self._handle_structure(path)
+            return
+        elif path in ("/api/checkpoint", "/checkpoint"):
+            # What resume state this output directory holds. Read-only: it must not
+            # evaluate resumability, because declining to resume moves the file
+            # aside — see checkpoint_store.read_manifest.
+            try:
+                out_dir = os.path.join(ROOT, "output_web")
+                rep = _ckpt_report(out_dir)
+                rep["job_running"] = _predict_state.get("status") == "running"
+                rep["job_level"] = _predict_state.get("level_name")
+                self._send_json(rep)
+            except Exception as exc:                     # noqa: BLE001
+                self._send_json({"error": "%s: %s" % (type(exc).__name__, exc)}, 500)
+            return
+        elif path in ("/api/feedback/status", "/feedback/status"):
+            self._handle_feedback_status()
             return
         elif path in ("/api/log", "/log"):
             self._handle_log()
@@ -1369,6 +1485,83 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             self._serve_file(file_path)
         else:
             self.send_error(404, f"File not found: {path}")
+
+    def _handle_checkpoint_action(self, path):
+        """POST /api/checkpoint/{clean,delete,rollback} — change the resume state.
+
+        All three refuse while a run is in progress. A run holds its state in memory
+        and rewrites the manifest at every stage boundary, so deleting it underneath
+        one would have it reappear a stage later, and rolling it back would be
+        overwritten by the next save — the operator would see the action "succeed"
+        and change nothing.
+        """
+        if _predict_state.get("status") == "running":
+            self._send_json({"error": "A run is in progress; its checkpoint is in "
+                                      "use. Stop the run first."}, 409)
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+        except (ValueError, OSError):
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+
+        out_dir = os.path.join(ROOT, "output_web")
+        action = path.rsplit("/", 1)[-1]
+        try:
+            sys.path.insert(0, os.path.join(ROOT, "src"))
+            from torusfold.scheme2 import checkpoint_store as cs
+
+            if action == "clean":
+                # Orphans are array files no field references. Only files matching
+                # the checkpoint's own naming are considered, so this can never
+                # touch a result.
+                rep = cs.checkpoint_report(out_dir)
+                removed = 0
+                for name in rep.get("orphans") or []:
+                    try:
+                        os.remove(os.path.join(out_dir, name))
+                        removed += 1
+                    except OSError:
+                        pass
+                note = ("Removed %d orphaned array file(s)." % removed) if removed \
+                    else "No orphaned array files."
+            elif action == "delete":
+                sys.path.insert(0, os.path.join(ROOT, "tools"))
+                removed = _ckpt_wipe(out_dir)
+                note = ("Deleted %d resume file(s). PDB results and result JSON "
+                        "are untouched." % removed)
+            elif action == "rollback":
+                lvl = body.get("level")
+                try:
+                    lvl = float(lvl)
+                except (TypeError, ValueError):
+                    self._send_json({"error": "rollback needs a numeric level"},
+                                    400)
+                    return
+                sys.path.insert(0, os.path.join(ROOT, "src"))
+                from torusfold.scheme2.isrnaclong import _delete_checkpoint_from_level
+                import io as _io
+                _buf = _io.StringIO()
+                _old = sys.stdout
+                try:
+                    sys.stdout = _buf
+                    _delete_checkpoint_from_level(Path(out_dir), from_level=lvl)
+                finally:
+                    sys.stdout = _old
+                note = " ".join(_buf.getvalue().split()) or "Nothing to roll back."
+            else:
+                self._send_json({"error": "unknown action"}, 404)
+                return
+        except Exception as exc:                          # noqa: BLE001
+            import traceback as _tb
+            self._send_json({"error": "%s: %s" % (type(exc).__name__, exc),
+                             "trace": _tb.format_exc()[-700:]}, 500)
+            return
+
+        self._send_json({"ok": True, "note": note,
+                         "state": cs.checkpoint_report(out_dir)})
 
     def _serve_file(self, file_path):
         ext = os.path.splitext(file_path)[1].lower()
@@ -1671,12 +1864,22 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             pass  # Client disconnected
 
     def _handle_feedback(self):
-        """POST /api/feedback — save user feedback"""
+        """POST /api/feedback — record the feedback, and email it.
+
+        The record is local and always written; the email is what the reporter
+        actually asked for by pressing the button. The two outcomes are reported
+        separately because they are different promises: "saved beside the server" and
+        "sent to the maintainer" are not the same thing, and the form used to say
+        the second while doing only the first.
+        """
         body = self._read_body()
         try:
             feedback = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError):
             self._send_json({"error": "Invalid JSON"}, 400)
+            return
+        if not isinstance(feedback, dict):
+            self._send_json({"error": "expected a JSON object"}, 400)
             return
 
         fb_path = os.path.join(ROOT, "feedback.json")
@@ -1691,10 +1894,49 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         feedback["server_timestamp"] = time.time()
         existing.append(feedback)
 
-        with open(fb_path, "w", encoding="utf-8") as f:
-            json.dump(existing, f, indent=2, ensure_ascii=False)
+        try:
+            with open(fb_path, "w", encoding="utf-8") as f:
+                json.dump(existing, f, indent=2, ensure_ascii=False)
+            saved = True
+        except OSError as exc:
+            saved = False
+            _emit_log("warn", "feedback: could not write feedback.json (%s)" % exc)
 
-        self._send_json({"ok": True, "count": len(existing)})
+        # Send it. `send` never raises and never claims success it did not get.
+        mail = {"sent": False, "reason": "not attempted"}
+        try:
+            sys.path.insert(0, os.path.join(ROOT, "tools"))
+            import feedback_mail as _fm
+            mail = _fm.send(feedback)
+        except Exception as exc:                          # noqa: BLE001
+            mail = {"sent": False,
+                    "reason": "the mailer failed to run",
+                    "detail": "%s: %s" % (type(exc).__name__, exc)}
+
+        if mail.get("sent"):
+            _emit_log("success", "feedback: emailed to %s" % mail.get("to"))
+        else:
+            _emit_log("warn", "feedback: saved locally, not emailed (%s)"
+                      % mail.get("reason"))
+
+        self._send_json({"ok": True, "count": len(existing), "saved": saved,
+                         "emailed": bool(mail.get("sent")), "mail": mail})
+
+    def _handle_feedback_status(self):
+        """GET /api/feedback/status — where feedback goes, and whether it can."""
+        out = {"default_to": "18806370529@163.com", "configured": False,
+               "missing": [], "message": ""}
+        try:
+            sys.path.insert(0, os.path.join(ROOT, "tools"))
+            import feedback_mail as _fm
+            c = _fm.config()
+            ok, line = _fm.status_line()
+            out.update({"configured": bool(ok), "message": line,
+                        "to": c["to"], "host": c["host"], "port": c["port"],
+                        "mode": c["mode"], "missing": _fm.missing_settings()})
+        except Exception as exc:                          # noqa: BLE001
+            out["message"] = "the mailer could not be loaded: %s" % exc
+        self._send_json(out)
 
     def _handle_install_deps(self):
         """POST /api/install-deps — fetch what the external tools need.
@@ -2115,6 +2357,22 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
                              "digest": stage.get("digest", "")})
             return
 
+        # `/api/structure/demo` is a request for the delivered model by intent rather
+        # than by name, so the panel can offer it as a button instead of showing it
+        # unasked. It is not a path: the lookup below goes through the registry, so
+        # this cannot read anything the registry does not hold.
+        if name == "demo":
+            try:
+                delivered = _viewer_module().delivered_structure(ROOT)
+            except Exception:                                # noqa: BLE001
+                delivered = None
+            if not delivered:
+                self._send_json({"error": "the delivered model is not in this "
+                                          "checkout"}, 404)
+                return
+            self._send_pdb_file(delivered["path"])
+            return
+
         mod = _viewer_module()
         allowed = {s[1] for s in mod.VIEWER_STAGES}
         delivered = {d["name"] for d in mod.DELIVERED_STRUCTURES}
@@ -2138,6 +2396,10 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         if not os.path.isfile(target):
             self._send_json({"error": "not written yet", "name": name}, 404)
             return
+        self._send_pdb_file(target)
+
+    def _send_pdb_file(self, target):
+        """Serve one PDB. Never raises: a missing file is a 404, not a stack trace."""
         try:
             with open(target, "rb") as f:
                 data = f.read()
@@ -2362,8 +2624,40 @@ def _shape_anisotropy(eigenvalues):
         return None
 
 
-_LIVE_METRICS = {"digest": None, "payload": None, "at": 0.0, "computing": None}
+_LIVE_METRICS = {"digest": None, "payload": None, "at": 0.0,
+                 "computing": None, "pending": None}
 _LIVE_METRICS_LOCK = threading.Lock()
+# The most recent stage anyone asked to be measured. A coalescing pass needs the
+# stage that goes with its queued digest, and the queue only carries the digest.
+_LATEST_STAGE = None
+
+
+def _metrics_within(stage, budget=30.0):
+    """Measure a structure, waiting up to `budget` seconds for real numbers.
+
+    `/api/current` must never wait — it is polled every few seconds and the
+    measurement costs ten on a large structure. A request that a reader triggered by
+    an explicit action is the opposite case: there is a moment where waiting is the
+    right answer, and it is the one where the result is about to be displayed next to
+    the structure it describes.
+
+    Without this the demo button rendered the readout from whatever the idle page had
+    been showing — a previous run's leftover — under a label saying the current
+    structure was still being measured. The numbers and the picture disagreed for
+    seconds, which is exactly the confusion the source line exists to prevent.
+
+    The budget is generous because the thing being waited for was measured at 10.8 s
+    on the 2,013 nt model, where the Shrake-Rupley SASA dominates. A shorter cap just
+    returns the placeholder the wait exists to avoid.
+    """
+    payload = _live_metrics(stage)
+    deadline = time.time() + budget
+    while payload and (payload.get("pending") or payload.get("stale")):
+        if time.time() >= deadline:
+            break
+        time.sleep(0.25)
+        payload = _live_metrics(stage)
+    return payload
 
 
 def _live_metrics(stage):
@@ -2379,28 +2673,55 @@ def _live_metrics(stage):
     /api/current is polled every few seconds. Called synchronously it stalled the
     status endpoint for 24 s on a quiet page and would have done so repeatedly.
 
-    So: return whatever is already computed and start a background pass when the
-    structure has changed. The first poll after a new checkpoint shows the previous
-    numbers for a moment; every poll after that is instant. A stale-but-real number
-    with a known source beats a responsive measurement that freezes the interface.
+    At most one measurement runs at a time, and only the newest structure is queued
+    behind it. `computing` used to be a single slot that each new digest simply
+    overwrote, which broke in the direction that is hard to notice: with a snapshot
+    every 12 s and a 10.8 s measurement, threads accumulated one per checkpoint, and
+    because each one wrote its result unconditionally when it finished, the
+    slowest-starting measurement landed last and became "current" — so the panels
+    could settle on the oldest structure of the batch. Measured structures change
+    constantly during a run, so this is the normal case, not a corner.
+
+    Coalescing keeps the answer fresh instead: when a pass reports, it looks for a
+    newer request and measures that rather than publishing a result it already knows
+    is superseded. The client cannot tell the difference — it only ever sees the
+    digest it asked about — but the server stops doing work nobody will read.
     """
     if not stage or not stage.get("path"):
         return None
     digest = stage.get("digest") or ""
 
+    global _LATEST_STAGE
     with _LIVE_METRICS_LOCK:
+        _LATEST_STAGE = dict(stage)
         fresh = bool(digest) and _LIVE_METRICS["digest"] == digest
         cached = _LIVE_METRICS["payload"]
-        already = _LIVE_METRICS["computing"] == digest
-        if not fresh and not already:
+        if fresh:
+            # The measurements are keyed on the file's contents and are reusable
+            # when the contents match; the `source` block describes WHICH FILE, and
+            # stages pass the same coordinates forward under new names, so
+            # `source.name` goes stale on a cache hit.
+            #
+            # It showed exactly that: /api/current reported
+            # structure.name = "level1_5_relaxed.pdb" while metrics.source.name
+            # still said "latest_cg.pdb", a file that had been deleted. The panels
+            # were labelled with a structure that no longer existed. The numbers
+            # were right — the contents were identical — so only the provenance
+            # needed correcting.
+            return _retag_metrics(cached, stage)
+        if _LIVE_METRICS["computing"]:
+            # A pass is already running. Record what to measure next and let it pick
+            # this up; do not start a second pass.
+            _LIVE_METRICS["pending"] = digest
+        else:
             _LIVE_METRICS["computing"] = digest
+            _LIVE_METRICS["pending"] = None
             threading.Thread(
                 target=_compute_live_metrics,                args=(dict(stage), digest),
                 daemon=True,
                 name="torusfold-metrics",
             ).start()
-    if fresh:
-        return cached
+
     # Not measured yet. Hand back the previous measurement if there is one, tagged
     # with the digest it was measured from and marked stale, so a client can tell
     # "these numbers belong to the structure before this one" from "this is current".
@@ -2412,7 +2733,7 @@ def _live_metrics(stage):
     # placeholders, the measurement landed seconds later, and nothing told the page
     # to look again.
     if cached:
-        out = dict(cached)
+        out = _retag_metrics(cached, stage)
         out["stale"] = True
         out["for_digest"] = _LIVE_METRICS["digest"]
         return out
@@ -2420,30 +2741,83 @@ def _live_metrics(stage):
             "source": {"name": stage.get("name"), "level": stage.get("level")}}
 
 
+def _retag_metrics(payload, stage):
+    """A cached measurement, relabelled with the file it is now standing for.
+
+    A copy is always returned: the cached dict is shared between requests and must
+    not accumulate one client's `stale` flag or another's stage name.
+
+    The filesystem path is deliberately not included. `_PUBLIC_KEYS` filters the
+    top-level state, but this payload is nested inside it, so whatever is put here
+    reaches the client unfiltered — and it was publishing an absolute
+    `C:\\...\\output_web\\...` path that nothing in the interface reads.
+    """
+    out = dict(payload)
+    src = dict(out.get("source") or {})
+    src.update({"name": stage.get("name"), "level": stage.get("level"),
+                "atoms": stage.get("atoms"), "digest": stage.get("digest")})
+    src.pop("path", None)
+    out["source"] = src
+    return out
+
+
 def _compute_live_metrics(stage, digest):
-    """The expensive half. Runs on its own thread; never raises."""
-    t0 = time.time()
-    try:
-        payload = _measure_structure(stage)
-    except Exception as exc:                                 # noqa: BLE001
-        import traceback as _tb
-        payload = {"live": True,
-                   "error": "%s: %s" % (type(exc).__name__, exc),
-                   "trace": _tb.format_exc()[-900:]}
-    with _LIVE_METRICS_LOCK:
-        _LIVE_METRICS.update({"digest": digest, "payload": payload,
-                              "at": time.time(), "computing": None})
-    # Say so in the run log. This thread is invisible otherwise, and a silent
-    # worker that never reports is indistinguishable from one that never ran —
-    # which is exactly how it presented the first time: the panels stayed on their
-    # placeholder values and nothing anywhere said why.
+    """The expensive half. Runs on its own thread; never raises.
+
+    Repeats while newer structures have arrived underneath it, so a digest that was
+    already superseded by the time the pass finished is never the one published.
+    The loop is bounded by the pipeline's own rate: it only continues while a
+    *different* digest has been requested since the pass began.
+    """
+    while True:
+        t0 = time.time()
+        try:
+            payload = _measure_structure(stage)
+        except Exception as exc:                                 # noqa: BLE001
+            import traceback as _tb
+            payload = {"live": True,
+                       "error": "%s: %s" % (type(exc).__name__, exc),
+                       "trace": _tb.format_exc()[-900:]}
+
+        with _LIVE_METRICS_LOCK:
+            _LIVE_METRICS.update({"digest": digest, "payload": payload,
+                                  "at": time.time()})
+        # Say so in the run log. This thread is invisible otherwise, and a silent
+        # worker that never reports is indistinguishable from one that never ran —
+        # which is how a measurement that failed on every poll went unnoticed.
+        _note_metrics_pass(stage, digest, payload, time.time() - t0)
+
+        with _LIVE_METRICS_LOCK:
+            nxt = _LIVE_METRICS.get("pending")
+            if not nxt or nxt == digest:
+                _LIVE_METRICS["computing"] = None
+                _LIVE_METRICS["pending"] = None
+                return
+            # A newer structure was asked for while this pass ran. Measure that.
+            _LIVE_METRICS["computing"] = nxt
+            _LIVE_METRICS["pending"] = None
+            digest = nxt
+            stage = dict(_LATEST_STAGE) if _LATEST_STAGE is not None else stage
+            if not stage.get("path"):
+                _LIVE_METRICS["computing"] = None
+                return
+
+
+def _note_metrics_pass(stage, digest, payload, elapsed):
+    """Say what the measurement pass did, in the run log.
+
+    This thread is invisible otherwise, and a silent worker that never reports is
+    indistinguishable from one that never ran — which is exactly how it presented
+    the first time: the panels stayed on their placeholder values and nothing
+    anywhere said why.
+    """
     try:
         if payload.get("error"):
             _emit_log("warn", "metrics: could not measure %s (%s)"
                       % (stage.get("name"), payload["error"]))
         else:
             _emit_log("info", "metrics: measured %s in %.1fs"
-                      % (stage.get("name"), time.time() - t0))
+                      % (stage.get("name"), elapsed))
     except Exception:
         pass
 

@@ -20,8 +20,9 @@ Reference: isRNAcircLong_design.md
 """
 from __future__ import annotations
 
-import json
 import hashlib
+import inspect
+import json
 import os
 import socket
 import subprocess
@@ -34,6 +35,15 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
+
+from torusfold.scheme2.checkpoint_store import (
+    MANIFEST_NAME,
+    NON_CONTENT_PARAMS,
+    QUARANTINE_NAME,
+    CheckpointStore,
+    _atomic_write_text,
+    config_signature,
+)
 
 
 # ── WSL preheat + PyRosetta long-lived server ─────────────────────────
@@ -160,67 +170,27 @@ def _pyrosetta_socket_refine(
         s.close()
 
 
-def _save_checkpoint(ckpt_path: Path, data: dict):
-    """Save a checkpoint (JSON + numpy arrays as .npy).
-
-    Atomic write: write a temp file first, then rename, so a crash cannot leave a
-    half-written JSON. numpy arrays also go through a temp file and are renamed only
-    after saving, so the JSON never references a missing .npy.
-    """
-    # store numpy arrays separately as .npy files (atomic write)
-    arrays = {}
-    clean = {}
-    for k, v in data.items():
-        if isinstance(v, np.ndarray):
-            npy_path = ckpt_path.parent / f"ckpt_{k}.npy"
-            npy_tmp = ckpt_path.parent / f"_ckpt_{k}_tmp.npy"
-            np.save(str(npy_tmp), v)
-            os.replace(str(npy_tmp), str(npy_path))
-            arrays[k] = str(npy_path)
-        else:
-            clean[k] = v
-    clean["_npy_refs"] = arrays
-    tmp_path = str(ckpt_path) + ".tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps(clean, default=str, ensure_ascii=False))
-    os.replace(tmp_path, str(ckpt_path))  # atomic replace
-
-
-def _load_checkpoint(ckpt_path: Path) -> dict:
-    """Load a checkpoint (fault-tolerant: missing/corrupt .npy files are skipped without affecting the rest)."""
-    if not ckpt_path.exists():
-        return {}
-    try:
-        data = json.loads(ckpt_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"  [checkpoint] JSON load failed: {e}")
-        return {}
-    arrays = data.pop("_npy_refs", {})
-    for k, npy_path in arrays.items():
-        try:
-            data[k] = np.load(npy_path)
-        except Exception as e:
-            print(f"  [checkpoint] .npy load failed: {k} ({npy_path}): {e}")
-    return data
-
-
 def _cleanup_checkpoints(output_path: Path, keep_final: bool = True):
-    """Clean up intermediate checkpoint files, keeping only the final results.
+    """Remove the resume state from an output directory, leaving the results.
 
-    Deletes:
-      - _checkpoint.json (checkpoint metadata)
-      - _checkpoint_*.npy (numpy arrays)
-      - _tmp_* (temporary files)
+    Only the checkpoint and the arrays it references go; PDBs, result JSON and
+    `_final_*.npz` are results, not resume state, and deleting them would destroy
+    the thing the run was for.
 
-    Keeps:
-      - *.pdb (all PDB outputs)
-      - *.json (result files, not checkpoints)
-      - _final_*.npz (final data)
+    Superseded by CheckpointStore for the pipeline itself, which keeps the array set
+    and the manifest consistent. Kept because it is the obvious thing to reach for
+    when clearing a directory by hand, and the previous version only matched
+    `_checkpoint*`, so the `ckpt_*.npy` arrays it was written to remove survived it.
     """
     removed = 0
-    for f in output_path.glob("_checkpoint*"):
-        f.unlink(missing_ok=True)
-        removed += 1
+    for pattern in (MANIFEST_NAME, QUARANTINE_NAME, "ckpt_*.npy", "_ckpt_*_tmp.npy"):
+        for f in output_path.glob(pattern):
+            try:
+                f.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def _delete_checkpoint_from_level(output_path: Path, from_level: float = 2.0):
@@ -233,12 +203,19 @@ def _delete_checkpoint_from_level(output_path: Path, from_level: float = 2.0):
         output_path: output directory
         from_level: the level from which to start deleting (inclusive)
     """
-    ckpt_path = output_path / "_checkpoint.json"
+    store = CheckpointStore(output_path, sequence="")
+    ckpt_path = store.path
     if not ckpt_path.exists():
         print(f"  [checkpoint] no checkpoint file found, skipping deletion")
         return
 
-    ckpt = _load_checkpoint(ckpt_path)
+    # A rollback is asked for by level, not by sequence, so the configuration check
+    # is bypassed deliberately: load the manifest as it is and remove fields from it.
+    ckpt = store._read_manifest()
+    if not ckpt:
+        print(f"  [checkpoint] checkpoint file could not be read, skipping deletion")
+        return
+    store._mine = list((ckpt.get("_npy_refs") or {}).keys())
     current_level = float(ckpt.get("level", -1))
 
     # field list for Level 2+ (collected from the _save_ckpt calls)
@@ -262,11 +239,11 @@ def _delete_checkpoint_from_level(output_path: Path, from_level: float = 2.0):
 
     removed_fields = []
     removed_npy = 0
-    for field in _LEVEL2_PLUS_FIELDS:
+    for field in sorted(_LEVEL2_PLUS_FIELDS):
         if field in ckpt:
             del ckpt[field]
             removed_fields.append(field)
-            # delete the associated .npy files
+            # delete the associated .npy file
             npy_path = output_path / f"ckpt_{field}.npy"
             if npy_path.exists():
                 npy_path.unlink()
@@ -277,9 +254,15 @@ def _delete_checkpoint_from_level(output_path: Path, from_level: float = 2.0):
                         3.5: 3.0, 4.0: 3.5, 5.0: 4.0, 5.5: 5.0}
     new_level = _rollback_levels.get(from_level, from_level - 0.5)
     ckpt["level"] = new_level
+    # The array set changed, so the reference list has to change with it — otherwise
+    # the checkpoint is left naming files that are gone, which the loader treats as a
+    # torn write and refuses.
+    ckpt["_npy_refs"] = {k: v for k, v in (ckpt.get("_npy_refs") or {}).items()
+                         if k in ckpt}
+    ckpt["_npy_files"] = sorted(ckpt["_npy_refs"])
 
     # save the modified checkpoint
-    _save_checkpoint(ckpt_path, ckpt)
+    _atomic_write_text(ckpt_path, json.dumps(ckpt, default=str, ensure_ascii=False))
     print(f"  [checkpoint] deleted Level {from_level}+ fields: {removed_fields}")
     print(f"  [checkpoint] deleted {removed_npy} .npy files")
     print(f"  [checkpoint] level rolled back to {new_level}, resuming after Level {new_level} next time")
@@ -664,42 +647,50 @@ def isrnaclong_pipeline(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # checkpoint resume: checkpoint file
-    _ckpt_path = output_path / "_checkpoint.json"
-    ckpt = _load_checkpoint(_ckpt_path) if resume else {}
-
-    # A checkpoint belongs to the sequence that produced it. Resuming one under a
-    # different sequence is silent corruption: the coordinates, pairs and
-    # segment layout all describe the old chain, and nothing downstream can tell.
-    # Only checkpoints written from here on carry the fingerprint; an older one
-    # has no "seq_sha1" and is accepted exactly as it was before.
-    if ckpt:
-        _want = hashlib.sha1(sequence.encode("utf-8")).hexdigest()
-        _have = ckpt.get("seq_sha1")
-        if _have is not None and _have != _want:
-            if verbose:
-                print(f"  [resume] checkpoint is for a different sequence "
-                      f"({str(_have)[:8]} != {_want[:8]}); starting fresh")
-            ckpt = {}
-            _ckpt_path.unlink(missing_ok=True)
-        elif _have is None and verbose:
-            print("  [resume] checkpoint has no sequence fingerprint; "
-                  "accepting it, but it cannot be checked against this input")
+    # ── checkpoint ──
+    #
+    # One object owns the resume state. It decides whether an existing file may be
+    # resumed from, which it only allows when the sequence AND every content-bearing
+    # parameter match, and it keeps the array set and the manifest in step.
+    #
+    # The parameter check is the load-bearing one. The file used to record only
+    # `seq_sha1`, so a second run of the same sequence with different settings found
+    # it, resumed, and let the stage guards below skip the stages the new settings
+    # asked for — returning the previous configuration's answer with no line in the
+    # log that could give it away.
+    # Read off the signature rather than listing the names here: a parameter added
+    # to this function later is then signature-bearing by default, which is the safe
+    # direction. Getting it wrong the other way means resuming across a change and
+    # reporting the old configuration's structure as the new one's.
+    #
+    # If this ever captures nothing, every run looks identical to every other and the
+    # parameter check silently stops protecting anything — so the count is asserted,
+    # not assumed. `locals()` at a function's top level does include its parameters;
+    # that is the property being relied on, and it is checked rather than trusted.
+    _sig_params = {n for n in inspect.signature(isrnaclong_pipeline).parameters
+                   if n not in NON_CONTENT_PARAMS}
+    _eff_params = {k: v for k, v in locals().items() if k in _sig_params}
+    if len(_eff_params) != len(_sig_params - {"sequence"}):
+        print("  [checkpoint] WARNING: signature captured %d of %d content "
+              "parameters; a parameter change may not be detected"
+              % (len(_eff_params), len(_sig_params - {"sequence"})))
+    _ckpt = CheckpointStore(output_path, sequence, _eff_params)
+    if resume:
+        ckpt = _ckpt.load_usable(verbose=verbose)
+    else:
+        ckpt = {}
+    if _ckpt.discarded_reason and not verbose:
+        print("  [checkpoint] %s" % _ckpt.discarded_reason)
 
     _raw_level = ckpt.get("level", -1)
     ckpt_level = float(_raw_level) if _raw_level is not None else -1
-    # cumulative checkpoint: each Level appends fields; the full dict is written on save
-    # (prevents field loss by overwriting)
-    _ckpt_data = dict(ckpt)
-    _ckpt_data.setdefault("seq_sha1", hashlib.sha1(sequence.encode("utf-8")).hexdigest())
-    _ckpt_data.setdefault("seq_len", len(sequence))
 
-    def _save_ckpt(level: float, **extra):
-        """Append fields to _ckpt_data and save it."""
-        _ckpt_data["level"] = level
-        _ckpt_data.update(extra)
-        _save_checkpoint(_ckpt_path, _ckpt_data)
-        print(f"  [checkpoint] level={level}, fields={list(_ckpt_data.keys())}")
+    def _save_ckpt(level, **extra):
+        """Record the cumulative state at `level`."""
+        _ckpt.save(level, verbose=False, **extra)
+        if verbose:
+            print("  [checkpoint] level=%s, %d field(s)"
+                  % (level, len(getattr(_ckpt, "_state", {}))))
 
     L = len(sequence)
     if verbose:
@@ -1074,6 +1065,75 @@ def isrnaclong_pipeline(
     except Exception as _err:
         raise
 
+    # ── live snapshots: set up before Level 1, not after Level 1.5 ──
+    #
+    # Level 1 is the longest stretch that writes nothing: the assembled structure
+    # lands at the end of it, so a run over ~11 chunks showed the 3D panel one
+    # unchanging frame for the whole stage. The writer has to exist before the stage
+    # it is reporting on.
+    #
+    # The holder is a mutable box rather than a closure over `best_coords`, because
+    # `best_coords` is rebound in several nested scopes and a closure would keep
+    # reading whichever binding it captured. "level" rides along so the file can say
+    # which stage it came from — see `latest_cg.meta`.
+    _coord_holder = {"coords": None, "level": "1"}
+    # 12 s, not the 45 s the writer defaulted to: a reader polls every couple of
+    # seconds, and a coarse-grained trace for the test sequence is about a kilobyte,
+    # so there is no reason for the panel to lag the run by the better part of a
+    # minute. Step-driven callbacks fill the gaps where a stage reports them.
+    _stop_snapshots = _start_snapshot_writer(_coord_holder, sequence, output_path,
+                                             interval=12.0)
+
+    # Structures published from inside a sampler, keyed to simulation steps.
+    _snap_steps = 5000
+    _snap_state = {"n": 0}
+
+    def _snapshot_cb(step, total, coords, *_rest):
+        # Called by three samplers with three different signatures, so the trailing
+        # arguments are accepted and ignored rather than requiring the callers to
+        # agree on a shape.
+        #
+        # The failure branch reports. `_write_snapshot` returns a bool and swallows
+        # its exception — right for a wall-clock writer, where a failure is a detail,
+        # but this is the step-driven path and it is the run's only source of live
+        # frames. A rejected shape here means the panel silently falls back to the
+        # 12-second timer, which looks like "updating, just not live" and gives no
+        # hint that a callback is firing and being discarded.
+        ok = _write_snapshot(coords, sequence, output_path,
+                             level=_coord_holder.get("level"))
+        state = _snap_state
+        state["calls"] = state.get("calls", 0) + 1
+        if ok:
+            state["n"] += 1
+            if verbose and state["n"] % 4 == 1:
+                # `total` is a count of steps for the samplers and a count of chunks
+                # for Level 1, so it carries the unit with it rather than being
+                # formatted as a bare number.
+                print(f"    [snapshot] {step}/{total} -> latest_cg.pdb")
+        else:
+            state["rejected"] = state.get("rejected", 0) + 1
+            if verbose and state["rejected"] <= 2:
+                import numpy as _np
+                try:
+                    _shape = "%s" % (_np.asarray(coords, dtype=float).shape,)
+                except Exception:                        # noqa: BLE001
+                    _shape = "not an array"
+                print(f"    [snapshot] callback fired at {step}/{total} but the "
+                      f"coordinates were rejected: shape {_shape}, expected "
+                      f"({len(sequence)}, 3)")
+
+    def _level1_chunk_cb(done, total, partial_coords):
+        """A chunk of Level 1 finished; publish the chain so far.
+
+        `done` counts finished chunks out of `total`, not simulation steps — the
+        unit rides with the string so the log line reads "3/11 chunks" rather than
+        the "3/11" a step count would print. Both go through the same writer and the
+        same counter, so the two kinds of frame appear in one sequence.
+        """
+        _coord_holder["coords"] = partial_coords
+        _coord_holder["level"] = "1"
+        _snapshot_cb(done, "%d chunks" % total, partial_coords)
+
     # ── Level 1: segmented Vfold3D + assembly ──
     # Level 1 can only be reused when Level 0 was also restored from the checkpoint;
     # otherwise the pairs are inconsistent
@@ -1117,6 +1177,7 @@ def isrnaclong_pipeline(
                 rfam_dir=rfam_dir,
                 msa_blocks=msa_blocks,
                 far_pairs=far_pairs,
+                on_chunk=_level1_chunk_cb,
             )
             # ── merge NCM ensemble distance evidence into pairs (soft restraints) ──
             if ncm_ens_pairs:
@@ -1276,6 +1337,31 @@ def isrnaclong_pipeline(
     if verbose:
         print(f"  [PDB] Level 1.5: {_l15_pdb}")
 
+    # ── start the live snapshot writer here, not at Level 3 ──
+    #
+    # Levels 2 and 2.5 are long single calls whose coordinates live in memory until
+    # they return, so before this the structure panel had nothing new to show from
+    # the moment Level 1 finished — hours in which the run had a perfectly good
+    # trace in hand and the viewer kept displaying whatever it started with. Level
+    # 1.5 is the first point where a structure exists that is worth looking at, so
+    # the writer starts beside it.
+    #
+    # The holder is a mutable box rather than a closure over `best_coords`, because
+    # `best_coords` is rebound in several nested scopes and a closure would keep
+    # reading whichever binding it captured.
+    #
+    # "level" rides along so the file can say which stage it came from. It used to
+    # be implied — the snapshot writer only ever ran from Level 3.5, so the viewer
+    # hard-coded that label — and starting the writer earlier made that label a lie:
+    # a run still at Level 2 showed "Level 3.5" over a two-minute-old trace.
+    # The snapshot writer and its callback were set up before Level 1; the holder
+    # just needs to be pointed at the relaxed coordinates and relabelled.
+    _coord_holder["coords"] = coords_vfold
+    _coord_holder["level"] = "1.5"
+    if verbose:
+        print("  [snapshots] latest_cg.pdb tracks the run from here (~12s), with a "
+              "frame at every chunk and REMD report")
+
     # ── Level 1.5 data export ──
     try:
         from torusfold.scheme2.data_exporter import export_level15_trajectory
@@ -1323,6 +1409,7 @@ def isrnaclong_pipeline(
         best_coords = ckpt["best_coords"]
         best_energy = ckpt["best_energy"]
         segments = ckpt.get("segments", [])
+        _coord_holder["level"] = "2"
         # check whether the coordinates are valid (they may be an empty array)
         if len(best_coords) == 0:
             if verbose:
@@ -1346,6 +1433,7 @@ def isrnaclong_pipeline(
         if verbose:
             print(f"\n[Level 2] restored from checkpoint: E={best_energy:.0f}")
     else:
+        _coord_holder["level"] = "2"
         if verbose:
             print(f"\n[Level 2] parallel segmented CG->all-atom + {'RL-scheduled REMD' if use_rl_relax else 'fixed REMD'}...")
 
@@ -1460,8 +1548,30 @@ def isrnaclong_pipeline(
         round_idx = 0  # initialize so it is usable outside the loop
         metrics = RelaxationMetrics()  # initialize
         energy = 0.0  # initialize
+
+        # A failed CG->all-atom conversion used to abort Level 2 outright: the loop
+        # broke before its first iteration, so no refinement ran and the logs showed
+        # the run skipping straight from Level 1.5 to Level 2.3. The conversion is an
+        # assembly convenience, not a precondition — round 0 has its own path for
+        # exactly this case, falling back to whichever coordinates the run does have
+        # and rescaling them toward the 5.9 A contact distance. So leave merged_aa as
+        # None and let that path take it; only the later rounds need a real all-atom
+        # file, and they get one from the round before.
+        if merged_aa is None:
+            _fallback_input = output_path / "vfold3d" / "assembled.pdb"
+            if _count_pdb_atoms(_fallback_input) > 0:
+                merged_aa = str(_fallback_input)
+                if verbose:
+                    print("    CG->all-atom unavailable; Level 2 will refine the "
+                          "Level 1 assembled coordinates instead")
+
         for round_idx in range(n_remd_rounds):
-            if merged_aa is None:
+            if merged_aa is None and round_idx > 0:
+                # Round 0 needs no all-atom input. A later round does — it starts from
+                # the previous round's refinement — and has nothing to start from only
+                # if that refinement produced no structure.
+                if verbose:
+                    print(f"  stopping after round {round_idx}: no input for the next round")
                 break
             if verbose:
                 print(f"  REMD round {round_idx + 1}/{n_remd_rounds}:")
@@ -1563,16 +1673,27 @@ def isrnaclong_pipeline(
                             print("    round 0: merged_aa.pdb holds no atoms "
                                   "(the CG->allatom conversion failed); starting from "
                                   "the assembled coordinates instead")
+                        # Prefer the assembled Level 1 structure when the conversion
+                        # failed and it exists. Its P-only trace carries the fold and
+                        # the corrected bond lengths, whereas coords_current is the
+                        # in-memory trace and may be a coarser stage of the same run.
                         _start_pdb = str(output_path / "start_rhofold.pdb")
-                        _coords_start = coords_vfold.copy()
-                        if L > 1:
-                            _pp = np.linalg.norm(
-                                _coords_start[1:] - _coords_start[:-1], axis=1)
-                            _pp_mean = float(_pp.mean())
-                            if 0.1 < _pp_mean < 20.0 and abs(_pp_mean - 5.9) > 0.5:
-                                _coords_start = _coords_start * (5.9 / _pp_mean)
-                        _write_coords_pdb(_coords_start, sequence, _start_pdb)
-                        refine_input = _start_pdb
+                        _asm_pdb = output_path / "vfold3d" / "assembled.pdb"
+                        if _count_pdb_atoms(_asm_pdb) > 0:
+                            refine_input = str(_asm_pdb)
+                            if verbose:
+                                print(f"    round 0: using vfold3d/assembled.pdb "
+                                      f"({_count_pdb_atoms(_asm_pdb)} atoms)")
+                        else:
+                            _coords_start = coords_vfold.copy()
+                            if L > 1:
+                                _pp = np.linalg.norm(
+                                    _coords_start[1:] - _coords_start[:-1], axis=1)
+                                _pp_mean = float(_pp.mean())
+                                if 0.1 < _pp_mean < 20.0 and abs(_pp_mean - 5.9) > 0.5:
+                                    _coords_start = _coords_start * (5.9 / _pp_mean)
+                            _write_coords_pdb(_coords_start, sequence, _start_pdb)
+                            refine_input = _start_pdb
                 else:
                     # write last round's best_coords to a temporary PDB as input
                     # (independent of prev_pdb_out)
@@ -1637,6 +1758,11 @@ def isrnaclong_pipeline(
                             ],
                         },
                         use_adaptive_tri_weight=True,
+                        # Publish the best replica every 500 exchange steps, so the
+                        # structure panel follows the refinement instead of holding
+                        # the coordinates this call started from for its whole
+                        # duration. The first two callback arguments are counts.
+                        on_report=(lambda r, n, e, c: _snapshot_cb(r, n, c)),
                     )
                 else:
                     _refine_result = _refine_fn(
@@ -1771,6 +1897,13 @@ def isrnaclong_pipeline(
             prev_energy = energy
             coords_current = coords_relaxed
 
+            # Keep the viewer pointed at what the refinement is doing right now, not
+            # at what it last accepted. `best_coords` only moves when a round beats
+            # the previous best, so during a run that is exploring, the snapshot
+            # would sit still round after round while the structure visibly changed.
+            if len(coords_relaxed) == len(sequence):
+                _coord_holder["coords"] = coords_relaxed
+
             if metrics.is_converged:
                 if verbose:
                     print(f"    converged!")
@@ -1802,6 +1935,7 @@ def isrnaclong_pipeline(
         raise
 
     # ── Level 2.3: 5-bead CG refinement (more accurate stacking/H-bond geometry than 3-bead) ──
+    _coord_holder["level"] = "2.3"
     _skip_5bead = False
     if use_5bead and best_coords is not None and len(best_coords) == len(sequence):
         # fast filter: skip 2.3 if the Level 2 output is already good enough
@@ -1856,6 +1990,7 @@ def isrnaclong_pipeline(
                 print(f"    5-bead refinement skipped: {e}")
 
     # ── Level 2.5: CG->allatom after REMD (convert the final CG coordinates to all-atom) ──
+    _coord_holder["level"] = "2.5"
     # Defined here rather than inside the conversion branch: the checkpoint save below
     # reads it, and a run restored from a checkpoint took the other branch and left it
     # unbound.
@@ -2049,18 +2184,10 @@ def isrnaclong_pipeline(
 
     # ── Level 3: RL fine-tuning (continuous action space) ──
     #
-    # From here to Level 5 the coordinates are refined in long single calls and
-    # nothing is written to disk until the very end. Start a background writer so
-    # `latest_cg.pdb` keeps up with the refinement: without it the structure panel
-    # has nothing new to show for the whole stretch, which is hours.
-    #
-    # The holder is a mutable box rather than a closure over `best_coords`,
-    # because `best_coords` is rebound in several nested scopes and a closure
-    # would keep reading whichever binding it captured.
-    _coord_holder = {"coords": best_coords}
-    _stop_snapshots = _start_snapshot_writer(_coord_holder, sequence, output_path)
-    if verbose:
-        print(f"    [snapshots] writing latest_cg.pdb every ~45s for the viewer")
+    # The snapshot writer that keeps `latest_cg.pdb` current through Levels 3 to 5
+    # was started back at Level 1.5; nothing to start here. Its holder is kept in
+    # step with `best_coords` at each reassignment below.
+    _coord_holder["coords"] = best_coords
 
     if ckpt_level >= 3:
         if verbose:
@@ -2106,19 +2233,10 @@ def isrnaclong_pipeline(
     # ── Level 3.5: Metadynamics enhanced sampling (crossing free-energy barriers along the CVs) ──
     # GPU batched version preferred (torch.cuda); OpenMM CPU is the fallback.
     #
-    # The GPU loop reports progress every 50 hill steps, so it can publish a
-    # structure at those points. Keyed to simulation steps rather than a timer:
-    # this machine runs about 5,000 of the 200,000 steps in four minutes, so a
-    # wall-clock writer and a step-based one differ by orders of magnitude in how
-    # much of the trajectory the viewer gets to see.
-    _snap_steps = 5000
-    _snap_state = {"n": 0}
-
-    def _snapshot_cb(step, total, coords):
-        if _write_snapshot(coords, sequence, output_path):
-            _snap_state["n"] += 1
-            if verbose and _snap_state["n"] % 4 == 1:
-                print(f"    [snapshot] step {step}/{total} -> latest_cg.pdb")
+    # The GPU loop reports progress every 50 hill steps and the callback for it is
+    # `_snapshot_cb`, defined up beside the snapshot writer so Level 2 can use the
+    # same one. Its label is whatever the holder currently says.
+    _coord_holder["level"] = "3.5"
 
     if ckpt_level >= 3.5:
         if verbose:
@@ -2530,6 +2648,22 @@ def isrnaclong_pipeline(
     # _cleanup_checkpoints is disabled: the checkpoint files (_checkpoint.json, ckpt_*.npy)
     # are used for later analysis (energy trajectories, REMD convergence curves,
     # best_coords traceback, etc.)
+    #
+    # What is reported here is the invariant that makes keeping them safe: every
+    # array on disk is one the manifest names. An unreferenced file means a field
+    # was replaced without its array being cleaned up, which is how the previous
+    # arrangement left four of them in a single output directory.
+    if verbose:
+        try:
+            _n_files, _n_bytes = _ckpt.disk_usage()
+            _orphans = _ckpt.orphaned_arrays()
+            print("\n  [checkpoint] %d array file(s), %.1f MB; level %s"
+                  % (_n_files, _n_bytes / 1e6, _ckpt._state.get("level")))
+            if _orphans:
+                print("  [checkpoint] WARNING: %d unreferenced array file(s): %s"
+                      % (len(_orphans), ", ".join(sorted(_orphans)[:5])))
+        except Exception:
+            pass
 
     # ── final data export ──
     try:
@@ -3194,12 +3328,20 @@ def _count_pdb_atoms(path) -> int:
     return n
 
 
-def _write_snapshot(coords, sequence, output_path):
+def _write_snapshot(coords, sequence, output_path, level=None):
     """Write the live structure once, atomically. Returns True on success.
 
     Split out of _start_snapshot_writer so a stage that can report its own progress
-    — the GPU metadynamics loop calls back every few thousand MD steps — can
-    publish a structure at those points instead of on a wall clock.
+    — the GPU metadynamics loop calls back every few thousand MD steps, and Level 2's
+    REMD every 500 exchange steps — can publish a structure at those points instead
+    of on a wall clock.
+
+    `level` names the stage the coordinates came from and is written alongside as
+    `latest_cg.meta`. The file used to imply its stage, because the writer only ever
+    ran from Level 3.5 and the viewer could hard-code that label; making the writer
+    run from Level 1.5 onward turned that label into a lie, and a run at Level 2
+    displayed "Level 3.5" over its own coarse-grained trace. A sidecar rather than an
+    in-file remark because the PDB is plain coordinates that other tools read.
 
     Atomic because the server reads this file from another process: a reader sees
     either the whole previous file or the whole new one, never a truncated one.
@@ -3212,6 +3354,14 @@ def _write_snapshot(coords, sequence, output_path):
         tmp = path.with_suffix(".pdb.tmp")
         _write_coords_pdb(coords, sequence, str(tmp))
         os.replace(str(tmp), str(path))
+        if level:
+            meta = Path(output_path) / "latest_cg.meta"
+            mtmp = meta.with_suffix(".meta.tmp")
+            try:
+                mtmp.write_text("%s\n" % level)
+                os.replace(str(mtmp), str(meta))
+            except OSError:
+                pass          # a label is not worth failing a snapshot over
         return True
     except Exception:
         return False
@@ -3261,7 +3411,10 @@ def _start_snapshot_writer(holder, sequence, output_path, interval=45.0):
         if coords is None:
             state["failures"] += 1
             return
-        if _write_snapshot(coords, sequence, output_path):
+        _lvl = None
+        if isinstance(holder, dict):
+            _lvl = holder.get("level")
+        if _write_snapshot(coords, sequence, output_path, level=_lvl):
             state["written"] += 1
         else:
             state["failures"] += 1

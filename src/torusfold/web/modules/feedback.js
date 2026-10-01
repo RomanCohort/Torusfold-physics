@@ -30,7 +30,11 @@
       if (comments) comments.value = '';
       // Uncheck all tags
       document.querySelectorAll('.feedback-tag input').forEach(function (cb) { cb.checked = false; });
+      const note = document.getElementById('feedback-status');
+      if (note) { note.hidden = true; note.textContent = ''; }
       renderHistory();
+      // Ask where it goes before the reader commits to pressing Submit.
+      Feedback.loadStatus();
     }
   };
 
@@ -59,21 +63,89 @@
         closure_distance: state.result.physical && state.result.physical.closure_distance_Ang,
         pair_rate: state.result.structural_3d && state.result.structural_3d.pair_satisfaction_rate,
       } : null,
+      // Which build and which screen, so a report can be placed without asking.
+      // Collected here rather than server-side: the server sees its own machine,
+      // not the reporter's, and "the panel was blank on my laptop" is only
+      // actionable with the second one.
+      context: {
+        userAgent: navigator.userAgent,
+        viewport: window.innerWidth + 'x' + window.innerHeight,
+        language: navigator.language,
+        page: location.pathname,
+        jobStatus: (TF.State && TF.State.jobId) ? 'job ' + TF.State.jobId : 'no job',
+      },
     };
 
     const entries = getEntries();
     entries.push(entry);
     saveEntries(entries);
 
-    // Also POST to server (fire and forget)
+    const btn = document.getElementById('feedback-submit');
+    const note = document.getElementById('feedback-status');
+    if (btn) btn.disabled = true;
+    setNote(note, 'Sending…', '');
+
+    // The message the reader gets must match what actually happened. The form used
+    // to say "Feedback saved" and stop there, which read as "sent" — and it was
+    // not: the entry went to localStorage and a file beside the server, and the
+    // maintainer never saw it. "Saved on this machine" and "emailed to the
+    // maintainer" are different promises and are reported separately.
     fetch('/api/feedback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(entry),
-    }).catch(function () { /* ignore */ });
+    }).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (res) {
+      if (btn) btn.disabled = false;
+      if (res && res.emailed) {
+        const to = (res.mail && res.mail.to) || 'the maintainer';
+        setNote(note, 'Emailed to ' + to + '. Thank you.', 'ok');
+        if (TF.App) TF.App.showToast('Feedback emailed. Thank you.', 'success');
+        Feedback.close();
+      } else {
+        // Saved here, not delivered. Say where it went, why it did not go further,
+        // and what would fix that — the reader can act on the third one.
+        const why = (res && res.mail && (res.mail.hint || res.mail.reason)) ||
+                    'the server did not accept it';
+        setNote(note, 'Saved on this machine, but not emailed: ' + why, 'warn');
+        if (TF.App) TF.App.showToast('Feedback saved locally — email is not set up.',
+                                     'info');
+      }
+    }).catch(function (e) {
+      if (btn) btn.disabled = false;
+      // Kept in localStorage either way, so nothing written is lost.
+      setNote(note, 'Saved in this browser, but the server could not be reached (' +
+                    e.message + '). It was not emailed.', 'warn');
+    });
+  };
 
-    TF.App && TF.App.showToast('Feedback saved', 'success');
-    Feedback.close();
+  function setNote(el, text, kind) {
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'feedback-status' + (kind ? ' is-' + kind : '');
+    el.hidden = false;
+  }
+
+  /* Where feedback goes, and whether it can get there. Asked once when the modal
+     opens so the button's promise is visible before it is pressed rather than
+     discovered afterwards. */
+  Feedback.loadStatus = function () {
+    const note = document.getElementById('feedback-status');
+    fetch('/api/feedback/status').then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (!s) return;
+        if (s.configured) {
+          setNote(note, 'Submitting sends this by email to ' + s.to + '.', 'ok');
+        } else {
+          setNote(note, 'Email is not configured on this server, so submitting will ' +
+                        'only save the note here. To enable it, set ' +
+                        (s.missing && s.missing.length ? s.missing.join(' and ')
+                                                       : 'the mail settings') +
+                        ' in .env.local.', 'warn');
+        }
+      }).catch(function () { /* the note stays as it was */ });
   };
 
   function updateStars(n) {

@@ -18,8 +18,14 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 # Candidates in order of improvement, earliest first. Each entry is
-# (level label, path relative to the output directory, what it is). The label is
-# what the viewer shows, so it names the stage rather than the file.
+# (level label, path relative to the output directory, what it is, scratch?).
+# The label is what the viewer shows, so it names the stage rather than the file.
+#
+# `scratch` marks a file that is a working artifact of a run in progress rather
+# than a result. Scratch files are shown only while a run is going; with no job
+# running they are debris, and since they are written last they are also the newest
+# files present, so any newest-wins rule hands them the panel. See
+# newest_structure()'s `include_scratch`.
 #
 # Paths are relative because not every structure lands at the top level: Level 1
 # writes into vfold3d/ and Level 2 works inside cg2aa/.
@@ -29,21 +35,30 @@ from typing import Dict, List, Optional, Tuple
 # file behind, so on a long run the newest displayable structure can be hours old.
 # That is a property of the pipeline, not of this list, and inventing a file to
 # fill the gap would be showing something that does not exist.
-VIEWER_STAGES: List[Tuple[str, str, str]] = [
-    ("1", "vfold3d/assembled.pdb", "segmented prediction, assembled"),
-    ("1.5", "level1_5_relaxed.pdb", "coarse-grained, globally relaxed"),
-    # Rewritten every ~45 s while Levels 3 to 5 refine, so the panel has something
-    # new to show through the long stretch that writes nothing else. It is a
-    # coarse-grained trace: P atoms only, one per residue.
-    ("3.5", "latest_cg.pdb", "refining (live)"),
-    ("2", "_final_cg_for_aa.pdb", "folding round complete"),
-    ("2.5", "final_allatom.pdb", "CG to all-atom placement"),
-    ("2.6", "final_allatom_refined.pdb", "PyRosetta refined"),
-    ("5", "level5_cg.pdb", "Amber refinement input"),
-    ("5", "level5_amber.pdb", "Amber14-OL3 refined"),
-    ("5.5", "level5_ppr.pdb", "base-pair repair applied"),
-    ("5.5", "isrnaclong_final.pdb", "final structure"),
+VIEWER_STAGES: List[Tuple[str, str, str, bool]] = [
+    ("1", "vfold3d/assembled.pdb", "segmented prediction, assembled", True),
+    ("1.5", "level1_5_relaxed.pdb", "coarse-grained, globally relaxed", True),
+    # Rewritten every ~12 s from Level 1.5 onward, so the panel has something new to
+    # show through the long stretches that write nothing else. It is a coarse-grained
+    # trace early on and refined coordinates later, which is why its label is not
+    # fixed here: the writer records the stage it was writing from in the sidecar
+    # `latest_cg.meta`, and _live_level reads it. Hard-coding a level is what made a
+    # run still at Level 2 display "Level 3.5" over its own trace.
+    ("live", "latest_cg.pdb", "refining (live)", True),
+    # `_final_cg_for_aa.pdb` is written as Level 2's own hand-off file, so it is
+    # scratch too: it is superseded by the all-atom structure that follows it.
+    ("2", "_final_cg_for_aa.pdb", "folding round complete", True),
+    ("2.5", "final_allatom.pdb", "CG to all-atom placement", False),
+    ("2.6", "final_allatom_refined.pdb", "PyRosetta refined", False),
+    ("5", "level5_cg.pdb", "Amber refinement input", False),
+    ("5", "level5_amber.pdb", "Amber14-OL3 refined", False),
+    ("5.5", "level5_ppr.pdb", "base-pair repair applied", False),
+    ("5.5", "isrnaclong_final.pdb", "final structure", False),
 ]
+
+# Written by `_write_snapshot` beside `latest_cg.pdb`, holding the stage label for
+# whichever coordinates are currently in that file.
+_LIVE_META = "latest_cg.meta"
 
 _PDB_COMPLETE_MARKERS = ("END", "ENDMDL")
 _state_lock = threading.Lock()
@@ -58,6 +73,26 @@ def _abs(output_dir: str, rel: str) -> str:
     accepted.
     """
     return os.path.join(output_dir, *rel.split("/"))
+
+
+def _live_level(output_dir: str, fallback: str) -> str:
+    """The stage label for `latest_cg.pdb`, from the sidecar the writer leaves.
+
+    That file is rewritten by whichever stage is running, so a label fixed in this
+    registry describes it wrongly for most of a run. The writer knows the answer and
+    records it; this reads it. Anything unreadable or unexpected falls back to the
+    label in the registry, which is honest about not knowing.
+    """
+    try:
+        with open(_abs(output_dir, _LIVE_META), "r", encoding="utf-8",
+                  errors="replace") as f:
+            text = f.read(64).strip()
+    except OSError:
+        return fallback
+    # Keep it short and plain: this goes straight into the viewer's label.
+    if not text or len(text) > 16 or not all(c.isdigit() or c == "." for c in text):
+        return fallback
+    return text
 
 
 def _is_complete(path: str) -> bool:
@@ -169,12 +204,22 @@ def _pick(candidates: List[Dict]) -> Optional[Dict]:
     return (all_atom or ordered)[0]
 
 
-def newest_structure(output_dir: str, run_started_at: Optional[float] = None) -> Optional[Dict]:
+def newest_structure(output_dir: str, run_started_at: Optional[float] = None,
+                     include_scratch: bool = True) -> Optional[Dict]:
     """The furthest-along finished structure in `output_dir`, or None.
 
     `run_started_at` guards against a stale file from a previous run being shown
     as the current one: a file older than the run that is producing it cannot
     belong to that run.
+
+    `include_scratch` decides whether the run's own working files are eligible.
+    They are scratch: `latest_cg.pdb` is rewritten every few seconds and
+    `level1_5_relaxed.pdb` holds a coarse-grained trace, and both are only
+    meaningful as a picture of a run that is in progress. With no job running they
+    are debris, and because they are written last they are also the newest files in
+    the directory — so a plain newest-wins rule hands them the panel. That is what
+    left the 3D view showing a ten-atom test trace instead of the 2,013 nt model
+    after a run was stopped: the debris was newer than the result.
     """
     if not output_dir or not os.path.isdir(output_dir):
         return None
@@ -182,16 +227,22 @@ def newest_structure(output_dir: str, run_started_at: Optional[float] = None) ->
     # Cheap signature so the expensive checks only run when something changed.
     # Keyed on the relative path, not the basename: two stages can share a
     # filename in different subdirectories.
+    #
+    # `include_scratch` is part of the signature: the same directory yields a
+    # different answer with it on and off, and a cached result from the other mode
+    # would be served for a run that had started or stopped in between.
     try:
-        entries = []
-        for _level, rel, _desc in VIEWER_STAGES:
+        entries = [("scratch", int(bool(include_scratch)), 0)]
+        for _level, rel, _desc, _scratch in VIEWER_STAGES:
+            if _scratch and not include_scratch:
+                continue
             p = _abs(output_dir, rel)
             if os.path.isfile(p):
                 st = os.stat(p)
                 entries.append((rel, int(st.st_mtime), st.st_size))
     except OSError:
         return None
-    if not entries:
+    if len(entries) < 2:
         return None
     signature = tuple(entries)
 
@@ -213,7 +264,9 @@ def newest_structure(output_dir: str, run_started_at: Optional[float] = None) ->
     # did, so that is what gets shown. Depth is only a tie-break, for the case of
     # several stages written in the same second.
     candidates = []
-    for order, (level, rel, desc) in enumerate(VIEWER_STAGES):
+    for order, (level, rel, desc, scratch) in enumerate(VIEWER_STAGES):
+        if scratch and not include_scratch:
+            continue
         path = _abs(output_dir, rel)
         if not os.path.isfile(path):
             continue
@@ -225,9 +278,12 @@ def newest_structure(output_dir: str, run_started_at: Optional[float] = None) ->
         if atoms < 1:
             continue
         candidates.append({
-            "level": level, "name": rel, "desc": desc, "path": path,
+            "level": (_live_level(output_dir, level) if rel == "latest_cg.pdb"
+                      else level),
+            "name": rel, "desc": desc, "path": path,
             "atoms": atoms, "bytes": os.path.getsize(path),
             "mtime": os.path.getmtime(path), "_order": order,
+            "scratch": scratch,
         })
 
     best = _pick(candidates)

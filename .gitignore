@@ -88,3 +88,18 @@ test_*_ss.txt
 .claude/*
 !.claude/RESPONSIBLE_AI_USE.md
 torusfold-paper/
+
+# ── Runtime state written by the server, never source ───
+# The feedback the form collects, beside the server that received it. It is one
+# machine's inbox: committing it would publish whatever anyone typed, which is
+# neither ours to publish nor useful to a reader of the repository.
+feedback.json
+# The web server's output directory: checkpoints, scratch PDBs, run logs.
+output_web/
+# Web-triggered runs from earlier invocations of the app.
+output_2013nt/
+results/plan_c/
+# Local calibration sets downloaded for a scoring check.
+_calib/
+# The empty upload slot the PDB-upload endpoint writes into.
+output_web/uploaded.pdb

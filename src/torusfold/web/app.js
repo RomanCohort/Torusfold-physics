@@ -234,6 +234,22 @@
     if (viewer && viewer.setSurfaceOpacity) viewer.setSurfaceOpacity(v);
   });
 
+  /* ═══════════════ DEMO STRUCTURE ═══════════════ */
+
+  /* Two entry points, one action: the placeholder's button, which is what is on
+     screen when the panel is empty, and the toolbar's, which stays reachable after a
+     run has put its own structure there. Both call the same function.
+     
+     `showDemoStructure` is declared further down, beside the other viewer paths.
+     A function declaration hoists, so these listeners can name it here; call it at
+     click time and it is defined by then either way. */
+  var demoBtn = $('btn-demo-structure');
+  if (demoBtn) demoBtn.addEventListener('click', function () { showDemoStructure(); });
+  var demoToolbarBtn = $('btn-demo-structure-toolbar');
+  if (demoToolbarBtn) demoToolbarBtn.addEventListener('click', function () {
+    showDemoStructure();
+  });
+
   /* ═══════════════ PARAMETERS (built from the server schema) ═══════════════ */
 
   /* The knob list is not written here. serve.py owns _PARAM_SPEC, derives each
@@ -427,6 +443,31 @@
                                : '5.5';
   }
 
+  /* A stage's NAME from its POSITION.
+
+     The server publishes both, under names that do not say which is which:
+     `current_level` is the index (0-11) and `level_name` is the label ('2.5').
+     Both are plausible-looking values — small numbers either way — so using one
+     where the other belongs is silent. It was done in two places:
+
+       - the heartbeat fed `current_level` to updateProgress, which looks a name up;
+         index 4 became the name '4', and '4' is a real level (REST2) at position 9,
+         so the strip highlighted the wrong tile and drifted further off each stage
+         while indices 1-3 matched nothing at all;
+       - applyRunState fed it to levelIndex for the ladder, which missed every time
+         and left the ladder with no stage marked.
+
+     A function rather than a comment because the trap is in the naming, and the
+     next person to read `current_level` will make the same inference. */
+  function levelNameAt(index) {
+    if (index == null) return null;
+    if (typeof index === 'number' && isFinite(index)) {
+      return index >= 0 && index < activeLevels.length
+        ? levelKey(activeLevels[index].level) : null;
+    }
+    return String(index);
+  }
+
   function resetProgress() {
     if (progressSteps) {
       var steps = progressSteps.querySelectorAll('.progress-step');
@@ -592,15 +633,19 @@
       return;
     }
 
-    // current_level is the server's level NAME ('2.5'), while buildLadder compares
-    // positions, so it is converted here. Passing the level straight through made
-    // "level 2.5" mean "position 2.5" and the ladder marked the wrong stage done.
+    // Adopt the server's stage list before anything is looked up in it: levelIndex,
+    // levelNameAt and labelHeaderStrip all read activeLevels, so the names and the
+    // order have to come from the server rather than from the copy in this file.
     if (state.levels && state.levels.length) {
       activeLevels = state.levels.map(function (lv) {
         return { level: lv.level, name: lv.label };
       });
     }
-    buildLadder(state.levels, levelIndex(state.current_level));
+
+    // buildLadder compares POSITIONS, and current_level is a position, so it goes
+    // straight through. It used to be wrapped in levelIndex() as though it were a
+    // name, which missed every time — the ladder never marked a stage.
+    buildLadder(state.levels, state.current_level);
     labelHeaderStrip(state.levels);
     renderPlan(state.plan);
 
@@ -696,7 +741,7 @@
       }
     }
 
-    showStructure(state.structure);
+    showStructure(state.structure, state.job_running === true);
     renderLiveMetrics(state.metrics);
   }
 
@@ -852,13 +897,26 @@
    */
   var shownStructure = null;
   var shownDigest = null;
-  function showStructure(stage) {
+  // True while the panel is showing the requested demo rather than a run's output.
+  // Kept as a flag rather than folded into shownStructure because the two answer
+  // different questions: what is loaded, and whether the reader asked for it.
+  var showDemoFlag = false;
+  function showStructure(stage, runIsActive) {
     var labelEl = $('viewer-stage');
     var levelEl = $('viewer-stage-level');
     var descEl = $('viewer-stage-desc');
     var sameEl = $('viewer-stage-same');
 
     if (!stage) return;
+    // A run's own structure takes precedence over a demo the reader asked for: once
+    // there is real output, the demo is stale by definition. Outside a run the demo
+    // stays put, so a heartbeat does not throw away what someone chose to look at.
+    //
+    // `runIsActive` comes from the server's own job status rather than from
+    // TF.State.jobId, which survives the end of a run and would therefore keep
+    // "a run is happening" true forever.
+    if (showDemoFlag && !runIsActive) return;
+    showDemoFlag = false;
     // Keyed on the file, not its contents: the label must follow the stage even
     // when the coordinates did not change.
     var key = stage.name + '|' + stage.mtime;
@@ -916,8 +974,118 @@
      looks like the run was lost. */
   function showLastStructure() {
     fetch('/api/structure').then(function (r) { return r.json(); }).then(function (s) {
-      if (s && s.available) showStructure(s);
+      if (s && s.available) {
+        showStructure(s, false);
+      } else {
+        // Nothing to show. Say so, and offer the demo, rather than presenting a
+        // borrowed structure as the current one — which is what the panel used to
+        // do, and why it displayed a 2,013 nt model over a run that had produced
+        // nothing, and a 10-atom leftover trace over a run that had been stopped.
+        showViewerEmpty();
+      }
     }).catch(function () { /* panel stays as it was */ });
+  }
+
+  /* The viewer's empty state, with a reason.
+     The placeholder's text is set here rather than left static because the two ways
+     of being empty need different words: nothing has run yet, versus a run exists
+     and left no displayable result. */
+  function showViewerEmpty(reason) {
+    showDemoFlag = false;
+    var ph = $('viewer-placeholder');
+    var titleEl = $('viewer-placeholder-title');
+    var hintEl = $('viewer-placeholder-hint');
+    var labelEl = $('viewer-stage');
+    if (titleEl) titleEl.textContent = 'No structure loaded';
+    if (hintEl) {
+      hintEl.textContent = reason ||
+        'Run a prediction, load a local PDB, or open the demo structure below';
+    }
+    if (ph) ph.style.display = '';
+    if (labelEl) labelEl.hidden = true;
+  }
+
+  /* Show the delivered 2,013 nt model, because someone asked for it.
+     Deliberately not automatic. It is a showcase rather than an output — it belongs
+     to no run on this machine — and a panel that fills itself with it is claiming
+     "this is your result" about a structure the run had nothing to do with. */
+  function showDemoStructure() {
+    var levelEl = $('viewer-stage-level');
+    var descEl = $('viewer-stage-desc');
+    var labelEl = $('viewer-stage');
+    var sameEl = $('viewer-stage-same');
+
+    fetch('/api/structure/demo').then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    }).then(function (pdb) {
+      if (!viewer) viewer = new CircRNAViewer('viewer');
+      TF.Viewer = TF.Viewer || {};
+      TF.Viewer.instance = viewer;
+      showDemoFlag = true;
+      // Claim the shown-structure key so the next heartbeat does not immediately
+      // reload something else over it.
+      shownStructure = 'demo';
+      shownDigest = null;
+      if (labelEl) {
+        labelEl.hidden = false;
+        if (levelEl) levelEl.textContent = 'Demo';
+        if (descEl) descEl.textContent = 'delivered model · 2013 nt · 42,831 atoms ' +
+                                          '· not from your run';
+      }
+      if (sameEl) sameEl.hidden = true;
+      // `mount`, not `updateStructure`. updateStructure deliberately keeps the camera
+      // so a run's checkpoints do not appear to jump — but the demo is a different
+      // molecule at a very different size, and inheriting a camera framed on a
+      // 12-residue leftover would leave a 2,013 nt model either invisible or clipped.
+      // mount re-frames with zoomTo.
+      return viewer.mount(pdb, viewer.fp || {});
+    }).then(function () {
+      var ph = $('viewer-placeholder');
+      if (ph) ph.style.display = 'none';
+      // Ask for the demo's own measurements. The heartbeat's `metrics` describe
+      // whatever the idle page was showing, so without this the readout would go on
+      // reporting a previous run's leftover while a 2,013 nt model fills the panel.
+      //
+      // The server measures before answering, which takes ~11 s on 42,831 atoms, so
+      // the readout is cleared first: leaving the previous structure's numbers under
+      // a picture of a different one is the disagreement the source line exists to
+      // prevent. `renderPhysical` with no numbers empties the gauges; the note says
+      // why. Nothing re-renders on its own while nothing is running — the SSE
+      // heartbeat only flows during a run — so a reply that is still stale is handed
+      // to scheduleMetricsRetry, which already exists for exactly this wait.
+      renderLiveMetrics({ live: true, pending: true });
+      if (TF.Panels && TF.Panels.renderPhysical) TF.Panels.renderPhysical({ physical: {} });
+      var noteEl = $('live-metrics-source');
+      if (noteEl) {
+        noteEl.hidden = false;
+        noteEl.textContent = 'measuring the demo structure — SASA on 42,831 atoms ' +
+                             'takes about ten seconds';
+      }
+      if (TF.App && TF.App.showToast) {
+        TF.App.showToast('Measuring the demo structure. This takes about ten ' +
+                         'seconds on 42,831 atoms.', 'info');
+      }
+      return fetch('/api/metrics/demo').then(function (r) { return r.json(); });
+    }).then(function (m) {
+      if (m && m.metrics) {
+        // The server waits for the measurement, so this is usually the real thing.
+        // If it ran out of patience the payload is stale and the retry path finishes
+        // the job — the same path that covers a slow measurement on first page load.
+        renderLiveMetrics(m.metrics);
+        if (m.metrics.stale || m.metrics.pending) {
+          scheduleMetricsRetry(m.metrics.for_digest);
+        }
+      }
+      if (TF.App && TF.App.showToast) {
+        TF.App.showToast('Loaded the demo structure (2013 nt). The readout has its ' +
+                         'own numbers and says they are not from your run.', 'info');
+      }
+    }).catch(function (e) {
+      if (TF.App && TF.App.showToast) {
+        TF.App.showToast('Could not load the demo structure: ' + e.message, 'error');
+      }
+    });
   }
 
   /* A page refresh loses the job id the browser was holding. Rather than
@@ -957,7 +1125,7 @@
         if (runReconnect) runReconnect.hidden = true;
         pipelineStartTime = s.started_at ? s.started_at * 1000 : Date.now();
         if (predictBtn) predictBtn.disabled = true;
-        updateProgress(s.current_level == null ? 0 : s.current_level, 'running');
+        updateProgress(levelNameAt(s.current_level), 'running');
         showToast('Re-attached to running job ' + s.job_id, 'info');
         if (TF.Console && TF.Console.connect) TF.Console.connect(s.job_id);
         startPolling(s.job_id);
@@ -1036,11 +1204,34 @@
 
   /* Update every progress display from a level NAME and a status.
 
-     activeLevel is a level ('2.5'), not an array index. Both callers used to pass
-     an index from a six-entry list, and the server sends a level, so the two
-     meanings collided: the heartbeat's "level 2.5" was read as "the 2.5th stage"
-     and clamped, highlighting an unrelated row. */
+     activeLevel is a level NAME ('2.5'). An index is accepted and converted — see
+     the note at the top of the body — but a name is what this means.
+
+     Both callers used to pass an index from a six-entry list while the server sent
+     a level, and the two meanings collided: the heartbeat's "level 2.5" was read as
+     "the 2.5th stage" and clamped, highlighting an unrelated row. That was fixed by
+     renaming, and then reintroduced the same way: serve.py publishes `current_level`
+     as an index and `level_name` as the label, and the heartbeat handler passed the
+     index. Names and positions are both small numbers here, so nothing complains. */
   function updateProgress(activeLevel, statusText) {
+    // An index is accepted and converted, because the server publishes the same
+    // stage under two names and they are not interchangeable: `current_level` is
+    // the position in its twelve-stage list (0-11) and `level_name` is the label
+    // ('2.5'). Passing the first where the second belongs is silent, not loud —
+    // index 4 was looked up as the name '4', and '4' is a real level (REST2) at
+    // position 9, so the header lit the wrong tile and drifted further off with
+    // every stage. Indices 1, 2 and 3 matched no tile at all, which is how the
+    // strip came to look like it was highlighting stages at random.
+    //
+    // Normalising here rather than at each call site is deliberate: there were six
+    // call sites and every new one was another chance to make the same mistake.
+    // -1 keeps its meaning of "no particular stage".
+    if (typeof activeLevel === 'number' && isFinite(activeLevel)) {
+      activeLevel = activeLevel >= 0 && activeLevel < activeLevels.length
+        ? levelKey(activeLevels[activeLevel].level)
+        : String(activeLevel);
+    }
+
     var idx = levelIndex(activeLevel);
     if (progressSteps) {
       var steps = progressSteps.querySelectorAll('.progress-step');
@@ -1094,7 +1285,7 @@
      makes a re-attached page and a live session render identically. */
   EventBus.on('sse:heartbeat', function (data) {
     applyRunState(data);
-    if (data.current_level != null) updateProgress(data.current_level, 'running');
+    if (data.current_level != null) updateProgress(levelNameAt(data.current_level), 'running');
   });
 
   EventBus.on('sse:done', function (data) {

@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -1437,6 +1437,7 @@ def segmented_vfold3d_pipeline(
     msa_blocks: Optional[List[Dict]] = None,
     global_bpp: Optional[np.ndarray] = None,
     far_pairs: Optional[List] = None,
+    on_chunk: Optional[Callable] = None,
 ) -> Tuple[np.ndarray, str, List[float], float]:
     """Full segmented 3D-prediction + Kabsch-assembly pipeline.
 
@@ -1558,6 +1559,38 @@ def segmented_vfold3d_pipeline(
                 segment_coords[idx] = _geometric_init(segments[idx]["seq"])
                 chunk_confidences[idx] = 0.0
                 chunk_uncertainties[idx] = 1.0
+
+            # Report the chunk that just landed, with the chain as it stands.
+            #
+            # Level 1 is the longest stretch of the pipeline with nothing on disk:
+            # the assembled structure is written once, at the end, so a run over
+            # ~11 chunks shows the panel the same frame for all of it. Each chunk is
+            # minutes, so the half-built chain is worth seeing.
+            #
+            # Fires for a single chunk too. Gating on `len(segments) > 1` looked
+            # sensible — one chunk means the pipeline is already holding the whole
+            # chain — but a single chunk is still minutes of RhoFold+, and the
+            # caller's only other source of a frame is the wall-clock writer. The
+            # first frame of a run is exactly the one worth having.
+            #
+            # The partial chain goes through the same Kabsch assembly as the final
+            # one, over the finished segments only — not a straight line between the
+            # last finished chunk and the first unfinished one, which would be
+            # geometry the pipeline never produced. Segments that have not finished
+            # are still zero-filled by that assembly, so the panel shows the finished
+            # chunks plus a clump at the origin until the next one lands.
+            if on_chunk is not None:
+                try:
+                    done = [i for i, c in enumerate(segment_coords) if c is not None]
+                    if done:
+                        partial = assemble_segments(
+                            [segment_coords[i] for i in done],
+                            [segments[i] for i in done],
+                            L,
+                        )
+                        on_chunk(len(done), len(segments), partial)
+                except Exception:                            # noqa: BLE001
+                    pass
 
     # ── merge the per-chunk NCM distance back-inference results ──
     ncm_ensemble_pairs: List[Tuple[int, int, str, float]] = []

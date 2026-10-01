@@ -2672,8 +2672,22 @@ class BatchedREMD2D:
         initial_velocities: Optional["torch.Tensor"] = None,  # New: velocities carried across rounds
         potentials: Optional[dict] = None,
         constraints: "Union[None, bool, rigid_bonds.DistanceConstraints]" = None,
+        # Called once per exchange/report round with (round_no, n_rounds, e_min, p_coords).
+        # A display hook: it is caught and ignored if it raises, so a caller cannot
+        # lose a multi-hour simulation to a failed write. See run().
+        on_report: Optional[Callable] = None,
     ):
         assert TORCH_OK
+        # The replica grid is n_t x n_lam, and an axis of 0 makes the whole grid
+        # empty. That used to be accepted here and to surface much later as a
+        # reduction error from inside the constraint solver, during the relaxation
+        # that precedes sampling — so the sampler never ran and nothing said why.
+        # A caller that asks for no replicas has made an arithmetic mistake; say so
+        # here, where the number it asked for is still in the message.
+        if int(n_t) < 1:
+            raise ValueError(
+                "n_t must be at least 1 (the replica grid is n_t x %d lambdas, so "
+                "n_t=0 means no replicas at all)" % len(list(lambdas)))
         self.temps = np.geomspace(t_lo, t_hi, n_t).tolist()
         self.lambdas = list(lambdas)
         self.exchange_interval = exchange_interval
@@ -2707,6 +2721,7 @@ class BatchedREMD2D:
         self.tri_stage_config = tri_stage_config
         self.initial_global_step = initial_global_step
         self.initial_velocities = initial_velocities
+        self.on_report = on_report
         # Keyword arguments forwarded to EVERY cg_energy_forces call in run(), e.g.
         # {"bond_potential": make_potential("bb_bond", ("table_wall", 200.0))}.
         #
@@ -3105,6 +3120,17 @@ class BatchedREMD2D:
         with torch.no_grad():
             for _ in range(500):
                 _e, _f = _cg(pos, lams=lams_t)
+                if _e.numel() == 0 or _f.numel() == 0 or pos.numel() == 0:
+                    # The reduction dims error from deep inside SHAKE says only that
+                    # something is empty, and by then the frame that produced the empty
+                    # tensor is gone. Naming the shapes here turns a three-level
+                    # traceback into the one line that identifies which of the three
+                    # is wrong.
+                    raise RuntimeError(
+                        "empty tensor before the Langevin relaxation step: "
+                        "pos%s energy%s forces%s (L=%d, n_rep=%d)"
+                        % (tuple(pos.shape), tuple(_e.shape), tuple(_f.shape),
+                           L, n_rep))
                 pos, vel = batch_langevin_step(
                     pos, vel, _f, temps_t, dt_ps=self.dt,
                     force_fn=lambda _p: _cg(_p, lams=lams_t)[1],
@@ -3368,10 +3394,15 @@ class BatchedREMD2D:
 
             i_min = int(np.argmin(energies))
             e_now = float(energies[i_min])
+            # The current best replica's P trace, regardless of whether it improves on
+            # the running best. Reported below so a caller can publish a structure as
+            # the simulation proceeds; `best_pos` only moves on a >1% improvement, so
+            # a caller keyed on it would sit still across reports that visibly changed.
+            _now_pos = pos[i_min].detach().cpu().numpy()[0::3] * 10.0
             # An improvement counts only if it exceeds 1% (avoids noise-triggered false early-stops)
             if e_now < best_e * 0.99:
                 best_e = e_now
-                best_pos = pos[i_min].detach().cpu().numpy()[0::3] * 10.0
+                best_pos = _now_pos
                 best_pos_3bead = pos[i_min].detach().clone()  # full 3-bead state
                 no_improve_count = 0
             else:
@@ -3411,6 +3442,23 @@ class BatchedREMD2D:
                     elif tri_cg_ratio < 0.001:
                         print(f"    [GPU-2D] ⚠️ Tri energy share too low ({tri_cg_ratio:.3%}), "
                               f"TriRNASP is nearly ineffective! Consider raising trirnasp_scale")
+
+            # Hand the current best replica out, once per exchange/report round.
+            #
+            # This is what lets a caller show the refinement as it happens. Without
+            # it the only structure a REMD call produces is the one it returns, so a
+            # single call lasting hours — which is what multistage REMD is — leaves
+            # the structure panel showing the coordinates it started from for the
+            # whole of it. The callback is deliberately outside the `if verbose`
+            # block: whether the log is being written has nothing to do with whether
+            # the run has something new to display.
+            #
+            # Wrapped because a display hook must never be able to abort a simulation.
+            if self.on_report is not None:
+                try:
+                    self.on_report(rep + 1, n_reports, e_now, _now_pos)
+                except Exception:
+                    pass
 
             # Early stop: no >1% improvement for patience consecutive rounds
             if no_improve_count >= patience:
