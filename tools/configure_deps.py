@@ -34,6 +34,9 @@ import time
 from typing import Dict, List, Optional, Tuple
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The package root, for the one check that has to import a wrapper rather than
+# inspect a path (see the wsl_only branch in discover()).
+SRC = os.path.join(REPO, "src")
 
 # Publish .env.local before anything reads a tool variable. Without this the
 # wrapper check below imports the wrappers with an empty environment, they build
@@ -131,6 +134,22 @@ TOOLS = [
         "required": False,
         "note": "Opt-in only; loaded through transformers AutoModel.",
         "hints": ["structRFM", "structrfm"],
+    },
+    {
+        "key": "rsrnasp1",
+        "title": "rsRNASP1 (all-atom quality score)",
+        "env": ["TORUSFOLD_RSRNASP"],
+        "probe": None,
+        "levels": "final quality score on the all-atom structure",
+        "required": False,
+        # Deliberately resolvable two ways, and neither is a path on this machine:
+        # the binary is a Linux build that only runs inside WSL, so `resolved` is a
+        # WSL-side directory and the usual filesystem checks do not apply.
+        "note": "Linux-only C++ build (Makefile + gcc). Runs via WSL; point "
+                "TORUSFOLD_RSRNASP at the checkout as a WSL path. Without it the "
+                "rsRNASP1 row in the interface reports n/a rather than a score.",
+        "hints": ["rsRNASP1", "rsrnasp1"],
+        "wsl_only": True,
     },
 ]
 
@@ -364,10 +383,12 @@ def _run_smoke(exe: str, timeout: float = 25.0) -> Tuple[bool, str]:
     """Can this executable actually start?
 
     Necessary because presence is not capability for native Windows binaries: a
-    copy can be there and immediately exit with a loader error. On this machine
-    four copies of CG_to_allatom.exe exist and three of them die at load time
-    with 0xC0000135 (DLL not found). Reporting one of those as "found" would send
-    the user off to configure an environment variable that cannot work.
+    copy can be there and immediately exit with a loader error, most often
+    0xC0000135 (a required DLL is not beside it).
+
+    This only proves the binary loads. It does not prove the tool will work —
+    CG_to_allatom.exe loads cleanly and then refuses to run without its five
+    coefficient files, which is a separate check (`_isrnacirc_coeff`).
     """
     import subprocess
     if not os.path.isfile(exe):
@@ -389,6 +410,48 @@ def _run_smoke(exe: str, timeout: float = 25.0) -> Tuple[bool, str]:
     if rc in known:
         return False, known[rc]
     return True, "runs (exit %s)" % p.returncode
+
+
+# The files CG_to_allatom.exe opens before it will do anything. Reading
+# CG_to_allatom.h: it opens coeffDIR+"AA_baseA.dat" first and prints
+# "Wrong coeffDIR" if that fails, then G, C, U and AA_backbone.dat.
+CG_COEFF_FILES = ("AA_baseA.dat", "AA_baseG.dat", "AA_baseC.dat",
+                  "AA_baseU.dat", "AA_backbone.dat")
+
+
+def find_cg_coeff_dir(root: str) -> Optional[str]:
+    """Where CG_to_allatom's coefficient files are, found rather than assumed.
+
+    The templates are NOT in `Data/`, which is what both the binary's own
+    documented default (`../Data/data/`) and an earlier version of this script
+    assumed. On the distributed package they are in `Data/data/IsRNA2/`, so a
+    correctly installed isRNAcirc still fails with "Wrong coeffDIR" — a message
+    that names the directory and not the missing files, which is why this looked
+    like a broken binary for some time.
+    """
+    if not root or not os.path.isdir(root):
+        return None
+
+    def has_all(path):
+        return os.path.isdir(path) and all(
+            os.path.isfile(os.path.join(path, name)) for name in CG_COEFF_FILES
+        )
+
+    if has_all(root):
+        return root
+    for rel in (("Data", "data", "IsRNA2"), ("data", "IsRNA2"),
+                ("data", "data", "IsRNA2"), ("Data", "data"), ("data",)):
+        candidate = os.path.join(root, *rel)
+        if has_all(candidate):
+            return candidate
+    # Bounded search, for a copy that has been rearranged.
+    for base, dirs, _files in os.walk(root):
+        if base[len(root):].count(os.sep) > 3:
+            dirs[:] = []
+            continue
+        if has_all(base):
+            return base
+    return None
 
 
 def _isrnacirc_layout(root: str) -> Dict[str, Optional[str]]:
@@ -516,6 +579,29 @@ def discover(roots: List[str], verbose: bool = False) -> Dict:
                 break
         resolved, source, reason = None, None, ""
 
+        # A WSL-only tool cannot be resolved from here. Its path is a POSIX path
+        # inside the Linux distribution — /home/... does not exist as far as this
+        # process is concerned — so exists(), _looks_like_tool and the filesystem
+        # search are all the wrong question. Ask the wrapper that has to invoke it,
+        # which probes inside WSL where the binary actually lives.
+        if tool.get("wsl_only"):
+            try:
+                sys.path.insert(0, SRC)
+                from torusfold.scheme2 import rsrnasp_quality as _rs
+                probe = _rs.available()
+            except Exception as exc:                     # noqa: BLE001
+                probe = {"available": False, "why": "check failed: %s" % exc}
+            if probe.get("available"):
+                entry["resolved"] = probe.get("root")
+                entry["source"] = "wsl"
+                entry["reason"] = "reachable inside %s" % (probe.get("distro") or "WSL")
+            else:
+                entry["reason"] = probe.get("why", "not available")
+            entry["wsl_probe"] = probe
+            entry.update({"usable": bool(probe.get("available"))})
+            result["tools"].append(entry)
+            continue
+
         if env_value:
             ok, why = _looks_like_tool(env_value, tool)
             if ok:
@@ -582,29 +668,47 @@ def discover(roots: List[str], verbose: bool = False) -> Dict:
                 entry["isrnacirc_usable"] = False
                 entry["isrnacirc_why"] = "no IsRNAcirc.exe/.out in this tree"
 
+            # Locate the coefficient files, and treat their absence as a failure.
+            #
+            # This is the check that matters. `Data/` existing proves nothing: on
+            # the distributed package Data/ is present, CG_to_allatom.exe loads
+            # cleanly, and the conversion still cannot run because the five
+            # AA_*.dat templates live in Data/data/IsRNA2/, a directory the
+            # binary's own default does not point at. That combination was
+            # previously reported as present-and-usable while every conversion
+            # failed with "Wrong coeffDIR".
+            coeff = find_cg_coeff_dir(resolved)
+            entry["cg_coeff_dir"] = coeff
             if not cg_ok:
                 resolved = None
                 source = None
                 entry["reason"] = ("CG_to_allatom.exe %s (in %s)"
                                    % (entry["cg_to_allatom_why"],
                                       layout["bin_dir"] or "?"))
-            elif not layout["data"]:
-                # Launching is not converting. A copy that only exits on an
-                # argument error proves the loader is satisfied, not that it can
-                # do the job: one such copy on this machine parses every residue
-                # as GUA and exits 1. Without Data/ the conversion cannot run at
-                # all, so the tool is not usable however cleanly it launches.
+            elif not coeff:
                 resolved = None
                 source = None
-                entry["reason"] = ("CG_to_allatom.exe launches but there is no Data/ "
-                                   "directory for it in %s; the conversion needs both"
-                                   % (layout["bin_dir"] or "?"))
+                entry["reason"] = (
+                    "CG_to_allatom.exe launches but its coefficient files (%s) "
+                    "are nowhere in the tree, so the conversion cannot run: it "
+                    "exits with \"Wrong coeffDIR\". They are usually in "
+                    "Data/data/IsRNA2/."
+                    % ", ".join(CG_COEFF_FILES[:2]))
+            elif not layout["data"]:
+                # Launching and having coefficients is still not the whole tool:
+                # the MD refinement path needs Data/ as well.
+                entry["reason"] = ("CG->all-atom ready (coeff: %s); Data/ is "
+                                   "absent so the isRNAcirc refinement path is not"
+                                   % coeff)
             elif not entry.get("isrnacirc_usable"):
                 # The CG->all-atom path works; the MD refinement path does not.
                 # That is a partial result, and saying so is more useful than
                 # calling the whole tool missing.
-                entry["reason"] = ("CG->all-atom usable; IsRNAcirc refinement %s"
-                                   % entry.get("isrnacirc_why", "unusable"))
+                entry["reason"] = ("CG->all-atom usable (coeff: %s); IsRNAcirc "
+                                   "refinement %s"
+                                   % (coeff, entry.get("isrnacirc_why", "unusable")))
+            else:
+                entry["reason"] = "CG->all-atom and refinement both usable"
 
         # Some wrappers execute a FILE rather than point at a directory. Resolve
         # that here, so what gets written to the environment is runnable.
@@ -649,11 +753,23 @@ def env_for(result: Dict) -> Dict[str, str]:
         root = t["resolved"]
         if key == "isrnacirc":
             layout = t.get("layout") or {}
-            if layout.get("cg_to_aa"):
-                env["ISRNACIRC_BIN_DIR"] = layout["bin_dir"]
+            # ISRNACIRC_ROOT is the tree the wrapper expands from: it looks for
+            # bin/ and Data/ underneath it. Going up one level from Data/ gives
+            # that tree.
             if layout.get("data"):
                 env["ISRNACIRC_ROOT"] = os.path.dirname(layout["data"])
-                env["CG_TO_ALLATOM_COEFF"] = layout["data"]
+            elif layout.get("bin_dir"):
+                env["ISRNACIRC_ROOT"] = os.path.dirname(layout["bin_dir"])
+            if layout.get("cg_to_aa"):
+                env["ISRNACIRC_BIN_DIR"] = layout["bin_dir"]
+            # The coefficient directory, NOT Data/. This used to be set to Data/,
+            # which is a real directory and therefore looked correct, while the
+            # five AA_*.dat files it must contain are one level further down in
+            # Data/data/IsRNA2/. The wrapper passed Data/ straight through and
+            # every conversion failed with "Wrong coeffDIR".
+            coeff = t.get("cg_coeff_dir")
+            if coeff:
+                env["CG_TO_ALLATOM_COEFF"] = coeff
         elif key == "rhofold":
             env["RHOFOLD_ROOT"] = root
         elif key == "rnabpflow":

@@ -48,26 +48,62 @@ def _find_isrnacirc_exe(root):
 _ISRNACIRC_EXE = _find_isrnacirc_exe(_ISRNACIRC_ROOT)
 
 
-def _resolve_data_dir(root):
-    """The Data/ directory for IsRNAcirc, accepting either the root or Data itself.
+# The five files CG_to_allatom reads. From CG_to_allatom.h: it opens
+# coeffDIR+"AA_baseA.dat" and reports "Wrong coeffDIR" if that fails.
+_COEFF_FILES = ("AA_baseA.dat", "AA_baseG.dat", "AA_baseC.dat",
+                "AA_baseU.dat", "AA_backbone.dat")
 
-    CG_TO_ALLATOM_COEFF may already point at Data/ (that is what the coefficient
-    argument needs), so this checks before appending, which would otherwise
-    produce .../data/Data/.
+
+def _has_coeff_files(path):
+    if not path or not os.path.isdir(path):
+        return False
+    return all(os.path.isfile(os.path.join(path, name)) for name in _COEFF_FILES)
+
+
+def _resolve_data_dir(root):
+    """The directory holding CG_to_allatom's coefficient files.
+
+    Not simply `Data`. The templates live one level deeper, in
+    `Data/data/IsRNA2/`, and the binary's own default (`../Data/data/`) therefore
+    does not work either — it exits with "Wrong coeffDIR" before doing anything.
+    The files are found rather than assumed: `Data/data/IsRNA2` on this
+    distribution, but a shallow search means a differently-packed copy still
+    resolves instead of silently failing with a "not found" that looks like a
+    missing binary.
+
+    CG_TO_ALLATOM_COEFF may point directly at the right directory, so it is
+    accepted as-is when it already contains the files.
     """
     if not root:
         return ""
-    base = os.path.basename(os.path.normpath(root)).lower()
-    if base in ("data", "data_bak"):
+    if _has_coeff_files(root):
         return root
-    for name in ("Data", "data"):
-        candidate = os.path.join(root, name)
-        if os.path.isdir(candidate):
+    candidates = [
+        os.path.join(root, "Data", "data", "IsRNA2"),
+        os.path.join(root, "data", "IsRNA2"),
+        os.path.join(root, "data", "data", "IsRNA2"),
+        os.path.join(root, "Data", "data"),
+        os.path.join(root, "data"),
+    ]
+    for candidate in candidates:
+        if _has_coeff_files(candidate):
             return candidate
-    return root
+    # Fall back to a bounded search: the layout above covers the distributed
+    # package, this covers a copy that has been rearranged.
+    for base, dirs, _files in os.walk(root):
+        depth = base[len(root):].count(os.sep)
+        if depth > 3:
+            dirs[:] = []
+            continue
+        if _has_coeff_files(base):
+            return base
+    return ""
 
 
-# coeff: must be an ASCII-only path; the exe rejects non-ASCII paths
+# coeff: an ASCII-only path is safest. The exe is a MinGW build that reads the
+# path as bytes; a non-ASCII directory was previously blamed for this failure,
+# but the real cause was the wrong directory — the files simply are not in
+# Data/ — so an ASCII copy is no longer required.
 _COEFF_DIR = os.environ.get("CG_TO_ALLATOM_COEFF", "") or _resolve_data_dir(_ISRNACIRC_ROOT)
 
 

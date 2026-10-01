@@ -2548,9 +2548,41 @@ def isrnaclong_pipeline(
             print(f"  [final] validation skipped: {_e}")
 
     # ── full pipeline summary ──
+    #
+    # Bound before the try: it is passed to LongPipelineResult below, which is
+    # outside the try, so a failure here must leave it defined rather than
+    # unbound. Named _details rather than the dataclass field's name because
+    # assigning to `details` anywhere in this function would make every earlier
+    # reference to it a local-variable error.
+    _details: Dict = {}
     try:
         total_time = time.time() - t0
         _chunk_confs = chunk_confidences if 'chunk_confidences' in dir() else []
+        # rsRNASP1 on the all-atom result. This key was hard-coded to None, so the
+        # interface's rsRNASP1 row could never show anything no matter how the
+        # environment was configured. Computed here, at the end, because it needs a
+        # full-atom structure: a coarse-grained P-only file scores as nonsense
+        # rather than as an error.
+        #
+        # More negative is better. Only comparable within one length — the same
+        # caveat as lociparse_pMoL below.
+        _rsrnasp1 = None
+        try:
+            from torusfold.scheme2 import rsrnasp_quality as _rq
+            _aa_for_score = _final_aa_path if '_final_aa_path' in dir() else None
+            if _aa_for_score and os.path.isfile(_aa_for_score):
+                _rsrnasp1 = _rq.score_pdb(_aa_for_score)
+                if verbose:
+                    if _rsrnasp1 is None:
+                        _why = _rq.available().get("why", "unavailable")
+                        print(f"  [rsRNASP1] skipped: {_why}")
+                    else:
+                        print(f"  [rsRNASP1] score={_rsrnasp1:.3f} "
+                              f"(more negative is better; compare within one length)")
+        except Exception as _e_rs:
+            if verbose:
+                print(f"  [rsRNASP1] failed: {_e_rs}")
+
         summary = {
             "input": {"sequence_length": len(sequence), "is_circular": True},
             "level0": {
@@ -2580,7 +2612,7 @@ def isrnaclong_pipeline(
             "level5": {"applied": True},
             "level5_5": {"applied": use_ppr},
             "final": {
-                "rsrnasp1": None,
+                "rsrnasp1": _rsrnasp1,
                 # External superposition-free quality score; None when lociPARSE is absent.
                 "lociparse_pMoL": _loci_pmol,
                 "hbond_rate": float(_hbond_rate),
@@ -2595,6 +2627,11 @@ def isrnaclong_pipeline(
         }
         _summary_path = output_path / "pipeline_summary.json"
         _summary_path.write_text(json.dumps(summary, indent=2))
+        # Publish the same numbers on the result object: /api/result reads
+        # `result.details` to fill the quality-score rows, and that field was
+        # never populated, so every score the interface displays was absent
+        # regardless of what the pipeline had actually measured.
+        _details = summary
     except Exception as _err:
         raise
 
@@ -2612,6 +2649,7 @@ def isrnaclong_pipeline(
         n_segments=n_segments,
         n_candidates=n_candidates,
         runtime_seconds=runtime,
+        details=_details,
         fidelity_history=scheduler.history,
     )
 

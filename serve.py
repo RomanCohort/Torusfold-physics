@@ -1993,19 +1993,31 @@ def _build_result_dict(result, details, pdb_text, sequence, ss, mfe, elapsed, pd
         "mean_loop_length": details.get("mean_loop_length", 0),
     }
 
-    # rsRNASP1. Nothing in this tree computes rsrasp1_energy/rsRNASP_docker yet, so these
-    # must stay None when absent: the old `.get(key, 0)` default rendered as 0.0 and, via
-    # the pass thresholds in web/modules/panels.js, as a hard FAIL on the demo page.
+    # rsRNASP1. The pipeline computes this on the final all-atom structure and
+    # reports it under details["final"]["rsrnasp1"]. It previously read a flat
+    # `rsrasp1_energy` key that nothing ever wrote, and the summary field was
+    # hard-coded to None, so this row could not display a value at all.
+    #
+    # Absent stays None rather than defaulting to 0: the pass thresholds in
+    # web/modules/panels.js would render a 0 as a hard FAIL. More negative is
+    # better, and the value is only comparable within one sequence length.
+    _final = details.get("final") or {}
+    _rsrnasp1 = _final.get("rsrnasp1")
     rsRNASP1 = {
-        "score_all_atom": details.get("rsrasp1_energy"),
-        "score_per_nt": details.get("rsrasp1_energy_per_nt"),
+        "score_all_atom": _rsrnasp1,
+        "score_per_nt": (round(_rsrnasp1 / details["input"]["sequence_length"], 4)
+                         if _rsrnasp1 is not None
+                         and (details.get("input") or {}).get("sequence_length")
+                         else None),
     }
 
-    # rnadvisor scores (same rule: absent means absent, not zero)
+    # rnadvisor scores (same rule: absent means absent, not zero).
+    # DFIRE and 3dRNAscore are not computed anywhere in this tree; they are keyed
+    # here so the interface shows "--" rather than a fabricated number.
     rnadvisor = {
-        "rsRNASP_docker": details.get("rsRNASP_docker"),
-        "DFIRE": details.get("dfire_energy"),
-        "3drnascore": details.get("score_3drnascore"),
+        "rsRNASP_docker": _rsrnasp1,
+        "DFIRE": details.get("DFIRE"),
+        "3drnascore": details.get("3drnascore"),
     }
 
     # Structural 3D
@@ -2133,6 +2145,27 @@ def _print_tool_summary():
             print("    %-15s ok        %s" % (label, root))
         else:
             print("    %-15s %-9s %s" % (label, state, root or "(%s unset)" % var))
+
+    # isRNAcirc needs a second path, and its absence does not look like one. The
+    # binary loads cleanly and then exits with "Wrong coeffDIR" — naming the
+    # directory, never the missing files — when the five AA_*.dat templates are
+    # not in the directory it is handed. On the distributed package they are in
+    # Data/data/IsRNA2/, not Data/. Checking them here costs nothing and is the
+    # difference between "configured" and "will actually convert".
+    coeff = os.environ.get("CG_TO_ALLATOM_COEFF", "").strip()
+    if coeff:
+        needed = ("AA_baseA.dat", "AA_baseG.dat", "AA_baseC.dat",
+                  "AA_baseU.dat", "AA_backbone.dat")
+        missing = [n for n in needed if not os.path.isfile(os.path.join(coeff, n))]
+        if missing:
+            print("    %-15s %-9s %s" % ("CG coeff", "INCOMPLETE",
+                                         "missing " + ", ".join(missing)))
+        else:
+            print("    %-15s ok        %s" % ("CG coeff", coeff))
+    elif os.environ.get("ISRNACIRC_BIN_DIR"):
+        print("    %-15s %-9s %s" % ("CG coeff", "NOT SET",
+                                     "CG_TO_ALLATOM_COEFF unset; the wrapper will"
+                                     " search the isRNAcirc tree for the templates"))
 
 
 def main():

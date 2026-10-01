@@ -26,21 +26,44 @@
   Panels.renderScoring = function (result) {
     if (!result) return;
     const rn = result.rnadvisor || {};
+    const rs = result.rsRNASP1 || {};
     const items = [
       // NOTE: the -2000 pass threshold below has no provenance (no calibration against a
       // reference set was recorded). Do not treat a PASS/FAIL here as meaningful until it
       // is calibrated; an absent value renders as N/A and skips the threshold entirely.
-      { id: 'score-rsrnasp', valId: 'score-rsrnasp-val', key: 'rsRNASP_docker', passFn: function (v) { return v < -2000; } },
-      { id: 'score-dfire', valId: 'score-dfire-val', key: 'DFIRE', passFn: function (v) { return v < 0; } },
-      { id: 'score-3drnascore', valId: 'score-3drnascore-val', key: '3drnascore', passFn: function (v) { return v > 0; } },
+      //
+      // Measured reference points for rsRNASP1, from the build this was wired against:
+      // crystal 1a9nR (27 nt) -3146.6, crystal 1h4sT (61 nt) -7757.6, and this
+      // pipeline's own 139 nt prediction +2289.3. More negative is better, and the
+      // value is only comparable within one length, so the threshold below is a
+      // direction check at best.
+      { id: 'score-rsrnasp', valId: 'score-rsrnasp-val',
+        // Prefer the canonical field; the rnadvisor key is kept as a fallback.
+        value: (rs.score_all_atom != null ? rs.score_all_atom : rn['rsRNASP_docker']),
+        passFn: function (v) { return v < -2000; } },
+      // These two are listed on purpose. Nothing in this tree computes them — no
+      // result key is emitted under any name — so they will show as absent. Saying
+      // "not computed" is honest; a bare "--" reads as a tool that failed to run.
+      { id: 'score-dfire', valId: 'score-dfire-val',
+        value: rn['DFIRE'], passFn: function (v) { return v < 0; },
+        unavailable: 'not computed by this pipeline' },
+      { id: 'score-3drnascore', valId: 'score-3drnascore-val',
+        value: rn['3drnascore'], passFn: function (v) { return v > 0; },
+        unavailable: 'not computed by this pipeline' },
     ];
     for (const it of items) {
       var el = $(it.id), valEl = $(it.valId);
       if (!el || !valEl) continue;
       var badge = el.querySelector('.score-badge');
-      var v = rn[it.key];
-      if (v == null) { valEl.textContent = '--'; if (badge) { badge.className = 'score-badge pending-badge'; badge.textContent = 'N/A'; } }
-      else {
+      var v = it.value;
+      if (v == null || v === '') {
+        valEl.textContent = '--';
+        if (badge) {
+          badge.className = 'score-badge pending-badge';
+          badge.textContent = it.unavailable ? 'n/a' : 'N/A';
+          if (it.unavailable) badge.title = it.unavailable;
+        }
+      } else {
         valEl.textContent = typeof v === 'number' ? v.toFixed(1) : v;
         var pass = it.passFn(v);
         valEl.style.color = pass ? 'var(--ok)' : 'var(--err)';
