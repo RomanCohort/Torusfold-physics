@@ -665,15 +665,24 @@ def _display_structure(output_dir):
     committed 2,013 nt model is the fallback for the empty state: no run in
     progress and nothing substantive on disk. It carries level "delivered" rather
     than a pipeline level, so it is never read as a stage of the run being watched.
+
+    The atom floor applies while a run IS in progress too, not only when idle. A
+    ten-residue fragment is not a structure worth looking at — 3Dmol's cartoon draws
+    nothing at all for a chain that short, so the panel is a blank canvas — and
+    accepting one because a run happened to be going is how a stub left by an
+    interrupted run came to be shown in place of the delivered model, leaving the
+    3D panel empty with the placeholder already hidden.
     """
     stage = _viewer_stage(output_dir)
-    running = _predict_state.get("status") == "running"
-    if stage and (running or stage.get("atoms", 0) >= _MIN_MEANINGFUL_ATOMS):
+    if stage and stage.get("atoms", 0) >= _MIN_MEANINGFUL_ATOMS:
         return stage
     try:
         delivered = _viewer_module().delivered_structure(ROOT)
     except Exception:                                    # noqa: BLE001
         delivered = None
+    # Fall back to the checkpoint only when there is nothing better: a run gets to
+    # show its own structure from the first usable one, and below the floor the
+    # delivered model is the more useful thing to be looking at.
     return delivered or stage
 
 
