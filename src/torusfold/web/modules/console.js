@@ -18,8 +18,22 @@
     return document.getElementById('console-output');
   }
 
+  /* The welcome banner, cached on first sight.
+
+     It is a child of the output container, so `output.innerHTML = ''` removes it,
+     and getElementById() then returns null forever: clearing the console once made
+     the banner disappear for the rest of the session with no way back. The element
+     itself survives detached, so holding the reference lets clear() put it back.
+     Looked up once and remembered, because the only reliable moment to find it is
+     before anything clears the container. */
+  var _welcomeEl;
   function getWelcome() {
-    return document.getElementById('console-welcome');
+    // Only re-query while the reference is missing; never overwrite a detached but
+    // valid element with null, which is what made the banner unrecoverable.
+    if (!_welcomeEl) {
+      _welcomeEl = document.getElementById('console-welcome') || null;
+    }
+    return _welcomeEl;
   }
 
   /** Append a log line to the terminal */
@@ -43,7 +57,15 @@
 
     div.appendChild(tsSpan);
     div.appendChild(document.createTextNode(entry.message));
-    output.appendChild(div);
+
+    // New lines go after the banner, not below it. appendChild put them at the end
+    // of the container, which is past the welcome block, so a console that still
+    // showed its banner printed the first log line underneath it.
+    if (welcome && welcome.parentNode === output) {
+      output.insertBefore(div, welcome.nextSibling);
+    } else {
+      output.appendChild(div);
+    }
 
     _lineCount++;
 
@@ -51,7 +73,11 @@
     if (_lineCount > MAX_LINES) {
       const children = output.children;
       for (let i = 0; i < _lineCount - PRUNE_TO; i++) {
-        if (children[0]) children[0].remove();
+        // Never prune the banner: it is first in the container and would be the
+        // first thing removed.
+        if (children[0] && children[0] !== welcome) children[0].remove();
+        else if (children[1]) children[1].remove();
+        else break;
       }
       _lineCount = PRUNE_TO;
     }
@@ -129,13 +155,16 @@
   /** Clear console */
   Console.clear = function () {
     const output = getOutput();
-    if (output) {
-      output.innerHTML = '';
-      _lineCount = 0;
-    }
+    if (!output) return;
+    // Grab the banner before wiping the container: it is a child of it, and
+    // `innerHTML = ''` detaches it.
     const welcome = getWelcome();
+    output.innerHTML = '';
+    _lineCount = 0;
     if (welcome) {
-      output.appendChild(welcome);
+      // insertBefore, not appendChild: appended it landed after the log lines that
+      // followed, so the banner drifted to the bottom of the console.
+      output.insertBefore(welcome, output.firstChild);
       welcome.style.display = '';
     }
   };
