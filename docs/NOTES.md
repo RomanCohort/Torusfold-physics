@@ -120,3 +120,50 @@ from-sequence recovery question above remains open.
   conservative (design choice, see README implementation notes); its benefit
   over rule-based scheduling / fixed budgets is not yet quantified — plan a
   short-sequence energy-vs-time comparison.
+
+
+## 2026-10-01 — All-atom path: three wiring defects, and what the CG level owes stacking
+
+Found while taking **2OIU** (the only resolved circular RNA this project has: 71 nt, BSJ P0-P71 =
+5.9 A) through "crystal P trace -> reconstruction -> amber14-OL3". Three separate things stop that
+chain. All three are cheap to fix, and all three are silent until they are hit:
+
+1. **`aform_from_template` gives EVERY residue a third phosphate oxygen (OP3).** A phosphodiester
+   phosphate has two non-bridging oxygens (OP1/OP2) plus the two bridging ones (O5' of its own
+   residue, O3' of the previous one), so the exported structure carries one oxygen too many per
+   residue. The force field reports it ONE RESIDUE AT A TIME — "No template found for residue N (G).
+   The set of atoms is similar to G, but has 1 O atom too many" — which reads like a terminal problem
+   and is not: on 2OIU it is 23 extra atoms over 71 residues, and filtering OP3 fixes the whole chain
+   (1550 -> 1527 atoms). **As it stands, `aform_from_template` output cannot be fed to
+   `amber_refine` without that filter.** The fix belongs upstream, in the reconstruction.
+2. **amber14's `G5`/`A3` are the DEPHOSPHORYLATED termini.** A phosphorylated 5' end is an internal
+   residue as far as the templates are concerned — OpenMM's own matcher says so ("the set of atoms is
+   similar to G") once OP3 is gone. Renaming the ends `G5`/`A3` therefore makes matching fail, and so
+   does writing them into a file and reading it back, because `PDBFile` normalises "G5" to "G". The
+   combination that works is plain internal names plus
+   `createSystem(..., ignoreExternalBonds=True)`, which is what the project's own circular builder
+   already does.
+3. **`Simulation()` does not carry coordinates.** Without
+   `sim.context.setPositions(modeller.positions)` the first `minimizeEnergy()` answers "Particle
+   positions have not been set".
+
+With those three, 2OIU goes reconstruction -> the repository's circular builder (2297 atoms, 770 H) ->
+`createSystem(amber14-all.xml + implicit/obc1.xml)` (2297 particles, 6 forces) with no further
+complaint. **What is still missing is a RELAXED starting structure**: straight from the crystal trace
+the reconstruction enters OpenMM at **4.1e25 kJ/mol** of atomic overlap and NaNs during annealing,
+while the shipped benchmark CG-refines first and records e0 ~1e14 (`scripts/benchmark_2oiu.py`).
+That component (`openmm_gpu_refine`) produced no output in our run and is the one open step between
+this wiring and an all-atom marginal on the product's topology.
+
+**What the CG level owes, measured separately** (`docs/cg_allatom_interface.md`): the field's four
+scored coordinates are local P-trace quantities, and `stack` is an exact function of `bb_bond` and
+the P-P-P angle. On the 867 fragments the local marginals are length-independent to 4-13 percent over
+a 7x length range, the end effect is 4-5 percent of the sd below L=60 (under 0.2 percent past L=400),
+and **forcing the end-to-end distance to zero — the closure a circle imposes — moves them by under 0.5
+percent**. Fitting on linear fragments and applying the field to circular RNA is therefore sound, and
+the only topology-dependent part is the two terminal residues a circle does not have. The same
+measurement shows the all-atom level carries the base-plane physics but INHERITS the trace: a 1.5 A
+error in the CG P trace halves the reconstructed stacking fraction (0.59 -> 0.29 on 1ET4). Lesson:
+**the CG owes a correct P trace; stacking is the all-atom level's job, and `stack` should not be a CG
+scoring target** — which is also why `torch_cgsim` sets its spring to zero.
+
