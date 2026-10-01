@@ -67,6 +67,35 @@ def _env(*names: str) -> str:
     return ""
 
 
+def _find_env_file() -> Optional[Path]:
+    """Locate `.env.local`: the one this deployment actually uses.
+
+    `TF_REPO_ROOT` first, because the server knows where the repository is and a
+    caller passing it is stating a fact rather than hoping a guess lands. Then walk
+    up from this file to the first directory containing `.env.local`.
+
+    The first version was `Path(__file__).resolve().parent.parent.parent`, which
+    from `tools/feedback_mail.py` is one level ABOVE the repository root — so it
+    looked for `C:\\baidunetdiskdownload\\.env.local`, never found it, and reported
+    "not configured (missing TF_FEEDBACK_MAIL_USER, TF_FEEDBACK_MAIL_PASS)". That
+    message is identical whether the file was absent or the credentials in it were
+    empty, so a wrong path and an unfilled form were indistinguishable from the
+    outside — and the code looked like it was reading the file, because it was
+    reading the notification that the file was not there.
+    """
+    root = os.environ.get("TF_REPO_ROOT")
+    if root:
+        cand = Path(root) / ".env.local"
+        if cand.is_file():
+            return cand
+    here = Path(__file__).resolve().parent
+    for d in (here, here.parent, here.parent.parent, here.parent.parent.parent):
+        cand = d / ".env.local"
+        if cand.is_file():
+            return cand
+    return None
+
+
 def load_env_file(path=None) -> int:
     """Load `.env.local` into the environment. Returns how many keys were set.
 
@@ -76,7 +105,10 @@ def load_env_file(path=None) -> int:
     developer's machine and nowhere else.
     """
     if path is None:
-        path = Path(__file__).resolve().parent.parent.parent / ".env.local"
+        found = _find_env_file()
+        if found is None:
+            return 0
+        path = found
     path = Path(path)
     if not path.is_file():
         return 0
@@ -97,6 +129,12 @@ def load_env_file(path=None) -> int:
         os.environ[key] = val
         applied += 1
     return applied
+
+
+def env_file_path() -> Optional[str]:
+    """Where the settings were read from, for a report that can be checked."""
+    found = _find_env_file()
+    return str(found) if found else None
 
 
 def config() -> Dict:
@@ -277,10 +315,19 @@ def send(entry: Dict, to: Optional[str] = None) -> Dict:
 
 
 def status_line() -> Tuple[bool, str]:
-    """(configured, one line describing it) — for a startup report."""
+    """(configured, one line describing it) — for a startup report.
+
+    Names the settings file when it can be found, because "not configured" has two
+    causes that need different fixes: no file to read, or a file with blanks in it.
+    """
     c = config()
+    where = env_file_path()
     if configured():
         return True, "feedback email: %s:%s -> %s (%s)" % (
             c["host"], c["port"], c["to"], c["mode"])
-    return False, ("feedback email: not configured (missing %s); feedback is saved "
-                   "locally only" % ", ".join(missing_settings() or ["settings"]))
+    missing = missing_settings()
+    if where is None:
+        return False, ("feedback email: no .env.local found, so nothing is set; "
+                       "feedback is saved locally only")
+    return False, ("feedback email: not configured in %s (missing %s); feedback is "
+                   "saved locally only" % (where, ", ".join(missing or ["settings"])))

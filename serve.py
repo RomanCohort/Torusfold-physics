@@ -33,6 +33,16 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(ROOT, "src")
 WEB_DIR = os.path.join(SRC, "torusfold", "web")
 
+# Tell sidecar tools where the repository is, so none of them has to guess.
+#
+# `tools/feedback_mail.py` reads `.env.local` for its SMTP settings, and it is
+# imported from here rather than run as a script — so `__file__`-relative
+# arithmetic has to be right about a layout it cannot see. The first version was
+# off by one level, looked one directory ABOVE the checkout, and reported "not
+# configured" for a file that was present and filled in. A caller that knows where
+# the repository is should say so.
+os.environ.setdefault("TF_REPO_ROOT", ROOT)
+
 # Publish .env.local into this process, so the pipeline can see it.
 #
 # The setup button and `configure_deps.py write` record where the external tools
