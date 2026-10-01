@@ -404,8 +404,10 @@ def _note_stage(level_name, label):
         # Reset when a stage is entered: this is the within-stage fraction tracked
         # by _watch_for_step_progress, and carrying the previous stage's value into
         # the next one would make its first step reading look like a step backwards
-        # and be discarded.
+        # and be discarded. `stage_progress` is cleared for the same reason — a
+        # stale step count from the previous stage would be shown against this one.
         "inner_fraction": None,
+        "stage_progress": None,
         "stage": {"fraction": fraction, "label": label, "anchors": anchors,
                   "spans": spans[-24:], "entered": now, "spent": spent,
                   "level": level_name},
@@ -560,7 +562,7 @@ _PUBLIC_KEYS = (
     "job_id", "status", "progress", "current_level", "level_name", "stage_label",
     "message", "error", "elapsed", "eta", "stages", "levels", "started_at",
     "finished_at", "sequence_length", "result_ready", "server_generation",
-    "fraction", "weights", "plan", "log_path",
+    "fraction", "weights", "plan", "log_path", "stage_progress",
 )
 
 def _model_source_ids():
@@ -1152,6 +1154,27 @@ def _watch_for_step_progress(line):
                         if _LEVEL_INDEX.get(k, -1) > _LEVEL_INDEX.get(level_name, -1))
     width = weights.get(level_name, 0.0)
     fraction = reached - width + width * inner
+
+    # Publish the pipeline's OWN numbers, updated on every reading.
+    #
+    # These are not the same quantity as the percentage below and must not be
+    # presented as if they were. `done/total` is what the stage itself reports; the
+    # percentage is `width` — this stage's share of the whole run, from a
+    # hand-written weight table, which is an estimate — multiplied by that ratio.
+    # Measured here, metadynamics was modelled at 33% of the run and actually takes
+    # about 7%, so the percentage was wrong by a factor of five regardless of how
+    # the ratio advanced, and no care in the parser could have made the two agree.
+    #
+    # Updated before the monotonicity check below, so a reading that does not move
+    # the bar still updates the number shown next to it.
+    state["stage_progress"] = {
+        "step": done,
+        "total": total,
+        "ratio": round(inner, 4),
+        "level": level_name,
+        "modelled_pct": round(width * 100.0, 2),
+    }
+
     prev = state.get("inner_fraction")
     if prev is not None and fraction <= prev:
         return
@@ -2295,59 +2318,128 @@ def _shape_anisotropy(eigenvalues):
         return None
 
 
-_LIVE_METRICS = {"digest": None, "payload": None, "at": 0.0}
+_LIVE_METRICS = {"digest": None, "payload": None, "at": 0.0, "computing": None}
+_LIVE_METRICS_LOCK = threading.Lock()
 
 
 def _live_metrics(stage):
-    """Measure the structure currently on screen, for the readout panels.
+    """Measure the structure on screen, for the readout panels — without blocking.
 
-    Why this exists: every panel on the right is built from `result`, and the
-    server produces `result` only when a run finishes. So for the whole of a run —
-    hours — the right-hand tabs held nothing but their static labels and a row of
-    "--", which is what they looked like: broken.
+    Why this exists: every panel on the right is built from `result`, and the server
+    produces `result` only when a run finishes. So for the whole of a run — hours —
+    the right-hand tabs held nothing but their static labels and a row of "--",
+    which is what they looked like: broken.
 
-    The analyzer already exists and the structure file is already on disk, so the
-    panels can show real numbers while a run is in progress instead of only at the
-    end. Cached on the structure's digest because the analyzer takes about a
-    quarter of a second on a 139-residue trace and the status endpoint is polled
-    every few seconds; without the cache that cost would be paid on every poll for
-    an unchanged file.
+    This must never run on the request path. `analyze_pdb` costs 10.8 s on the
+    committed 2,013 nt model (42,831 atoms — the Shrake-Rupley SASA dominates), and
+    /api/current is polled every few seconds. Called synchronously it stalled the
+    status endpoint for 24 s on a quiet page and would have done so repeatedly.
 
-    Returns None when there is nothing measurable. Never raises — a metric panel
-    is not worth failing a status poll over.
+    So: return whatever is already computed and start a background pass when the
+    structure has changed. The first poll after a new checkpoint shows the previous
+    numbers for a moment; every poll after that is instant. A stale-but-real number
+    with a known source beats a responsive measurement that freezes the interface.
     """
     if not stage or not stage.get("path"):
         return None
     digest = stage.get("digest") or ""
-    with _log_lock:
-        if digest and _LIVE_METRICS["digest"] == digest:
-            return _LIVE_METRICS["payload"]
+
+    with _LIVE_METRICS_LOCK:
+        fresh = bool(digest) and _LIVE_METRICS["digest"] == digest
+        cached = _LIVE_METRICS["payload"]
+        already = _LIVE_METRICS["computing"] == digest
+        if not fresh and not already:
+            _LIVE_METRICS["computing"] = digest
+            threading.Thread(
+                target=_compute_live_metrics,
+                args=(dict(stage), digest),
+                daemon=True,
+                name="torusfold-metrics",
+            ).start()
+    if fresh:
+        return cached
+    # Not measured yet: hand back the previous measurement, tagged with what it was
+    # measured from, so the panel can say so rather than imply it is current.
+    if cached:
+        return cached
+    return {"live": True, "pending": True,
+            "source": {"name": stage.get("name"), "level": stage.get("level")}}
+
+
+def _compute_live_metrics(stage, digest):
+    """The expensive half. Runs on its own thread; never raises."""
+    t0 = time.time()
+    try:
+        payload = _measure_structure(stage)
+    except Exception as exc:                                 # noqa: BLE001
+        import traceback as _tb
+        payload = {"live": True,
+                   "error": "%s: %s" % (type(exc).__name__, exc),
+                   "trace": _tb.format_exc()[-900:]}
+    with _LIVE_METRICS_LOCK:
+        _LIVE_METRICS.update({"digest": digest, "payload": payload,
+                              "at": time.time(), "computing": None})
+    # Say so in the run log. This thread is invisible otherwise, and a silent
+    # worker that never reports is indistinguishable from one that never ran —
+    # which is exactly how it presented the first time: the panels stayed on their
+    # placeholder values and nothing anywhere said why.
+    try:
+        if payload.get("error"):
+            _emit_log("warn", "metrics: could not measure %s (%s)"
+                      % (stage.get("name"), payload["error"]))
+        else:
+            _emit_log("info", "metrics: measured %s in %.1fs"
+                      % (stage.get("name"), time.time() - t0))
+    except Exception:
+        pass
+
+
+def _measure_structure(stage):
+    """Parse and measure one structure file. Returns the panel payload.
+
+    Runs on a worker thread, never on the request path — see _live_metrics.
+    """
+    payload = {"live": True, "error": "measurement did not run"}
     try:
         if SRC not in sys.path:
             sys.path.insert(0, SRC)
         from torusfold.scheme2 import pdb_analyzer as pa
+        import numpy as _np
+
         with open(stage["path"], "r", errors="replace") as f:
             text = f.read()
-        a = pa.analyze_pdb(text)
 
+        # One parse, shared. analyze_pdb parses the file itself, so calling both it
+        # and parse_pdb parsed the same 42,831-atom file twice — 11 s of duplicated
+        # work on the delivered model.
         parsed = pa.parse_pdb(text)
+        a = pa.analyze_pdb(text)
         coords = parsed["coords"]
         names = parsed["atom_names"]
-        # Closure: the gap that has to be closed for a circular RNA. Measured
-        # between the first and last phosphorus, which is the same convention the
-        # pipeline's own BSJ metric uses.
-        p_idx = [i for i, n in enumerate(names) if n == "P"]
-        closure = None
-        if len(p_idx) >= 2:
-            import numpy as _np
-            closure = float(_np.linalg.norm(coords[p_idx[0]] - coords[p_idx[-1]]))
 
-        # Pair satisfaction, and everything derived from the same pass. All of it
-        # comes from the PDB alone, so all of it can be shown while a run is going
-        # rather than only at the end.
-        #
-        # The sequence comes from the residue names the parser already returns, in
-        # file order.
+        # Residue order and index, built once. Several steps below need it and each
+        # used to rebuild it.
+        order = list(dict.fromkeys(parsed["residue_ids"]))
+        pos_of = {rid: i for i, rid in enumerate(order)}
+        seq = []
+        _one = {"A": "A", "ADE": "A", "U": "U", "URA": "U",
+                "G": "G", "GUA": "G", "C": "C", "CYT": "C"}
+        _last = object()
+        for rn, rid in zip(parsed["residue_names"], parsed["residue_ids"]):
+            if rid != _last:
+                seq.append(_one.get(rn, "N"))
+                _last = rid
+
+        # Phosphorus positions: the coarse-grained trace, and the atom the pipeline's
+        # own BSJ metric uses.
+        p_atoms = [i for i, n in enumerate(names) if n == "P"]
+
+        # Closure: the gap that has to be closed for a circular RNA.
+        closure = None
+        if len(p_atoms) >= 2:
+            closure = float(_np.linalg.norm(coords[p_atoms[0]] - coords[p_atoms[-1]]))
+
+        # Pair satisfaction, and the pair statistics derived from the same pass.
         pair_rate = None
         pair_breakdown = None
         pairing_quality = None
@@ -2355,21 +2447,11 @@ def _live_metrics(stage):
         pair_dist = None
         per_residue = None
         try:
-            one = {"A": "A", "ADE": "A", "U": "U", "URA": "U",
-                   "G": "G", "GUA": "G", "C": "C", "CYT": "C"}
-            seq = []
-            last = object()
-            for rn, rid in zip(parsed["residue_names"], parsed["residue_ids"]):
-                if rid != last:
-                    seq.append(one.get(rn, "N"))
-                    last = rid
-
             ps = pa.compute_pair_satisfaction(coords, parsed["residue_ids"],
                                               names, parsed["residue_names"])
             # The function returns `satisfaction_rate`, not a key named after the
-            # panel's field. Reading the wrong name here yielded None while the
-            # metric itself was fine, which is the same class of mistake as the WC
-            # table above.
+            # panel's field. Reading the wrong name yielded None while the metric
+            # itself was fine.
             pair_rate = ps.get("satisfaction_rate")
             pair_breakdown = {
                 "total_pairs": ps.get("total_pairs"),
@@ -2378,34 +2460,36 @@ def _live_metrics(stage):
                 "mean_pair_distance": ps.get("mean_pair_distance"),
             }
 
-            # Pairing quality: WC against wobble, over the pairs that are actually
-            # close enough to be paired at all.
             wc = ps.get("satisfied_count") or 0
             eligible = ps.get("wc_eligible_count") or 0
-            wobble = 0
-            try:
-                n = len(seq)
-                idx = {}
-                for pos, rid in enumerate(dict.fromkeys(parsed["residue_ids"])):
-                    idx[rid] = pos
-                import numpy as _np2
-                p_atoms = [i for i, nm in enumerate(names) if nm == "P"]
-                # Loop variables are named ai/bj, not a/b: `a` holds the analyzer's
-                # result dict for the whole function, and rebinding it here made
-                # every use below it fail with "'int' object has no attribute 'get'".
-                for ai in range(len(p_atoms)):
-                    for bj in range(ai + 1, len(p_atoms)):
-                        ra, rb = parsed["residue_ids"][p_atoms[ai]], parsed["residue_ids"][p_atoms[bj]]
-                        ia, ib = idx.get(ra), idx.get(rb)
-                        if ia is None or ib is None or abs(ia - ib) < 4:
-                            continue
-                        if _np2.linalg.norm(coords[p_atoms[ai]] - coords[p_atoms[bj]]) > 12.0:
-                            continue
-                        pa_, pb_ = seq[ia], seq[ib]
-                        if (pa_, pb_) in (("G", "U"), ("U", "G")):
-                            wobble += 1
-            except Exception:
-                wobble = 0
+
+            # One pass over the phosphorus pairs, distance-bucketed, counting the
+            # wobble pairs as it goes. This was three separate nested loops over the
+            # same pairs.
+            satisfied_lt = partial = unsatisfied = wobble = 0
+            nP = len(p_atoms)
+            for x in range(nP):
+                px = coords[p_atoms[x]]
+                rx = parsed["residue_ids"][p_atoms[x]]
+                ix = pos_of.get(rx)
+                for y in range(x + 1, nP):
+                    iy = pos_of.get(parsed["residue_ids"][p_atoms[y]])
+                    if ix is None or iy is None or abs(ix - iy) < 4:
+                        continue
+                    bx, by = seq[ix], seq[iy]
+                    pair = {bx, by}
+                    if pair not in ({"A", "U"}, {"G", "C"}, {"G", "U"}):
+                        continue
+                    d = float(_np.linalg.norm(px - coords[p_atoms[y]]))
+                    if d < 15.0:
+                        satisfied_lt += 1
+                    elif d <= 30.0:
+                        partial += 1
+                    else:
+                        unsatisfied += 1
+                    if d <= 12.0 and pair == {"G", "U"}:
+                        wobble += 1
+
             pairing_quality = {
                 "wc_pairs": wc,
                 "wc_pct": round(100.0 * wc / eligible, 1) if eligible else 0.0,
@@ -2419,59 +2503,24 @@ def _live_metrics(stage):
             total_pairs = sum((br.get(k) or {}).get("count", 0)
                               for k in ("local", "medium", "long")) or 0
             pair_range = {}
-            for key, label in (("local", "local_lt50"), ("medium", "medium_50_500"),
-                               ("long", "long_gt500")):
+            for key, base in (("local", "local"), ("medium", "medium"), ("long", "long")):
                 cnt = (br.get(key) or {}).get("count", 0)
-                pair_range[label] = cnt
-                pair_range[label.replace("local_lt50", "local_pct")
-                                    .replace("medium_50_500", "medium_pct")
-                                    .replace("long_gt500", "long_pct")] = (
-                    round(100.0 * cnt / total_pairs, 1) if total_pairs else 0.0)
+                pair_range[base + ("_lt50" if key == "local"
+                                   else "_50_500" if key == "medium" else "_gt500")] = cnt
+                pair_range[base + "_pct"] = (round(100.0 * cnt / total_pairs, 1)
+                                             if total_pairs else 0.0)
 
-            # Distance distribution, for the stacked bar. Buckets are the ones the
-            # panel draws, and the thresholds are its own.
-            satisfied_lt = partial = unsatisfied = 0
-            p_atoms = [i for i, nm in enumerate(names) if nm == "P"]
-            import numpy as _np3
-            idx2 = {}
-            for pos, rid in enumerate(dict.fromkeys(parsed["residue_ids"])):
-                idx2[rid] = pos
-            for ai in range(len(p_atoms)):
-                for bj in range(ai + 1, len(p_atoms)):
-                    ra, rb = parsed["residue_ids"][p_atoms[ai]], parsed["residue_ids"][p_atoms[bj]]
-                    ia, ib = idx2.get(ra), idx2.get(rb)
-                    if ia is None or ib is None:
-                        continue
-                    if {seq[ia], seq[ib]} not in ({"A", "U"}, {"G", "C"}, {"G", "U"}):
-                        continue
-                    if abs(ia - ib) < 4:
-                        continue
-                    d = float(_np3.linalg.norm(coords[p_atoms[ai]] - coords[p_atoms[bj]]))
-                    if d < 15.0:
-                        satisfied_lt += 1
-                    elif d <= 30.0:
-                        partial += 1
-                    else:
-                        unsatisfied += 1
             pair_dist = {
                 "satisfied_lt15A": {"count": satisfied_lt},
                 "partial_15_30A": {"count": partial},
                 "unsatisfied_gt30A": {"count": unsatisfied},
             }
 
-            # Per-residue series for the strip charts. Real measurements, not
-            # placeholders: SASA and the B-factor column are both per-atom in the
-            # file, reduced here to one value per residue.
+            # Per-residue series for the strip charts: SASA and the B-factor column
+            # are per-atom in the file, reduced here to one value per residue.
             try:
                 per_atom_sasa = (a.get("sasa") or {}).get("per_atom_sasa") or []
                 bf = parsed.get("b_factors") or []
-                order = []
-                seen = set()
-                for rid in parsed["residue_ids"]:
-                    if rid not in seen:
-                        seen.add(rid)
-                        order.append(rid)
-                pos_of = {rid: i for i, rid in enumerate(order)}
                 sasa_by_res = [[] for _ in order]
                 b_by_res = [[] for _ in order]
                 for i, rid in enumerate(parsed["residue_ids"]):
@@ -2482,24 +2531,26 @@ def _live_metrics(stage):
                         sasa_by_res[k].append(float(per_atom_sasa[i]))
                     if i < len(bf):
                         b_by_res[k].append(float(bf[i]))
-                mean = lambda xs: (sum(xs) / len(xs)) if xs else 0.0
-                cols = {"sasa_per_residue": [round(mean(v), 3) for v in sasa_by_res],
-                        "bfactor_per_residue": [round(mean(v), 3) for v in b_by_res]}
-                per_residue = cols
+
+                def _mean(xs):
+                    return (sum(xs) / len(xs)) if xs else 0.0
+
+                per_residue = {
+                    "sasa_per_residue": [round(_mean(v), 3) for v in sasa_by_res],
+                    "bfactor_per_residue": [round(_mean(v), 3) for v in b_by_res],
+                }
             except Exception:
                 per_residue = None
         except Exception:
-            pair_rate = None
-            pair_breakdown = None
-            pairing_quality = None
-            pair_range = None
-            pair_dist = None
-            per_residue = None
+            # A metric that cannot be computed stays absent; the panels show "--"
+            # rather than a number that means nothing.
+            pass
 
         payload = {
             "live": True,
             "source": {"level": stage.get("level"), "name": stage.get("name"),
-                       "atoms": stage.get("atoms"), "delivered": bool(stage.get("delivered"))},
+                       "atoms": stage.get("atoms"),
+                       "delivered": bool(stage.get("delivered"))},
             "physical": {
                 "closure_distance_Ang": closure,
                 "bond_rmsd_Ang": (a.get("bond") or {}).get("bond_rmsd"),
@@ -2537,15 +2588,14 @@ def _live_metrics(stage):
             "sequence": {"length": a.get("n_residues"), "n_atoms": a.get("n_atoms")},
         }
     except Exception as exc:                             # noqa: BLE001
-        # Include the traceback: a bare message from this block cost a round trip
-        # to diagnose once already.
+        # Include the traceback: a bare message from this block cost a round trip to
+        # diagnose once already.
         import traceback as _tb
         payload = {"live": True,
                    "error": "%s: %s" % (type(exc).__name__, exc),
                    "trace": _tb.format_exc()[-900:]}
-
-    with _log_lock:
-        _LIVE_METRICS.update({"digest": digest, "payload": payload, "at": time.time()})
+    # The caller caches this; see _compute_live_metrics. Returning rather than
+    # caching here keeps the two jobs apart.
     return payload
 
 

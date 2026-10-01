@@ -519,6 +519,15 @@ input[type="range"]::-moz-range-thumb{
 }
 #run-pct{color:var(--ink-2)}
 
+/* The running stage's own step count. Deliberately quieter than the percentage
+   above it: this one is a measurement the pipeline makes, that one is an estimate
+   this server makes, and the visual weight should not imply otherwise. */
+.run-stage-progress{
+  margin-top:5px;font-family:var(--font-mono);font-size:var(--t-xs);
+  color:var(--ink-3);letter-spacing:.01em;
+}
+.run-stage-progress::before{content:'▸ '}
+
 /* Stage ladder. Each segment is as wide as that stage's share of the run, so
    the bar shows where the time actually goes. Widths are set as percentages
    from JS (flex-basis); flex-grow cannot do this job, because it only shares

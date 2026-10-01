@@ -458,6 +458,8 @@
   var runRemaining = $('run-remaining');
   var runConfidence = $('run-confidence');
   var runPct = $('run-pct');
+  // The running stage's own step count, distinct from the modelled percentage.
+  var runStageProgress = $('run-stage-progress');
   var runLadder = $('run-ladder');
   var runJob = $('run-job');
   var runReconnect = $('run-reconnect');
@@ -516,6 +518,13 @@
     if (h > 0) return h + 'h ' + m + 'm';
     if (m > 0) return m + 'm ' + (s % 60) + 's';
     return s + 's';
+  }
+
+  /* Thousands separators, so "5000 / 200000" reads as "5,000 / 200,000" and a
+     long step count is not miscounted at a glance. */
+  function fmtCount(n) {
+    if (n == null) return '—';
+    return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }
 
   /* The step-by-step timeline is rendered from the server's plan, so it lists
@@ -604,6 +613,32 @@
     if (runPct) runPct.textContent = (state.progress == null ? 0 : state.progress) + '%';
     if (progressBarFill && state.progress != null) {
       progressBarFill.style.width = Math.max(state.progress, state.status === 'running' ? 1 : 0) + '%';
+    }
+
+    /* The stage's own progress, next to the modelled percentage.
+     *
+     * These are two different quantities and the panel used to show only the
+     * second. `state.stage_progress` is what the running stage reports about
+     * itself — "5000 / 200000 steps" — while `state.progress` is that ratio
+     * multiplied by this stage's estimated share of the whole run, from a
+     * hand-written weight table. So the bar can read 40% while the stage is 2.5%
+     * through its own steps, and both numbers are "right": one counts modelled
+     * work across the run, the other counts this stage's steps. Showing only the
+     * first made it look like the pipeline and the display disagreed.
+     */
+    if (runStageProgress) {
+      var sp = state.stage_progress;
+      if (sp && sp.total) {
+        runStageProgress.hidden = false;
+        runStageProgress.textContent = 'this stage: ' + fmtCount(sp.step) + ' / ' +
+          fmtCount(sp.total) + '  (' + (sp.ratio * 100).toFixed(1) + '%)';
+        runStageProgress.title = 'Steps the stage has reported. The percentage ' +
+          'above is modelled across the whole run, weighted where each stage ' +
+          'roughly sits in a ~7 h reference run — it is an estimate, not a count. ' +
+          'This stage was modelled at ' + sp.modelled_pct + '% of the run.';
+      } else {
+        runStageProgress.hidden = true;
+      }
     }
 
     var eta = state.eta || {};

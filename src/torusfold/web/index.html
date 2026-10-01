@@ -271,6 +271,12 @@ try{
         <span id="run-pct">0%</span>
       </div>
 
+      <!-- What the running stage reports about itself, which is a different
+           quantity from the percentage above: that one is modelled across the
+           whole run from a weight table, this one is the stage's own step count.
+           Shown side by side so they cannot be mistaken for each other. -->
+      <div class="run-stage-progress" id="run-stage-progress" hidden></div>
+
       <!-- The full stage ladder: 12 boundaries for the 6 numbered pipeline
            levels. Costs are server-side, so the bar and this list agree. -->
       <div class="run-ladder" id="run-ladder"></div>
