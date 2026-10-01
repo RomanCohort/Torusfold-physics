@@ -121,10 +121,20 @@ try{
 <section class="hero" id="hero-section" aria-label="Pipeline overview">
   <div class="hero-lede">
     <h1>Sequence to all-atom fold, no experimental restraints.</h1>
-    <p>Six levels: secondary-structure consensus, segmented 3D prediction, RL-guided coarse-grained
-       folding, REST2 replica exchange, metadynamics, then Amber14-OL3 refinement.</p>
+    <p>Twelve stages: secondary-structure consensus, segmented ensemble prediction, coarse-grained
+       restraint relaxation and REMD folding, 5-bead refinement, all-atom placement, then
+       RL fine-tuning, metadynamics, REST2 replica exchange, Amber14-OL3 refinement and
+       H-bond repair. The step list below is the run's actual order; each stage reports its
+       own measured time as it finishes.</p>
   </div>
 
+  <!-- The twelve stages the pipeline actually runs, in order. data-level must be
+       the BACKEND level name. The tiles used to be numbered 0-5 across six of
+       them while the server reports levels 0, 1, 1.5, 2, 2.3, 2.5, 2.6, 3, 3.5,
+       4, 5, 5.5. The mismatch was not cosmetic — tiles 3, 4 and 5 read "All-atom
+       placement", "All-atom refinement" and "Minimization" while the server's
+       levels 3, 4 and 5 are RL fine-tuning, REST2 and Amber, so the strip
+       highlighted a stage that was not the one running. -->
   <ol class="pipeline" id="hero-pipeline">
     <li class="pipe-step" data-level="0">
       <span class="pipe-num">0</span>
@@ -134,27 +144,57 @@ try{
     <li class="pipe-step" data-level="1">
       <span class="pipe-num">1</span>
       <span class="pipe-name">3D prediction</span>
-      <span class="pipe-tag">ensemble</span>
+      <span class="pipe-tag">segmented · ensemble</span>
+    </li>
+    <li class="pipe-step" data-level="1.5">
+      <span class="pipe-num">1.5</span>
+      <span class="pipe-name">Global relaxation</span>
+      <span class="pipe-tag">restraints</span>
     </li>
     <li class="pipe-step" data-level="2">
       <span class="pipe-num">2</span>
       <span class="pipe-name">CG folding</span>
-      <span class="pipe-tag">REST2 · MetaD</span>
+      <span class="pipe-tag">REMD · CG→AA</span>
+    </li>
+    <li class="pipe-step" data-level="2.3">
+      <span class="pipe-num">2.3</span>
+      <span class="pipe-name">5-bead refinement</span>
+      <span class="pipe-tag">anneal</span>
+    </li>
+    <li class="pipe-step" data-level="2.5">
+      <span class="pipe-num">2.5</span>
+      <span class="pipe-name">All-atom placement</span>
+      <span class="pipe-tag">template</span>
+    </li>
+    <li class="pipe-step" data-level="2.6">
+      <span class="pipe-num">2.6</span>
+      <span class="pipe-name">PyRosetta refine</span>
+      <span class="pipe-tag">naeref2015</span>
     </li>
     <li class="pipe-step" data-level="3">
       <span class="pipe-num">3</span>
-      <span class="pipe-name">All-atom placement</span>
-      <span class="pipe-tag">1EHZ template</span>
+      <span class="pipe-name">RL fine-tuning</span>
+      <span class="pipe-tag">PPO</span>
+    </li>
+    <li class="pipe-step" data-level="3.5">
+      <span class="pipe-num">3.5</span>
+      <span class="pipe-name">Metadynamics</span>
+      <span class="pipe-tag">well-tempered</span>
     </li>
     <li class="pipe-step" data-level="4">
       <span class="pipe-num">4</span>
-      <span class="pipe-name">All-atom refinement</span>
-      <span class="pipe-tag">Amber14-OL3</span>
+      <span class="pipe-name">REST2 refinement</span>
+      <span class="pipe-tag">2D REMD</span>
     </li>
     <li class="pipe-step" data-level="5">
       <span class="pipe-num">5</span>
-      <span class="pipe-name">Minimization</span>
-      <span class="pipe-tag">PPR repair</span>
+      <span class="pipe-name">Amber refinement</span>
+      <span class="pipe-tag">RNA.OL3</span>
+    </li>
+    <li class="pipe-step" data-level="5.5">
+      <span class="pipe-num">5.5</span>
+      <span class="pipe-name">PPR repair</span>
+      <span class="pipe-tag">H-bond</span>
     </li>
   </ol>
 </section>

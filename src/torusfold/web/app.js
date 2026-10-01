@@ -385,15 +385,47 @@
 
   /* ═══════════════ PIPELINE PROGRESS ═══════════════ */
 
-  var PIPELINE_STEPS = [
-    { id: 0, name: 'Secondary Structure', abbrev: 'SS' },
-    { id: 1, name: '3D Structure Prediction', abbrev: '3D' },
-    { id: 2, name: 'CG Refinement', abbrev: 'CG' },
-    { id: 3, name: 'All-Atom Placement', abbrev: 'AA+' },
-    { id: 4, name: 'All-Atom Refinement', abbrev: 'AA' },
-    { id: 5, name: 'All-Atom Minimization', abbrev: 'Min' },
+  /* The pipeline's stages, in order, as level NAMES. The server decides this
+     list (see /api/schema and state.levels); this is only the fallback used
+     before the first payload arrives.
+     
+     It is a list of levels rather than an index, because the two are not the
+     same thing here and used to be confused: levels run 0, 1, 1.5, 2, 2.3, 2.5,
+     2.6, 3, 3.5, 4, 5, 5.5, so "level 2.5" is index 5. Code that treated the
+     server's level number as an array position highlighted the wrong stage from
+     level 2.3 onwards. */
+  var PIPELINE_LEVELS = [
+    { level: '0',   name: 'Secondary structure' },
+    { level: '1',   name: '3D prediction' },
+    { level: '1.5', name: 'Global relaxation' },
+    { level: '2',   name: 'CG folding' },
+    { level: '2.3', name: '5-bead refinement' },
+    { level: '2.5', name: 'All-atom placement' },
+    { level: '2.6', name: 'PyRosetta refine' },
+    { level: '3',   name: 'RL fine-tuning' },
+    { level: '3.5', name: 'Metadynamics' },
+    { level: '4',   name: 'REST2 refinement' },
+    { level: '5',   name: 'Amber refinement' },
+    { level: '5.5', name: 'PPR repair' },
   ];
-  var STEP_COUNT = PIPELINE_STEPS.length;
+  // Replaced by the server's own ladder on the first payload.
+  var activeLevels = PIPELINE_LEVELS;
+  // Accepts either a number or the string form, so '2.5' and 2.5 agree.
+  function levelKey(v) { return v == null ? '' : String(v); }
+  function levelIndex(level) {
+    var want = levelKey(level);
+    for (var i = 0; i < activeLevels.length; i++) {
+      if (levelKey(activeLevels[i].level) === want) return i;
+    }
+    return -1;
+  }
+  // The name of the last stage, for the "we are done" calls. An index into the
+  // list will not do: updateProgress takes a level name, and the last level is
+  // '5.5' at position 11, so an index of 11 would name a stage that does not exist.
+  function lastLevel() {
+    return activeLevels.length ? levelKey(activeLevels[activeLevels.length - 1].level)
+                               : '5.5';
+  }
 
   function resetProgress() {
     if (progressSteps) {
@@ -434,7 +466,10 @@
   var ladderBuilt = false;
 
   /* The stage ladder is published by the server, so the bar and the list cannot
-     disagree about how many stages there are or what they are called. */
+     disagree about how many stages there are or what they are called.
+     
+     currentIdx is a POSITION in that list, not a level name; applyRunState
+     converts. */
   function buildLadder(levels, currentIdx) {
     if (!runLadder || !levels || !levels.length) return;
     if (!ladderBuilt) {
@@ -545,8 +580,16 @@
       return;
     }
 
-    var idx = state.current_level == null ? -1 : state.current_level;
-    buildLadder(state.levels, idx);
+    // current_level is the server's level NAME ('2.5'), while buildLadder compares
+    // positions, so it is converted here. Passing the level straight through made
+    // "level 2.5" mean "position 2.5" and the ladder marked the wrong stage done.
+    if (state.levels && state.levels.length) {
+      activeLevels = state.levels.map(function (lv) {
+        return { level: lv.level, name: lv.label };
+      });
+    }
+    buildLadder(state.levels, levelIndex(state.current_level));
+    labelHeaderStrip(state.levels);
     renderPlan(state.plan);
 
     if (runLevel) {
@@ -676,6 +719,17 @@
       if (!s.has_job) {
         /* No run in progress, but a finished one may still be lying in the output
            directory. Show its last checkpoint instead of an empty 3D panel. */
+        // Adopt the server's stage list and naming even when nothing is running.
+        // Without this the strip and the progress card keep the labels baked into
+        // the markup until a run starts, so the idle page describes the pipeline
+        // slightly differently from the run that is about to happen.
+        if (s.levels && s.levels.length) {
+          activeLevels = s.levels.map(function (lv) {
+            return { level: lv.level, name: lv.label };
+          });
+          labelHeaderStrip(s.levels);
+          renderPlan(s.plan);
+        }
         showLastStructure();
         return;
       }
@@ -699,7 +753,7 @@
         currentJobId = s.job_id;
         TF.State.jobId = s.job_id;
         if (progressCard) progressCard.style.display = '';
-        updateProgress(STEP_COUNT - 1, 'done');
+        updateProgress(lastLevel(), 'done');
         fetchResult(currentJobId);
         showToast('Recovered the previous run (' + s.job_id + ')', 'success');
       } else if (s.status === 'error') {
@@ -710,47 +764,90 @@
     }).catch(function () { /* nothing to re-attach to */ });
   }
 
-  /* Mirror the progress card onto the pipeline strip in the header, so the six
-     levels are readable without opening the Parameters column. Class names
-     differ on purpose: .pipe-step is the monospace strip, .progress-step is the
-     card. Without this the strip would be fixed decoration that lies about
-     which level is running. */
+  /* Mirror the run onto the pipeline strip in the header, so the twelve stages
+     are readable without opening the Parameters column. Class names differ on
+     purpose: .pipe-step is the monospace strip, .progress-step is the card.
+
+     Matching is by data-level, not by position. The tiles are in order, but their
+     labels are level names (1.5, 2.3, 3.5 ...), so a positional comparison only
+     happens to work while the ordering is right and breaks silently the moment it
+     is not — which is exactly what happened when the strip showed six tiles for
+     twelve stages. */
   function syncHeaderStrip(activeLevel, statusText) {
     var strip = $('hero-pipeline');
     if (!strip) return;
-    strip.querySelectorAll('.pipe-step').forEach(function (el, i) {
-      el.classList.remove('active', 'done');
-      if (statusText === 'idle') return;
-      if (i < activeLevel || (i === activeLevel && statusText === 'done')) {
-        el.classList.add('done');
-      } else if (i === activeLevel && statusText === 'error') {
-        el.classList.add('failed');
-      } else if (i === activeLevel) {
-        el.classList.add('active');
+    var active = levelKey(activeLevel);
+    var tiles = strip.querySelectorAll('.pipe-step');
+    // "done" needs to know what comes before, so compare positions in the
+    // authoritative list rather than the number itself.
+    var idx = levelIndex(activeLevel);
+    tiles.forEach(function (el) {
+      el.classList.remove('active', 'done', 'failed');
+      if (statusText === 'idle' || !active) return;
+      var mine = levelKey(el.dataset.level);
+      var myIdx = levelIndex(el.dataset.level);
+      if (myIdx >= 0 && idx >= 0) {
+        if (myIdx < idx) el.classList.add('done');
+        else if (myIdx === idx) {
+          el.classList.add(statusText === 'error' ? 'failed'
+                            : statusText === 'done' ? 'done' : 'active');
+        }
+        return;
       }
+      // A tile the server does not list: fall back to a direct label match so it
+      // still lights up rather than being silently ignored.
+      if (mine === active) el.classList.add('active');
     });
   }
 
-  /* Layer two of the progress UI: the per-step detail list from the local step
-     machine. The server-driven bar and ladder above are authoritative for how
-     far the run has got; this list is the fine-grained narration.
-     progressSteps is empty until the server's ladder has been rendered, so this
-     loops over whatever is present rather than assuming six entries. */
+  /* Name the tiles from the server's own list.
+
+     The markup carries labels so the strip reads correctly before any payload
+     arrives, but the server's names are authoritative — a hand-written copy in the
+     HTML drifted from it (the markup said "All-atom placement" for level 2.5 where
+     the server says "CG to all-atom"), and two sources of truth for the same
+     label is how this strip came to describe a different pipeline than the one
+     running. */
+  function labelHeaderStrip(levels) {
+    var strip = $('hero-pipeline');
+    if (!strip || !levels || !levels.length) return;
+    var byLevel = {};
+    levels.forEach(function (lv) { byLevel[levelKey(lv.level)] = lv.label; });
+    strip.querySelectorAll('.pipe-step').forEach(function (el) {
+      var name = byLevel[levelKey(el.dataset.level)];
+      var nameEl = el.querySelector('.pipe-name');
+      if (name && nameEl && nameEl.textContent !== name) nameEl.textContent = name;
+    });
+  }
+
+  /* Update every progress display from a level NAME and a status.
+
+     activeLevel is a level ('2.5'), not an array index. Both callers used to pass
+     an index from a six-entry list, and the server sends a level, so the two
+     meanings collided: the heartbeat's "level 2.5" was read as "the 2.5th stage"
+     and clamped, highlighting an unrelated row. */
   function updateProgress(activeLevel, statusText) {
+    var idx = levelIndex(activeLevel);
     if (progressSteps) {
       var steps = progressSteps.querySelectorAll('.progress-step');
-      var pct = 0;
       steps.forEach(function (el, i) {
         var ind = el.querySelector('.step-indicator');
         var status = el.querySelector('.step-status');
         el.classList.remove('active-step', 'done-step');
-        if (i < activeLevel) {
+        // The card is rendered from the server's plan, in the same order, so
+        // position i there corresponds to position i in activeLevels.
+        var mine = levelKey(el.dataset.step);
+        var myIdx = levelIndex(mine);
+        var before = (myIdx >= 0 && idx >= 0) ? myIdx < idx
+                   : (idx >= 0 ? i < idx : false);
+        var here = (myIdx >= 0 && idx >= 0) ? myIdx === idx
+                 : (idx >= 0 ? i === idx : false);
+        if (before) {
           ind.className = 'step-indicator done';
           status.className = 'step-status done-text';
           status.textContent = 'Done';
           el.classList.add('done-step');
-          pct = ((i + 1) / (steps.length || 1)) * 100;
-        } else if (i === activeLevel) {
+        } else if (here) {
           if (statusText === 'error') {
             ind.className = 'step-indicator error';
             status.className = 'step-status error-text';
@@ -788,7 +885,7 @@
 
   EventBus.on('sse:done', function (data) {
     if (data) applyRunState(data);
-    updateProgress(STEP_COUNT - 1, 'done');
+    updateProgress(lastLevel(), 'done');
     fetchResult(currentJobId);
   });
 
@@ -855,7 +952,7 @@
         updateProgress(level, 'running');
       } else if (s.status === 'done') {
         clearInterval(pollTimer); pollTimer = null;
-        updateProgress(STEP_COUNT - 1, 'done');
+        updateProgress(lastLevel(), 'done');
         showToast('Prediction complete!', 'success');
         fetchResult(jid);
       } else if (s.status === 'error') {
@@ -867,22 +964,38 @@
     }).catch(function () { /* retry silently */ });
   }
 
+  /* Last resort: guess the stage from the job text or from elapsed time.
+
+     This exists only for the early-return paths. The server reports the real
+     current_level on every heartbeat, so this is not the normal source.
+
+     Returns a level NAME, not an index, and the mapping matches the server's
+     twelve levels. It previously returned 0-5 against a six-entry list, which put
+     "all-atom placement" at 3 while the server calls that 2.5 — so on the fallback
+     path every stage from there on was labelled with a different stage's name. */
   function inferLevel(s) {
-    var text = (s.status || '') + ' ' + (s.message || '');
-    var lower = text.toLowerCase();
-    if (lower.includes('secondary') || lower.includes('vienna') || lower.includes('bpp')) return 0;
-    if (lower.includes('3d') || lower.includes('rhofold') || lower.includes('vfold')) return 1;
-    if (lower.includes('cg') || lower.includes('coarse') || lower.includes('refinement')) return 2;
-    if (lower.includes('atom') && lower.includes('place')) return 3;
-    if (lower.includes('all-atom') || lower.includes('openmm') || lower.includes('relax')) return 4;
-    if (lower.includes('minim')) return 5;
+    var lower = ((s.status || '') + ' ' + (s.message || '')).toLowerCase();
+    if (lower.includes('secondary') || lower.includes('vienna') || lower.includes('bpp')) return '0';
+    if (lower.includes('rhofold') || lower.includes('vfold') || lower.includes('3d')) return '1';
+    if (lower.includes('metadyn')) return '3.5';
+    if (lower.includes('rest2') || lower.includes('remd')) return '4';
+    if (lower.includes('amber') || lower.includes('all-atom')) return '5';
+    if (lower.includes('minim') || lower.includes('ppr')) return '5.5';
+    if (lower.includes('place') && lower.includes('atom')) return '2.5';
+    if (lower.includes('pyrosetta')) return '2.6';
+    if (lower.includes('5-bead') || lower.includes('bead')) return '2.3';
+    if (lower.includes('cg') || lower.includes('coarse') || lower.includes('relax')) return '2';
+    // Nothing matched: the level depends entirely on the sequence length, so this
+    // cannot be more than a rough position. The server path is authoritative.
     var elapsed = pipelineStartTime ? (Date.now() - pipelineStartTime) / 1000 : 0;
-    if (elapsed < 30) return 0;
-    if (elapsed < 120) return 1;
-    if (elapsed < 300) return 2;
-    if (elapsed < 600) return 3;
-    if (elapsed < 1200) return 4;
-    return 5;
+    if (elapsed < 60) return '0';
+    if (elapsed < 180) return '1';
+    if (elapsed < 420) return '2';
+    if (elapsed < 600) return '2.5';
+    if (elapsed < 900) return '3';
+    if (elapsed < 3600) return '3.5';
+    if (elapsed < 5400) return '4';
+    return '5';
   }
 
   /* ═══════════════ FETCH & RENDER RESULT ═══════════════ */
@@ -1023,7 +1136,8 @@
       var idx = stepOrder.indexOf(data.step);
       if (idx >= 0) {
         stepIdx = idx;
-        updateProgress(Math.floor((idx / stepOrder.length) * STEP_COUNT), 'running');
+        updateProgress(activeLevels[Math.min(activeLevels.length - 1,
+            Math.floor((idx / stepOrder.length) * activeLevels.length))].level, 'running');
       }
       if (progressBarFill) progressBarFill.style.width = Math.floor((stepIdx / stepOrder.length) * 100) + '%';
     });
@@ -1038,7 +1152,7 @@
     evtSource.addEventListener('done', function (e) {
       var data = JSON.parse(e.data);
       evtSource.close();
-      updateProgress(STEP_COUNT - 1, 'done');
+      updateProgress(lastLevel(), 'done');
       if (progressBarFill) progressBarFill.style.width = '100%';
       showToast('PDB analysis complete!', 'success');
       // Switch to Structure tab
