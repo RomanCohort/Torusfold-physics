@@ -32,6 +32,10 @@ from typing import Dict, List, Optional, Tuple
 VIEWER_STAGES: List[Tuple[str, str, str]] = [
     ("1", "vfold3d/assembled.pdb", "segmented prediction, assembled"),
     ("1.5", "level1_5_relaxed.pdb", "coarse-grained, globally relaxed"),
+    # Rewritten every ~45 s while Levels 3 to 5 refine, so the panel has something
+    # new to show through the long stretch that writes nothing else. It is a
+    # coarse-grained trace: P atoms only, one per residue.
+    ("3.5", "latest_cg.pdb", "refining (live)"),
     ("2", "_final_cg_for_aa.pdb", "folding round complete"),
     ("2.5", "final_allatom.pdb", "CG to all-atom placement"),
     ("2.6", "final_allatom_refined.pdb", "PyRosetta refined"),
@@ -96,6 +100,24 @@ def _atom_count(path: str) -> int:
     return n
 
 
+def _residue_count(path: str) -> int:
+    """Distinct residues in a PDB, counted from the resSeq field.
+
+    Paired with _atom_count this says whether a file is a coarse-grained trace or
+    a full-atom structure, which is a more reliable signal than the filename: the
+    filenames differ per level and the stage registry would have to be trusted.
+    """
+    seen = set()
+    try:
+        with open(path, "r", errors="replace") as f:
+            for line in f:
+                if line.startswith("ATOM"):
+                    seen.add((line[21:22], line[22:27]))
+    except OSError:
+        return 0
+    return len(seen)
+
+
 def _digest(path: str) -> str:
     """SHA-1 of a file, or '' if unreadable.
 
@@ -113,6 +135,38 @@ def _digest(path: str) -> str:
     except OSError:
         return ""
     return h.hexdigest()
+
+
+def _is_all_atom(stage: Dict) -> bool:
+    """Distinguish a full-atom structure from a coarse-grained trace.
+
+    Not from the filename — from the ratio of atoms to residues, because that is
+    what actually differs: a CG trace carries one P per residue, an all-atom
+    structure around twenty atoms per residue. Anything above four per residue is
+    unambiguously all-atom, and the gap between the two is wide enough that the
+    threshold is not delicate.
+    """
+    residues = _residue_count(stage["path"])
+    if residues < 1:
+        return False
+    return stage["atoms"] > 4 * residues
+
+
+def _pick(candidates: List[Dict]) -> Optional[Dict]:
+    """Which structure to show.
+
+    Among files that are all-atom, the most recently written; only if there is no
+    all-atom structure does the newest coarse-grained one win. Recency alone is not
+    enough: `latest_cg.pdb` is rewritten every 45 seconds throughout refinement and
+    would therefore always be the newest file, so a plain newest-first rule would
+    replace a finished all-atom structure with a coarse trace and keep it there.
+    Quality first, recency within quality.
+    """
+    if not candidates:
+        return None
+    ordered = sorted(candidates, key=lambda c: (c["mtime"], c["_order"]), reverse=True)
+    all_atom = [c for c in ordered if _is_all_atom(c)]
+    return (all_atom or ordered)[0]
 
 
 def newest_structure(output_dir: str, run_started_at: Optional[float] = None) -> Optional[Dict]:
@@ -176,10 +230,8 @@ def newest_structure(output_dir: str, run_started_at: Optional[float] = None) ->
             "mtime": os.path.getmtime(path), "_order": order,
         })
 
-    best = None
-    if candidates:
-        candidates.sort(key=lambda c: (c["mtime"], c["_order"]), reverse=True)
-        best = candidates[0]
+    best = _pick(candidates)
+    if best is not None:
         best.pop("_order", None)
 
     # Hashed once, for the winner only: only the returned structure is compared.

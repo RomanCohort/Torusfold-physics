@@ -38,6 +38,37 @@ WC_COMPLEMENT = {
     'RA': 'RU', 'RU': 'RA', 'RG': 'RC', 'RC': 'RG',
 }
 
+# Residue names as they appear in the files this pipeline reads, mapped to the
+# one-letter codes WC_COMPLEMENT is keyed on.
+#
+# This exists because the table above only accepts one- and two-letter names,
+# while the pipeline's own writers emit the three-letter form (see _BASE_MAP in
+# isrnaclong.py, and every all-atom structure from allatom_reconstruct.py).
+# Without this the lookup returned None for both residues of every pair, so
+# `wc_eligible` was always 0 and pair satisfaction came out as 0% — a metric that
+# was not merely uninformative but wrong, and wrong in the direction that looks
+# like a poor structure. Detected on a 139 nt CG checkpoint whose own residue
+# names are GUA/ADE/URA/CYT: 4,126 pairs within 15 A, 0 WC-eligible.
+_RESIDUE_ALIASES = {
+    'ADE': 'A', 'URA': 'U', 'GUA': 'G', 'CYT': 'C', 'THY': 'DT',
+    'DA': 'DA', 'DT': 'DT', 'DG': 'DG', 'DC': 'DC',
+    'RA': 'RA', 'RU': 'RU', 'RG': 'RG', 'RC': 'RC',
+    'A': 'A', 'U': 'U', 'G': 'G', 'C': 'C',
+    'PSU': 'U', 'INO': 'I', '5MU': 'U', '1MA': 'A', '7MG': 'G',
+}
+
+
+def canonical_base(residue_name: str) -> str:
+    """Normalise a residue name to the key WC_COMPLEMENT uses.
+
+    Unknown names are returned unchanged, so a modified base simply does not match
+    rather than matching something arbitrary.
+    """
+    if not residue_name:
+        return ''
+    name = residue_name.strip().upper()
+    return _RESIDUE_ALIASES.get(name, name)
+
 
 # ── PDB Parsing ─────────────────────────────────────────────────
 
@@ -595,9 +626,12 @@ def compute_pair_satisfaction(coords: np.ndarray, residue_ids: List[int],
         pair_distances.append(d)
         ranges[rkey]['count'] += 1
 
-        # Check WC complementarity
-        rn_i = p_res_names[di]
-        rn_j = p_res_names[dj]
+        # Check WC complementarity. Normalised through canonical_base first: the
+        # residue names on disk are three-letter (GUA, ADE) and the table is keyed
+        # on one letter, so without this the lookup returned None for both sides of
+        # every pair and nothing was ever counted as Watson-Crick.
+        rn_i = canonical_base(p_res_names[di])
+        rn_j = canonical_base(p_res_names[dj])
         wc_match = WC_COMPLEMENT.get(rn_i) == rn_j or WC_COMPLEMENT.get(rn_j) == rn_i
 
         if wc_match:

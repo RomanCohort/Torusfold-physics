@@ -2048,6 +2048,20 @@ def isrnaclong_pipeline(
         )
 
     # ── Level 3: RL fine-tuning (continuous action space) ──
+    #
+    # From here to Level 5 the coordinates are refined in long single calls and
+    # nothing is written to disk until the very end. Start a background writer so
+    # `latest_cg.pdb` keeps up with the refinement: without it the structure panel
+    # has nothing new to show for the whole stretch, which is hours.
+    #
+    # The holder is a mutable box rather than a closure over `best_coords`,
+    # because `best_coords` is rebound in several nested scopes and a closure
+    # would keep reading whichever binding it captured.
+    _coord_holder = {"coords": best_coords}
+    _stop_snapshots = _start_snapshot_writer(_coord_holder, sequence, output_path)
+    if verbose:
+        print(f"    [snapshots] writing latest_cg.pdb every ~45s for the viewer")
+
     if ckpt_level >= 3:
         if verbose:
             print(f"\n[Level 3] restored from checkpoint")
@@ -2073,6 +2087,7 @@ def isrnaclong_pipeline(
                     policy_path=_rl_l3_path if Path(_rl_l3_path).exists() else None,
                 )
                 best_coords = opt_p
+                _coord_holder["coords"] = best_coords
                 _l3_ok = True
                 if verbose:
                     print(f"    RL done: reward={rl_info.get('reward_after', 0):.4f}")
@@ -2090,6 +2105,21 @@ def isrnaclong_pipeline(
 
     # ── Level 3.5: Metadynamics enhanced sampling (crossing free-energy barriers along the CVs) ──
     # GPU batched version preferred (torch.cuda); OpenMM CPU is the fallback.
+    #
+    # The GPU loop reports progress every 50 hill steps, so it can publish a
+    # structure at those points. Keyed to simulation steps rather than a timer:
+    # this machine runs about 5,000 of the 200,000 steps in four minutes, so a
+    # wall-clock writer and a step-based one differ by orders of magnitude in how
+    # much of the trajectory the viewer gets to see.
+    _snap_steps = 5000
+    _snap_state = {"n": 0}
+
+    def _snapshot_cb(step, total, coords):
+        if _write_snapshot(coords, sequence, output_path):
+            _snap_state["n"] += 1
+            if verbose and _snap_state["n"] % 4 == 1:
+                print(f"    [snapshot] step {step}/{total} -> latest_cg.pdb")
+
     if ckpt_level >= 3.5:
         if verbose:
             print(f"\n[Level 3.5] restored from checkpoint")
@@ -2127,9 +2157,12 @@ def isrnaclong_pipeline(
                     well_tempered=True,
                     bias_factor=5.0,
                     verbose=verbose,
+                    on_step=_snapshot_cb,     # a structure every few thousand steps
+                    report_every=_snap_steps,
                 )
                 if meta_e < best_energy:
                     best_coords = meta_coords
+                    _coord_holder["coords"] = best_coords
                     best_energy = meta_e
                     if verbose:
                         print(f"    GPU-MetaD E={meta_e:.0f} (better than current)")
@@ -2200,6 +2233,7 @@ def isrnaclong_pipeline(
                 meta_e = best_replica[2]
                 if meta_e < best_energy:
                     best_coords = meta_coords
+                    _coord_holder["coords"] = best_coords
                     best_energy = meta_e
                     if verbose:
                         print(f"    MetaD (replica {best_replica[0]}) "
@@ -2299,11 +2333,13 @@ def isrnaclong_pipeline(
                     _best_i, _n_cl, _cl_info = _cluster_and_select(
                         _snap_list, _snap_energies, rmsd_threshold=5.0)
                     best_coords = _snap_list[_best_i]
+                    _coord_holder["coords"] = best_coords
                     best_energy = _snap_energies[_best_i]
                     if verbose:
                         print(f"    REST2: {_n_cl} clusters, best E={best_energy:.0f}")
                 else:
                     best_coords = coords_rest2
+                    _coord_holder["coords"] = best_coords
                     best_energy = e_rest2
                 if verbose:
                     print(f"    REST2 E={best_energy:.0f}")
@@ -2362,6 +2398,7 @@ def isrnaclong_pipeline(
                 best_energy = _e1_5
                 if len(_p_coords_5) == L:
                     best_coords = _p_coords_5
+                    _coord_holder["coords"] = best_coords
                 if verbose:
                     print(f"    AMBER refinement: E={_e0_5:.0f} -> {_e1_5:.0f} kJ/mol (better than previous {old_energy:.0f})")
                     print(f"    pair restraints: {len(pairs)} pairs, A-form torsions: {_info_5.get('n_torsions', 0)}")
@@ -2394,6 +2431,7 @@ def isrnaclong_pipeline(
                         p_coords_5 = _read_pdb_p_coords(amber_out)
                         if len(p_coords_5) == L:
                             best_coords = p_coords_5
+                            _coord_holder["coords"] = best_coords
                         if verbose:
                             print(f"    AMBER refinement (fallback): E={amber_e:.0f} (better than previous {old_energy:.0f})")
                     else:
@@ -2449,6 +2487,18 @@ def isrnaclong_pipeline(
     # write the final PDB
     final_pdb = str(output_path / "isrnaclong_final.pdb")
     _write_coords_pdb(best_coords, sequence, final_pdb)
+
+    # The refinement is over, so the periodic snapshots have nothing left to add:
+    # this is the last full write. Stop the thread and remove the interim file, so
+    # the output directory does not keep a stale duplicate of the result that the
+    # viewer might prefer purely because it was written last.
+    try:
+        _stop_snapshots(verbose=verbose)
+        _snap_leftover = Path(output_path) / "latest_cg.pdb"
+        if _snap_leftover.exists():
+            _snap_leftover.unlink()
+    except Exception:
+        pass
 
     # read the all-atom P coordinates (if final_allatom.pdb exists)
     _faa = str(output_path / "final_allatom.pdb")
@@ -3142,6 +3192,107 @@ def _count_pdb_atoms(path) -> int:
     except OSError:
         return 0
     return n
+
+
+def _write_snapshot(coords, sequence, output_path):
+    """Write the live structure once, atomically. Returns True on success.
+
+    Split out of _start_snapshot_writer so a stage that can report its own progress
+    — the GPU metadynamics loop calls back every few thousand MD steps — can
+    publish a structure at those points instead of on a wall clock.
+
+    Atomic because the server reads this file from another process: a reader sees
+    either the whole previous file or the whole new one, never a truncated one.
+    """
+    try:
+        coords = np.asarray(coords, dtype=float)
+        if coords.ndim != 2 or coords.shape[0] != len(sequence):
+            return False
+        path = Path(output_path) / "latest_cg.pdb"
+        tmp = path.with_suffix(".pdb.tmp")
+        _write_coords_pdb(coords, sequence, str(tmp))
+        os.replace(str(tmp), str(path))
+        return True
+    except Exception:
+        return False
+
+
+def _start_snapshot_writer(holder, sequence, output_path, interval=45.0):
+    """Write the current coordinates to a PDB every few seconds, on a daemon thread.
+
+    Why this exists: Levels 3.5 and 4 are single calls that run for hours and
+    return once. Their coordinates live in memory the whole time, so before this
+    the output directory received nothing new for the entire stretch — the structure
+    panel had nothing to show and looked frozen, however often it polled.
+
+    A thread rather than a hook inside the samplers, because the samplers expose no
+    per-step callback and adding one would mean editing three of them. Torch
+    releases the GIL during the large tensor ops these stages are made of, so a
+    short write every `interval` seconds costs the run very little; 45 s is chosen
+    to be well under the time it takes to read a structure.
+
+    The file is replaced atomically (write a temp file, then rename) because the
+    server reads it from another process. A reader mid-poll sees either the whole
+    previous file or the whole new one, never a half-written one — which matters,
+    since a truncated PDB is exactly what the viewer's completeness check exists
+    to reject.
+
+    Returns a stop() function. Never raises: a snapshot is not worth failing a
+    multi-hour run over.
+    """
+    import threading
+
+    state = {"stop": False, "failures": 0, "written": 0}
+
+    def _coords():
+        """The current coordinates, from whichever holder shape was passed."""
+        # A dict is the documented shape; a callable is accepted so a caller can
+        # pass a lambda. `dict.get` takes an argument, so calling `holder.get()`
+        # on a dict raises TypeError — which a bare `except` then hides, and the
+        # snapshots silently never appear. This is checked, not assumed.
+        if callable(holder):
+            return holder()
+        if isinstance(holder, dict):
+            return holder.get("coords")
+        return getattr(holder, "coords", None)
+
+    def _write_once():
+        coords = _coords()
+        if coords is None:
+            state["failures"] += 1
+            return
+        if _write_snapshot(coords, sequence, output_path):
+            state["written"] += 1
+        else:
+            state["failures"] += 1
+
+    def _loop():
+        while not state["stop"]:
+            _write_once()
+            # Sleeping in small slices so stop() is honoured promptly rather than
+            # leaving a thread alive for up to a full interval after the run ends.
+            slept = 0.0
+            while slept < interval and not state["stop"]:
+                time.sleep(min(1.0, interval - slept))
+                slept += 1.0
+
+    def stop(verbose=False):
+        # Idempotent: one caller stops the writer normally, and a cleanup path may
+        # also call it.
+        state["stop"] = True
+        if verbose and state["written"] == 0:
+            print("  [snapshots] no snapshot was ever written (%d attempt(s) failed)"
+                  % state["failures"])
+        return state["written"]
+
+    try:
+        _write_once()          # something on screen immediately, not after 45 s
+        t = threading.Thread(target=_loop, daemon=True,
+                             name="torusfold-snapshot")
+        t.start()
+    except Exception:
+        return lambda verbose=False: 0
+    return stop
 
 
 def _merge_allatom_pdbs(aa_pdb_paths, seg_list, output_path, full_sequence):

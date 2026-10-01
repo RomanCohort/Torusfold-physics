@@ -692,6 +692,16 @@ input[type="range"]::-moz-range-thumb{
 .residue-tooltip .tt-label{color:var(--ink-3)}
 .residue-tooltip .tt-val{font-family:var(--font-mono);color:var(--ink-2)}
 
+/* Says which structure the readout numbers came from. Sits above the tabs because
+   it applies to all of them, and is deliberately quiet — it is a caveat, not a
+   headline. */
+.live-source{
+  padding:7px var(--sp-3);border-bottom:1px solid var(--hair);
+  font-family:var(--font-mono);font-size:var(--t-2xs);line-height:1.4;
+  color:var(--ink-3);background:var(--well);
+}
+.live-source::before{content:'▸ ';color:var(--accent)}
+
 /* ═══════════════ READOUT ═══════════════ */
 /* Tab behaviour lives with the panel layout above (search for "readout panel is
    a FLEX column"); the selectors below only turn panels on and off. */

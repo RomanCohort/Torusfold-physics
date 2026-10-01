@@ -162,61 +162,110 @@ def _stage_weights(params, sequence_length=None):
         except (TypeError, ValueError):
             return float(default)
 
+    def flag(key, default=True):
+        """A boolean parameter as submitted, falling back to its real default.
+
+        The caller passes only what the user overrode, so a parameter left at its
+        default is absent from `p`, not False. Reading `p.get("use_metad")`
+        therefore answered None for a run that was going to run metadynamics — and
+        metadynamics was modelled at 0% of the run as a result. The defaults come
+        from the pipeline's own signature.
+        """
+        if key in p and p[key] is not None:
+            v = p[key]
+            if isinstance(v, str):
+                return v.strip().lower() not in ("0", "false", "no", "off", "")
+            return bool(v)
+        d = _pipeline_defaults().get(key, default)
+        if isinstance(d, str):
+            return d.strip().lower() not in ("0", "false", "no", "off", "")
+        return bool(d)
+
+    # Parameters the pipeline's signature gives a real value to; used when the
+    # caller passed nothing for them.
+    def pipe_num(key, fallback):
+        if key in p and p[key] is not None:
+            try:
+                return float(p[key])
+            except (TypeError, ValueError):
+                pass
+        d = _pipeline_defaults().get(key, fallback)
+        try:
+            return float(d)
+        except (TypeError, ValueError):
+            return float(fallback)
+
     L = sequence_length or 0
-    rounds = max(1.0, num("n_relax_rounds", 6))
+    rounds = max(1.0, pipe_num("n_relax_rounds", 6))
 
-    # Level 2: its REMD budget is fixed in torch_gpu_refine at 8 rounds x 5,000
-    # steps, with 64 replicas above 1,000 nt and nrep/n_rest2_replicas below
-    # (isrnaclong.py:1568-1571). Relative to the documented 20-round default.
+    # Every stage is modelled as a number of MD steps it will execute, and the
+    # weights are those numbers normalised. One currency, so no stage can be given
+    # a share by hand that has nothing to do with its cost.
+    #
+    # This replaced a scheme that reserved "_HEAD_SHARE = 0.85" of the run for
+    # Levels 2 and 4 and divided the rest among the others by step count. The
+    # reserved share was not derived from anything: with the default parameters
+    # Level 4 came out at 84% of the modelled run while metadynamics came out at
+    # 0.00%, and metadynamics is the longest stage there is — measured here at
+    # about 5,000 of its 200,000 steps in four minutes, so roughly 2.6 hours.
+    #
+    # The consequences were visible and were reported as two separate faults: the
+    # progress bar sat at 8% for hours because the stage actually running had been
+    # given no width, and the estimate kept reporting "0s left" because the
+    # fraction done could not move.
+    steps = {}
+
+    # Level 2: 8 rounds x 5,000 steps, with 64 replicas above 1,000 nt and
+    # nrep/n_rest2_replicas below (isrnaclong.py:1568-1571).
     if L > 1000:
-        l2_rel = rounds / 20.0
+        l2_reps = 64.0
     else:
-        reps = max(num("nrep", 1) or 6.0, num("n_rest2_replicas", 1))
-        l2_rel = (rounds / 20.0) * (reps / 8.0)
+        l2_reps = max(pipe_num("nrep", 1) or 6.0, pipe_num("n_rest2_replicas", 1))
+    steps["2"] = 8.0 * 5000.0 * rounds / 20.0 * (l2_reps / 8.0)
 
-    # Level 4: REST2 steps relative to the documented 100,000-step reference.
-    l4_rel = max(1.0, num("rest2_nsteps", 300000)) / 100_000.0
+    # Level 4: the replicas run batched in one tensor, so the cost is the step
+    # budget, not the replica count.
+    steps["4"] = max(1.0, pipe_num("rest2_nsteps", 300000))
 
-    head = {}
-    l2_rel = max(l2_rel, 1e-6)
-    l4_rel = max(l4_rel, 1e-6)
-    l2_share = _HEAD_SHARE * l2_rel / (l2_rel + l4_rel)
-    head["2"] = l2_share
-    head["4"] = _HEAD_SHARE - l2_share
-
-    # Everything else divides the remainder by the MD steps it will execute.
-    tail = {}
-    tail["0"] = 600.0 + L * 0.4
-    tail["1"] = (1200.0 + L * 0.6) * (2.0 if p.get("use_rhofold") else 1.0)
-    if p.get("use_msa"):
-        tail["1"] += 800.0
-    tail["1"] += 1500.0 * max(0.0, num("n_candidates", 1) - 1)
-    tail["1.5"] = 1000.0
-    tail["2.5"] = 600.0
-
-    if p.get("use_5bead"):
-        scale = max(1.0, L / 2000.0) if L else 1.0
-        tail["2.3"] = _FIVE_BEAD_STEPS_AT_2000 * scale * (rounds / 20.0)
+    # The rest are direct step counts, or a wall-clock-equivalent estimate where
+    # the stage does not run MD at all. The constants for 0/1 are in the same
+    # units by construction: they are the rough seconds those stages take, which
+    # makes them comparable with a step count only because the normalisation
+    # below is by total, so what matters is the ratio.
+    steps["0"] = 600.0 + L * 0.4
+    steps["1"] = (1200.0 + L * 0.6) * (2.0 if flag("use_rhofold", False) else 1.0)
+    if flag("use_msa", True):
+        steps["1"] += 800.0
+    steps["1"] += 1500.0 * max(0.0, pipe_num("n_candidates", 1) - 1)
+    steps["1.5"] = 1000.0
+    steps["2.5"] = 600.0 * max(1.0, L / 200.0)      # scales with the conversion
+    if flag("use_5bead", True):
+        steps["2.3"] = _FIVE_BEAD_STEPS_AT_2000 * max(1.0, L / 2000.0) * (rounds / 20.0)
     else:
-        tail["2.3"] = 0.0
+        steps["2.3"] = 0.0
+    steps["2.6"] = 20000.0 if flag("use_pyrosetta", False) else 0.0
+    steps["3"] = (5000.0 * max(1.0, pipe_num("rl_n_simulations", 50)) / 50.0
+                  if flag("use_rl_mcts", True) else 0.0)
+    steps["3.5"] = (max(0.0, pipe_num("metad_n_steps", 200000))
+                    if flag("use_metad", True) else 0.0)
+    steps["5"] = 3000.0
+    steps["5.5"] = (400.0 * max(1.0, pipe_num("ppr_max_rounds", 5))
+                    if flag("use_ppr", True) else 0.0)
 
-    tail["2.6"] = 20000.0 if p.get("use_pyrosetta") else 0.0
-    tail["3"] = 5000.0 * max(1.0, num("rl_n_simulations", 50)) / 50.0 if p.get("use_rl_mcts") else 0.0
-    tail["3.5"] = max(0.0, num("metad_n_steps", 200000)) if p.get("use_metad") else 0.0
-    tail["5"] = 3000.0
-    tail["5.5"] = 400.0 * max(1.0, num("ppr_max_rounds", 5)) if p.get("use_ppr", True) else 0.0
-
-    tail_total = sum(tail.values()) or 1.0
-    remainder = max(0.0, 1.0 - _HEAD_SHARE)
-
-    weights = {name: head.get(name, 0.0) + remainder * tail.get(name, 0.0) / tail_total
-               for name, _ in LEVEL_ORDER}
+    steps_total = sum(steps.values()) or 1.0
+    weights = {name: steps.get(name, 0.0) / steps_total for name, _ in LEVEL_ORDER}
     total = sum(weights.values()) or 1.0
     return {k: max(0.0, v / total) for k, v in weights.items()}
 
 
 # A run is described by anchor points, each (fraction_done, seconds_elapsed).
 _STAGE_BANNER = re.compile(r"\[Level ([0-9]+(?:\.[0-9]+)?)\]\s*(.*)")
+# In-stage progress, as the samplers report it: "[GPU-MetaD] 5000/200000".
+# Without this the bar only ever moved at a `[Level X.Y]` banner, so through
+# Levels 3.5 and 4 — the longest stages, printing a step line every few seconds —
+# the terminal scrolled while the progress bar sat still, and the two looked like
+# they were describing different runs.
+_STEP_PROGRESS = re.compile(r"\b([0-9]{3,})\s*/\s*([0-9]{3,})\b")
 _JOB_LOCK = threading.Lock()
 _JOB_ID = {"current": None}
 # The environment-setup sidecar (tools/install_deps.py). Tracked separately from
@@ -282,10 +331,20 @@ def _note_stage(level_name, label):
 
     done_cost = sum(weights.get(n, 0.0) for n in ordered[:idx])
     here_cost = weights.get(level_name, 0.0)
-    # A stage is entered, not left, so credit it as half spent. Progress is then
-    # roughly proportional to work done, which is what makes the bar advance
-    # steadily through the expensive stage instead of parking before it starts.
-    fraction = min(1.0, done_cost + 0.5 * here_cost)
+    # Credit the stage as NOT yet started, not half done.
+    #
+    # This used to add `0.5 * here_cost` on the reasoning that a stage is entered
+    # rather than left. That put the bar ahead of the truth and, worse, put it
+    # ahead of the within-stage reader: on entering Level 3.5 the bar jumped to
+    # 32.6% (done_cost + half of 3.5's 33.5% weight), while a step line reading
+    # 5000/200000 computed 16.8% from the start of that stage. The reader only
+    # ever moves the bar forward, so every reading was discarded as a step
+    # backwards and the bar sat at 32.6% for the whole of a two-hour stage.
+    #
+    # Now both use the same formula — the sum of finished stages plus the current
+    # stage's own completed fraction — so entering a stage shows the work already
+    # done, and the step lines carry it forward from there.
+    fraction = min(1.0, done_cost)
 
     stage = _predict_state.get("stage") or {"anchors": [(0.0, 0.0)]}
     anchors = list(stage.get("anchors") or [(0.0, 0.0)])
@@ -342,6 +401,11 @@ def _note_stage(level_name, label):
         "fraction": round(fraction, 4),
         "elapsed": round(elapsed, 1),
         "plan": plan,
+        # Reset when a stage is entered: this is the within-stage fraction tracked
+        # by _watch_for_step_progress, and carrying the previous stage's value into
+        # the next one would make its first step reading look like a step backwards
+        # and be discarded.
+        "inner_fraction": None,
         "stage": {"fraction": fraction, "label": label, "anchors": anchors,
                   "spans": spans[-24:], "entered": now, "spent": spent,
                   "level": level_name},
@@ -652,8 +716,13 @@ def _public_state():
                             "desc": stage["desc"], "atoms": stage["atoms"],
                             "mtime": stage["mtime"],
                             "digest": stage.get("digest", "")}
+        # Measurements of whatever structure is on screen, so the readout panels
+        # have numbers during a run instead of only after it finishes. Cached on
+        # the structure's digest, so this costs nothing until the file changes.
+        out["metrics"] = _live_metrics(stage)
     else:
         out["structure"] = None
+        out["metrics"] = None
     return out
 
 
@@ -1023,19 +1092,72 @@ class _TeeWriter:
 
         The pipeline already prints one of these at every stage boundary, so the
         progress bar can be driven without adding a callback to 2000 lines of
-        pipeline code. Anything that is not a banner is ignored.
+        pipeline code. Anything that is not a banner falls through to the
+        within-stage reader below.
         """
         m = _STAGE_BANNER.search(line)
-        if not m:
+        if m:
+            level_name = m.group(1)
+            label = m.group(2).strip().rstrip(".")
+            if not label:
+                label = dict(LEVEL_ORDER).get(level_name, "Level " + level_name)
+            # Keep it short: this string goes into the progress header.
+            if len(label) > 72:
+                label = label[:69].rstrip() + "..."
+            _note_stage(level_name, label)
             return
-        level_name = m.group(1)
-        label = m.group(2).strip().rstrip(".")
-        if not label:
-            label = dict(LEVEL_ORDER).get(level_name, "Level " + level_name)
-        # Keep it short: this string goes into the progress header.
-        if len(label) > 72:
-            label = label[:69].rstrip() + "..."
-        _note_stage(level_name, label)
+        _watch_for_step_progress(line)
+
+
+def _watch_for_step_progress(line):
+    """Advance the bar from a within-stage step count such as `5000/200000`.
+
+    The banner handler only fires at stage boundaries, so the bar used to sit
+    still for the whole of Levels 3.5 and 4 while the terminal showed thousands of
+    step lines. This moves it in between: the stage's own fraction of the run is
+    interpolated by how far through its step budget it is.
+
+    Deliberately conservative. A `N/M` pair appears in many unrelated lines (a
+    count of hills, a fraction of a molecule), so the pair is only believed when it
+    is internally consistent — M large, N <= M — and the value is only moved
+    forward, never backward. A wrong reading therefore cannot walk the bar
+    backwards, and the anchors used for the ETA are keyed to stage entry, not to
+    this, so the time estimate is unaffected.
+    """
+    m = _STEP_PROGRESS.search(line)
+    if not m:
+        return
+    try:
+        done, total = int(m.group(1)), int(m.group(2))
+    except ValueError:
+        return
+    if total < 1000 or done > total or done < 0:
+        return
+    inner = done / float(total)
+
+    state = _predict_state
+    if state.get("status") != "running":
+        return
+    stage = state.get("stage") or {}
+    entered = stage.get("entered")
+    level_name = stage.get("level")
+    if not level_name or entered is None:
+        return
+    weights = state.get("weights") or {}
+    # The head of the run (Levels 0-2) is where _HEAD_SHARE of the modelled cost
+    # sits; a stage's share of the whole is its weight. Moving within a stage must
+    # therefore move the overall fraction by that stage's own width, not by the
+    # raw step ratio.
+    reached = 1.0 - sum(v for k, v in weights.items()
+                        if _LEVEL_INDEX.get(k, -1) > _LEVEL_INDEX.get(level_name, -1))
+    width = weights.get(level_name, 0.0)
+    fraction = reached - width + width * inner
+    prev = state.get("inner_fraction")
+    if prev is not None and fraction <= prev:
+        return
+    state["inner_fraction"] = fraction
+    state["progress"] = round(min(99.0, max(state.get("progress") or 0.0,
+                                            fraction * 100.0)), 1)
 
     def fileno(self):
         # No real descriptor when the original is absent or is itself a mock.
@@ -2132,6 +2254,126 @@ def _build_result_dict(result, details, pdb_text, sequence, ss, mfe, elapsed, pd
         "mfe": mfe,
         "pdb_path": pdb_path,
     }
+
+
+_LIVE_METRICS = {"digest": None, "payload": None, "at": 0.0}
+
+
+def _live_metrics(stage):
+    """Measure the structure currently on screen, for the readout panels.
+
+    Why this exists: every panel on the right is built from `result`, and the
+    server produces `result` only when a run finishes. So for the whole of a run —
+    hours — the right-hand tabs held nothing but their static labels and a row of
+    "--", which is what they looked like: broken.
+
+    The analyzer already exists and the structure file is already on disk, so the
+    panels can show real numbers while a run is in progress instead of only at the
+    end. Cached on the structure's digest because the analyzer takes about a
+    quarter of a second on a 139-residue trace and the status endpoint is polled
+    every few seconds; without the cache that cost would be paid on every poll for
+    an unchanged file.
+
+    Returns None when there is nothing measurable. Never raises — a metric panel
+    is not worth failing a status poll over.
+    """
+    if not stage or not stage.get("path"):
+        return None
+    digest = stage.get("digest") or ""
+    with _log_lock:
+        if digest and _LIVE_METRICS["digest"] == digest:
+            return _LIVE_METRICS["payload"]
+    try:
+        if SRC not in sys.path:
+            sys.path.insert(0, SRC)
+        from torusfold.scheme2 import pdb_analyzer as pa
+        with open(stage["path"], "r", errors="replace") as f:
+            text = f.read()
+        a = pa.analyze_pdb(text)
+
+        parsed = pa.parse_pdb(text)
+        coords = parsed["coords"]
+        names = parsed["atom_names"]
+        # Closure: the gap that has to be closed for a circular RNA. Measured
+        # between the first and last phosphorus, which is the same convention the
+        # pipeline's own BSJ metric uses.
+        p_idx = [i for i, n in enumerate(names) if n == "P"]
+        closure = None
+        if len(p_idx) >= 2:
+            import numpy as _np
+            closure = float(_np.linalg.norm(coords[p_idx[0]] - coords[p_idx[-1]]))
+
+        # Pair satisfaction: the fraction of WC-complementary pairs that are
+        # actually close enough in space. The sequence comes from the residue
+        # names the parser already returns, in file order.
+        pair_rate = None
+        pair_breakdown = None
+        try:
+            one = {"A": "A", "ADE": "A", "U": "U", "URA": "U",
+                   "G": "G", "GUA": "G", "C": "C", "CYT": "C"}
+            seq = []
+            last = object()
+            for rn, rid in zip(parsed["residue_names"], parsed["residue_ids"]):
+                if rid != last:
+                    seq.append(one.get(rn, "N"))
+                    last = rid
+            pairs = [(i, j) for i in range(len(seq)) for j in range(i + 4, len(seq))
+                     if {seq[i], seq[j]} in ({"A", "U"}, {"G", "C"})]
+            if pairs:
+                ps = pa.compute_pair_satisfaction(coords, parsed["residue_ids"],
+                                                  names, parsed["residue_names"])
+                # The function returns `satisfaction_rate`, not a key named after
+                # the panel's field. Reading the wrong name here yielded None while
+                # the metric itself was fine, which is the same class of mistake as
+                # the WC table above.
+                pair_rate = ps.get("satisfaction_rate")
+                pair_breakdown = {
+                    "total_pairs": ps.get("total_pairs"),
+                    "wc_eligible": ps.get("wc_eligible_count"),
+                    "satisfied": ps.get("satisfied_count"),
+                    "mean_pair_distance": ps.get("mean_pair_distance"),
+                }
+        except Exception:
+            pair_rate = None
+            pair_breakdown = None
+
+        payload = {
+            "live": True,
+            "source": {"level": stage.get("level"), "name": stage.get("name"),
+                       "atoms": stage.get("atoms"), "delivered": bool(stage.get("delivered"))},
+            "physical": {
+                "closure_distance_Ang": closure,
+                "bond_rmsd_Ang": (a.get("bond") or {}).get("bond_rmsd"),
+                "sasa_mean": (a.get("sasa") or {}).get("mean_sasa"),
+                "radius_of_gyration_A": a.get("rog"),
+                "end_to_end_distance_A": a.get("end_to_end"),
+            },
+            "structural_3d": {
+                "clash_count": (a.get("clash") or {}).get("clash_count"),
+                "clash_score": (a.get("clash") or {}).get("clash_score"),
+                "pair_satisfaction_rate": pair_rate,
+                "pair_breakdown": pair_breakdown,
+                "radius_of_gyration_A": a.get("rog"),
+                "asphericity": (a.get("shape") or {}).get("asphericity"),
+                "prolateness": (a.get("shape") or {}).get("prolateness"),
+                "eigenvalues": (a.get("shape") or {}).get("eigenvalues"),
+                "aform_score": (a.get("aform") or {}).get("aform_score"),
+                "stacking": a.get("stacking"),
+            },
+            "shape_3d": {
+                "asphericity": (a.get("shape") or {}).get("asphericity"),
+                "prolateness": (a.get("shape") or {}).get("prolateness"),
+                "rog_A": a.get("rog"),
+                "eigenvalues": (a.get("shape") or {}).get("eigenvalues"),
+            },
+            "sequence": {"length": a.get("n_residues"), "n_atoms": a.get("n_atoms")},
+        }
+    except Exception as exc:                             # noqa: BLE001
+        payload = {"live": True, "error": str(exc)[:200]}
+
+    with _log_lock:
+        _LIVE_METRICS.update({"digest": digest, "payload": payload, "at": time.time()})
+    return payload
 
 
 _TOOL_SUMMARY = [

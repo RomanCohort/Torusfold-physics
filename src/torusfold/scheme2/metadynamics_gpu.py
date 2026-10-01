@@ -108,6 +108,8 @@ class BatchedMetadynamics:
         friction: float = 1.0,
         temperature: float = 300.0,
         verbose: bool = False,
+        on_step=None,                   # called every `report_every` steps
+        report_every: int = 5000,       # MD steps between on_step calls
     ) -> Tuple[np.ndarray, float, dict]:
         """Run batched well-tempered metadynamics.
 
@@ -125,6 +127,12 @@ class BatchedMetadynamics:
             friction: Langevin friction coefficient (1/ps)
             temperature: simulation temperature (K)
             verbose: print progress
+            on_step: optional callback, called with (step, n_steps, coords_A).
+                Used to publish intermediate structures. Keyed to simulation steps
+                rather than wall-clock time so the output rate does not depend on
+                how fast the machine is: on a slow GPU a timer either floods the
+                disk or never fires at all.
+            report_every: MD steps between on_step calls.
 
         Returns:
             (best_coords_A, best_energy_kJ, diagnostics)
@@ -303,6 +311,17 @@ class BatchedMetadynamics:
                       f"Rg={rg_avg:.2f}+/-{rg_std:.2f}nm "
                       f"E_min={energies.min():.0f} "
                       f"hills={n_deposited}")
+
+            # Publish an intermediate structure for the viewer. Wrapped because a
+            # callback that fails must not take a running simulation down with it.
+            if on_step is not None and step_idx % max(1, report_every // max(1, hill_freq)) == 0:
+                try:
+                    _snap = pos.detach().cpu().numpy()
+                    if _snap.ndim == 3:            # (B, L, 3) -> the best replica
+                        _snap = _snap[int(np.argmin(energies.detach().cpu().numpy()))]
+                    on_step(step_idx * hill_freq, n_steps, np.asarray(_snap, dtype=float))
+                except Exception:
+                    pass
 
         # ── Final: minimize with bias zeroed out ──
         if verbose:

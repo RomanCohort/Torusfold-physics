@@ -381,6 +381,11 @@ try{
 
     <!-- ── Readout panel ── -->
     <aside id="fp-panel">
+      <!-- Which structure the numbers below were measured from. Required reading:
+           during a run they come from a coarse-grained checkpoint, and a CG
+           trace's SASA or bond RMSD is not comparable with a finished all-atom
+           structure's. Without this line the panels would silently mix the two. -->
+      <div id="live-metrics-source" class="live-source" hidden></div>
       <input type="radio" name="tab" id="tab-overview" checked class="tab-radio">
       <label for="tab-overview" class="tab-label">Overview</label>
       <input type="radio" name="tab" id="tab-structure" class="tab-radio">

@@ -637,6 +637,46 @@
     }
 
     showStructure(state.structure);
+    renderLiveMetrics(state.metrics);
+  }
+
+  /* Fill the readout panels from the measurements published with the run state.
+
+   * Every panel on the right is built from a `result`, which the server produces
+   * only when a run finishes. So for the whole of a run — hours — those tabs held
+   * nothing but their static labels and a row of "--", which is exactly what they
+   * looked like: broken.
+   *
+   * The server now measures whichever structure is on screen and publishes it as
+   * `metrics`. This folds those numbers into the panel renderers, tagged so the
+   * source of each figure is visible and nobody reads a coarse-grained trace's
+   * numbers as a finished structure's.
+   */
+  var liveMetricsDigest = null;
+  function renderLiveMetrics(metrics) {
+    if (!metrics || !metrics.live) return;
+    var src = metrics.source || {};
+    // Only re-render when the underlying structure changed; the heartbeat arrives
+    // every few seconds and re-running eleven renderers for identical numbers is
+    // pure work.
+    var key = src.name + '|' + (metrics.physical && metrics.physical.radius_of_gyration_A);
+    if (key === liveMetricsDigest) return;
+    liveMetricsDigest = key;
+
+    if (TF.Panels) {
+      try { TF.Panels.renderQualityMetrics(metrics); } catch (e) { console.warn('quality metrics:', e); }
+      try { TF.Panels.renderPhysical(metrics); } catch (e) { console.warn('physical:', e); }
+      try { TF.Panels.renderShape(metrics); } catch (e) { console.warn('shape:', e); }
+    }
+
+    var note = $('live-metrics-source');
+    if (note) {
+      note.hidden = false;
+      note.textContent = src.delivered
+        ? 'measured from the delivered model (' + (src.atoms || 0) + ' atoms) — not from a run'
+        : 'measured live from level ' + (src.level || '?') + ' · ' + (src.name || '') +
+          ' · ' + (src.atoms || 0) + ' atoms';
+    }
   }
 
   /* Show the latest finished checkpoint in the 3D panel.
@@ -730,6 +770,11 @@
           labelHeaderStrip(s.levels);
           renderPlan(s.plan);
         }
+        // The measurements for whatever structure is on disk. Also on this path:
+        // the panels are not only for a run in progress — with no job at all, the
+        // page still has a structure to measure and the tabs would otherwise stay
+        // blank until a run finished.
+        renderLiveMetrics(s.metrics);
         showLastStructure();
         return;
       }
