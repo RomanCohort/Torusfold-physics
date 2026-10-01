@@ -1037,7 +1037,13 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
         path = parsed.path.rstrip("/")
 
         if path in ("/api/health", "/health"):
-            self._send_json({"ok": True, "status": _predict_state["status"]})
+            # "status" here answers "is the server answering", and the job state is
+            # reported separately under its own name. They used to share the field,
+            # so a healthy server with nothing running reported `status: "idle"` and
+            # the interface displayed that as the backend's state — reading, quite
+            # reasonably, as "the backend is not started".
+            self._send_json({"ok": True, "status": "ready",
+                             "job_status": _predict_state["status"]})
             return
         elif path in ("/api/schema", "/schema"):
             self._send_json(parameter_schema())

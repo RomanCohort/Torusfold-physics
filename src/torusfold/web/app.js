@@ -105,16 +105,47 @@
 
   /* ═══════════════ HEALTH PROBE ═══════════════ */
 
-  function probeHealth() {
+  var serverWasDown = false;
+  function probeHealth(announce) {
     fetch('/api/health').then(function (r) { return r.json(); }).then(function (h) {
-      serverStatus.textContent = 'backend: ' + (h.backend || h.status || 'ok');
-      showToast('Server connected', 'success');
+      /* Two different questions, and they used to share one answer: is the server
+         answering, and is a prediction running. Reporting the job state as the
+         backend's state made a healthy idle server read as "backend: idle", which
+         looks like a failure. The dot is driven by the class now, so it can
+         actually turn green — before, only the error path set a colour and the
+         healthy path never added `.live`. */
+      if (!serverStatus) return;
+      var job = h.job_status || 'idle';
+      serverStatus.classList.remove('live', 'down');
+      if (h.ok) {
+        serverStatus.classList.add('live');
+        serverStatus.style.color = '';
+        serverStatus.textContent = job === 'idle'
+          ? 'backend: ready'
+          : 'backend: ' + job;
+        // Only announce the transition. A toast every poll would be noise.
+        if (announce || serverWasDown) showToast('Server connected', 'success');
+        serverWasDown = false;
+      } else {
+        serverStatus.classList.add('down');
+        serverStatus.textContent = 'backend: not ready';
+        serverWasDown = true;
+      }
     }).catch(function () {
+      if (!serverStatus) return;
+      serverStatus.classList.remove('live');
+      serverStatus.classList.add('down');
       serverStatus.textContent = 'server unreachable';
       serverStatus.style.color = 'var(--err)';
+      serverWasDown = true;
     });
   }
-  probeHealth();
+  probeHealth(true);
+
+  /* Keep the indicator honest while the page is open: a run started elsewhere
+     should show up here, and a server that stops answering should stop claiming
+     to be ready. */
+  setInterval(function () { probeHealth(false); }, 15000);
 
   /* ═══════════════ DRAG & DROP ═══════════════ */
 
