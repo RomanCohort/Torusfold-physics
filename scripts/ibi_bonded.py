@@ -677,7 +677,7 @@ def advance_from_samples(table, values, p_ref, **policy):
 # --------------------------------------------------------------------- the moment operator (B')
 #
 # WHAT THIS IS FOR. Four rounds of the marginal-inversion operator left two signatures
-# (docs/plan_b_coupled_update.md): angle's correction oscillated without trend (3.00 -> 3.94 ->
+# (docs/archive/plan_b_coupled_update.md): angle's correction oscillated without trend (3.00 -> 3.94 ->
 # 3.02 kJ/mol) and bb_bond's collapsed to a fixed point that is not the reference (ratio frozen at
 # 0.856). Both are what a coupled 1-D inversion is expected to do. The fix proposed there keeps the
 # table's SHAPE and makes the CORRECTION low-order:
@@ -767,7 +767,7 @@ def moment_correction(table, counts, n, n_outside, p_ref, K=DEFAULT_CORRECTION_K
         A, _x = _chebyshev_design(centre, lo, hi, int(K))
     else:
         # A PLUGGABLE DESIGN, added 2026-10-01 for the two-lever arm: the same operator, a basis that
-        # can carry the target's edge mass (docs/plan_c_basis_family.md 3.2 -- on the dihedral a
+        # can carry the target's edge mass (docs/archive/plan_c_basis_family.md 3.2 -- on the dihedral a
         # Chebyshev refit delivers 0.378 less implied edge mass than its target holds and cycles,
         # while every B-spline arm is within 0.012 and converges). K follows the design's rank so the
         # diagnostics describe what was actually fitted.

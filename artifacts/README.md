@@ -1,7 +1,7 @@
 # `artifacts/` — the delivered outputs, in the repository
 
 This directory exists because the outputs were not in the repository, and the
-audit note at `docs/pipeline_audit_2026-09-13.md:1022` records the consequence in
+audit note at `docs/archive/pipeline_audit_2026-09-13.md:1022` records the consequence in
 the team's own words: **the full Level 0 path was never executed end to end**,
 because `sequence.txt`, `test_2013nt_ss.txt` and `output_2013nt/` are not in the
 repository. A reader could not start the demo, and could not obtain its output

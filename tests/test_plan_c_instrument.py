@@ -2,7 +2,7 @@
 
 plan_c_instrument.py answers "did these two SAMPLED ensembles move?" -- the question the implied
 -distribution proxy could not answer because the sampled Hamiltonian carries a wall and the chain's
-coupling (docs/plan_c_c2_stabilization.md 3.4). These tests pin the pieces that a silent change
+coupling (docs/archive/plan_c_c2_stabilization.md 3.4). These tests pin the pieces that a silent change
 would corrupt while every number downstream still looked plausible:
 
   * the normalisation is ibi_bonded's pseudocount policy, NOT counts/counts.sum(). Measured on the

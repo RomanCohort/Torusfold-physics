@@ -8,7 +8,7 @@
 > access path in which three of the four steps could not be taken. The demo
 > sequence and the predicted structure were git-ignored, no release existed, and
 > `scripts/benchmark_2oiu.py` read an input that nothing in the repository wrote.
-> The audit note at `docs/pipeline_audit_2026-09-13.md:1022` had already recorded
+> The audit note at `docs/archive/pipeline_audit_2026-09-13.md:1022` had already recorded
 > the consequence for the Level 0 path. That is fixed: the outputs are in
 > `artifacts/`, the crystal structure is too, and `scripts/verify_headline.py`
 > re-derives the published numbers from committed files with numpy alone. One

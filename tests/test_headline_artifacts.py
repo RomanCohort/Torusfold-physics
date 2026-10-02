@@ -4,7 +4,7 @@ the viewer displays must keep coming back.
 
 WHY A TEST AND NOT A DOC. `artifacts/2013nt/` exists because the demo sequence and the
 predicted structure were not in the repository, which is why
-`docs/pipeline_audit_2026-09-13.md:1022` records that the full Level 0 path was never
+`docs/archive/pipeline_audit_2026-09-13.md:1022` records that the full Level 0 path was never
 executed end to end. A directory that appears once and then rots is the same failure
 with a later date on it. This test is the thing that notices.
 

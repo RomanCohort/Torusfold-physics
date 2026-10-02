@@ -1,0 +1,457 @@
+# The basis family project: which correction family can carry a bimodal, edge-piled marginal at gain 1.0?
+
+*Opened 2026-09-24, from the result in plan_c_c2_stabilization.md section 5. Code:
+scripts/plan_c_basis.py (the families and the shared fit), scripts/plan_c_basis_family.py (phase 1),
+tests/test_plan_c_basis.py. Phase-2 arms are named B08/B16/B32/B64 and live in plan_c_loop.py.*
+
+## 1. The question, and why it is not arm-tuning
+
+Four arms already made this a controlled experiment. On ONE coordinate (the dihedral), ONE ensemble,
+at gain 1.0:
+
+* a smooth global **K=8 Chebyshev refit cycles** -- corr(step_r, step_{r-1}) -0.94, amplitude growing
+  2.72 -> 3.42 -> 4.06 kJ/mol, 13.8x the same-field floor, edge mass stuck at 0.43;
+* the **1000-bin table inversion converges** and is the only rule that MOVES the edge mass
+  (0.495 -> 0.301), reaching 1.40x the floor by round 3;
+* damping the refit to gain 0.5 or 0.2 also converges (2.5x and 1.9x the floor), but that buys
+  stability by taking smaller steps, not by being able to represent the target.
+
+The dihedral's marginal is bimodal with 31 per cent of its mass in the outer five per cent of the
+support, and a global basis can only shuttle that mass between the two edge regions. So the question
+is a real one: **is there a family that is low dimensional, smooth, and still able to carry that
+shape at full strength?** Two consumers: Plan C's self-consistent loop, and **Plan B's moment
+operator**, which fits every coordinate with the same K=8 Chebyshev and will hit the same wall the
+moment its target becomes a self-consistent ensemble.
+
+The axis is LOCALITY, and the two known outcomes are its ends. In between sits a one-parameter
+family of cubic B-splines with m basis functions; m* -- the knot count at which the cycle disappears
+-- is the answer, and it is also what the moment operator should be using.
+
+## 2. Phase 1: the frontier, measured offline
+
+### 2.1 What was swept, and on what
+
+The inputs are the ones the arms' round-4 fit saw: the round-4 ensemble (sampled under C2s8_r3) and
+the field C2s8_r3 itself. The step a family "wants" here is therefore directly comparable with what
+the arms wanted at round 4, and the cheb8 column IS that step, recomputed through
+plan_c_loop._chebyshev_fit_stable on the same inputs. Nothing in phase 1 samples.
+
+The fit is shared and unchanged across families: support cut at 1e-3 of the modal probability,
+sqrt(p) weighting, a smoothstep taper in ln p two decades below the cut, the mass gauge, and a ridge.
+`scripts/plan_c_basis.py`'s Chebyshev path is pinned to the loop's own function by
+tests/test_plan_c_basis.py, which is what makes "only the design changed" true rather than assumed.
+
+### 2.2 The dihedral frontier
+
+resid = mass-weighted RMS of the fitted field against the target -kBT ln p, in the bins the ensemble
+visits; edge gap = the fitted field's implied edge mass minus the target's (target 0.313); step rms =
+the mass-weighted std of the step the family wants; cond_fit = condition number of the matrix
+actually inverted. kJ/mol, kBT = 2.494.
+
+| family | residual | edge gap | step rms | cond_fit | usable |
+| :-- | --: | --: | --: | --: | :-- |
+| Chebyshev K=8 | 2.907 | -0.120 | 4.058 | 11 | no |
+| Chebyshev K=16 | 2.871 | -0.200 | 3.704 | 30 | no |
+| Chebyshev K=32 | 2.873 | -0.163 | 3.688 | 55 | no |
+| B-spline m=8 | 1.966 | +0.015 | 3.093 | 30-41 | no (residual) |
+| **B-spline m=16**, ridge 1e-3 | **0.231** | -0.018 | 2.201 | 121 | yes |
+| B-spline m=32, ridge 1e-3 | 0.244 | -0.021 | 2.202 | 821 | yes |
+| B-spline m=64, ridge 1e-4 | 0.113 | -0.024 | 2.212 | 1.0e4 | yes |
+| B-spline m=128, ridge 1e-4 | 0.102 | -0.025 | 2.214 | 1.0e6 | yes |
+| table (1000 bins, fully local) | 1.163 | -0.125 | 2.405 | 497 | (see note) |
+
+The table row's residual is not zero because the FIT weights only the bins above the support cut
+while the residual is measured down to LN_RATIO_FLOOR: the pseudo-count bins in between are counted
+in the residual and not in the fit. That is a definition difference, not a failed fit.
+
+### 2.3 What the frontier says -- two of the three guesses were wrong
+
+**Chebyshev's problem is shape, not resolution.** K=8, 16 and 32 give the same residual to three
+digits (2.907 / 2.871 / 2.873) and all three leave the edge mass 40 per cent short (-0.12 to -0.20 of
+a target that holds 0.313). Adding functions to a global basis does not help, because the shape it
+cannot make is a pile-up at the ends.
+
+**The locality threshold is LOW: m* sits between 8 and 16, not at 32-64.** m=8 is still a failure
+(residual 1.97 kJ/mol, 0.79 kBT -- 8.5x worse than m=16), and from m=16 up the residual only creeps
+from 0.23 to 0.10 as m goes to 128. The marginal return beyond m=16 is small, which is the useful
+answer for Plan B': a low-dimensional, smooth, local family that can carry a bimodal edge-piled
+marginal needs about sixteen basis functions, not sixty-four.
+
+**And the step a family wants is smaller when it can express the target**: 4.06 kJ/mol at K=8 against
+2.20 for every usable B-spline, with a shape correlation of +0.72..+0.81 against the Chebyshev step
+(the same general direction, less amplitude needed).
+
+### 2.4 The ridge-scaling trap that had to be fixed first
+
+moment_correction's relative ridge is lambda = ridge_rel x trace(A^T W A)/m. For a Chebyshev design
+that is about 0.43 x eig_max, so it behaves like an eigenvalue-relative ridge. For a B-spline it does
+NOT, and the measurement on this very ensemble is:
+
+| m | 8 | 16 | 32 | 64 | 128 |
+| :-- | --: | --: | --: | --: | --: |
+| trace/m | 0.0607 | 0.0288 | 0.0145 | 0.00736 | 0.00373 |
+| eig_max | 0.141 | 0.0925 | 0.0845 | 0.0825 | 0.0761 |
+| trace/m / eig_max | 0.430 | 0.312 | 0.172 | 0.0891 | 0.0490 |
+
+trace/m falls by 16x while eig_max falls by 1.9x, so the same ridge_rel regularises **8.8x less** at
+m=128 than at m=8: the ridge tuned on a Chebyshev design stops doing anything exactly where the
+design needs it, and by m=48 the weighted system is numerically singular (the solve returned values
+past 1e100 in the first sweep). Phase 1 therefore defaults to an eigenvalue-relative ridge, and the
+same lesson is applied to the roughness penalty. This is a Plan-B' finding in its own right: the
+moment operator cannot simply swap its Chebyshev design for a spline one without rescaling its ridge.
+
+### 2.5 The other two coordinates (controls, not the target)
+
+**bb_bond: B-splines win outright.** Residual 0.08-0.31 kJ/mol against Chebyshev's 1.06, and an edge
+gap of +-0.004 against **+0.238** -- the Chebyshev field puts three times the target's mass at the
+edges of the bond distribution while every B-spline from m=8 up carries it. Every (m, ridge) point
+swept is usable here.
+
+**angle: a different disease.** No family carries its edge mass (the gap stays +0.10..+0.29 for every
+m and every ridge) and its residual swings between 0.4 and 2.2 depending on the pair, so the angle is
+not the dihedral's problem with a different basis -- something else is wrong with the angle's target,
+and it is left as its own thread rather than folded into this project.
+
+### 2.6 Selection for phase 2
+
+Four arms at gain 1.0, dihedral only, everything else identical to the D arms and C2s8, so a
+difference is the basis and nothing else. Each one is a test of a different part of the frontier:
+
+| arm | dihedral | phase-1 prediction | why this one |
+| :-- | :-- | :-- | :-- |
+| B08 | B-spline m=8, ridge 1e-3 | should still cycle | below the measured threshold (resid 1.97); this is the arm that makes the m* claim falsifiable |
+| B16 | m=16, ridge 1e-3 | should stop cycling | the threshold itself (resid 0.23, cond 121) |
+| B32 | m=32, ridge 1e-3 | should stop, with margin | just inside (resid 0.24, cond 821) |
+| B64 | m=64, ridge 1e-4 | should stop | the finest end phase 1 still called usable (resid 0.11, cond 1e4) |
+
+## 3. Phase 2: the four arms
+
+### 3.1 The four arms, against C2s8
+
+Every number below is offline: the arms' records for the step diagnostics, the stored ensembles for
+the clean instrument. The r1 edge gap and residual are recomputed from each arm's OWN round-1 inputs
+(the start field and the round-1 ensemble), and the recomputed r1 field is checked elementwise
+against the field the arm wrote, so a mismatch cannot pass silently.
+
+| arm | replicas | r1 residual kJ | **r1 edge gap** | corr r2 / r3 / r4 | rms r1 -> r4 | monotone | clean x floor r2 / r3 / r4 | ret pool |
+| :-- | --: | --: | --: | --: | --: | :-- | --: | --: |
+| C2s8 Chebyshev K=8 | 8 | 3.849 | **-0.378** | -0.37 / -0.85 / -0.94 | 4.08 / 2.72 / 3.42 / **4.06** | **no** | 17.6 / 11.0 / **13.8** | 0.389-0.401 |
+| B08 B-spline m=8 | 6 | 0.643 | **+0.012** | +0.71 / +0.90 / +0.92 | 1.62 / 1.08 / 0.59 / 0.42 | yes | 6.6 / 3.1 / **2.4** | 0.386-0.408 |
+| B16 m=16 | 6 | 0.508 | +0.002 | +0.79 / +0.81 / +0.94 | 1.65 / 1.21 / 0.67 / 0.36 | yes | 7.5 / 3.9 / **2.1** | 0.385-0.394 |
+| B32 m=32 | 6 | 0.492 | -0.005 | +0.83 / +0.91 / +0.86 | 1.64 / 1.22 / 0.64 / 0.38 | yes | 7.4 / 3.8 / **2.2** | 0.388-0.396 |
+| B64 m=64 | 6 | 0.433 | -0.002 | +0.91 / +0.88 / +0.85 | 1.62 / 1.30 / 0.68 / 0.58 | yes | 7.0 / 3.9 / **3.3** | 0.393-0.394 |
+
+C2s8's corr column is not in its own record -- that diagnostic was added to run_arm after that run --
+so it is the value from commit f991274, independently recomputed here for the last step (-0.99).
+
+### 3.2 Verdict: m*=16 is refuted, and the edge gap is what predicts the cycle
+
+**The negative control does not cycle.** B08 (m=8), which phase 1 predicted would cycle because its
+residual is 1.97 kJ/mol, has a correlation sequence of +0.71 / +0.90 / +0.92 with no sign flip, a
+monotonically falling step (1.62 -> 0.42 kJ/mol) and a clean distance walking from 6.6x to 2.4x the
+same-field floor. The phase-1 prediction rested on the residual and it was wrong; the m*=16 claim is
+retracted here, by its own control.
+
+**What separates the one cycler from the four that converge is the edge gap.** C2s8's round-1 fit
+delivers an implied edge mass 0.378 below its target's -- less than half of it -- while all four
+B-spline arms are within |gap| <= 0.012. The residual does NOT order them: among the four that
+converge it spans 0.43 to 0.64 with no relation to cycling, and **B08 has the worst residual of the
+four and converges most cleanly**. The discriminating evidence is therefore B08 rather than the
+Chebyshev arm: a family that cannot carry the target's edge mass keeps asking for more correction
+there every round, which is what becomes the sign flip, while a family that can carry it converges
+whatever its order and a high residual only slows it down.
+
+**The claim, with its limits.** "Any family that puts the edge mass right does not cycle, whatever its
+order" is supported by five arms -- with the honest caveat that there is only ONE cycler, so any
+quantity separating C2s8 from the other four "predicts" it; the arm that makes the claim
+discriminating rather than vacuous is B08. Phase 1's Chebyshev sweep also shows bad edge gaps at K=16
+and K=32 (-0.200, -0.163), but neither was run as an arm, so the K-dependence has no arm-level
+evidence and is not claimed.
+
+**Protocol note, since the arms are 6 replicas and C2s8 is 8.** What that affects: the statistics the
+FIT sees (about 25 per cent fewer frames per round, so the residual and gap columns are slightly
+noisier than C2s8's -- against a separation of 0.012 versus 0.378, no threat) and the variance of
+sim/ref. What it does NOT affect: the retention instrument, which is its own 6000-step run and
+independent of --nrep, so the 0.39-0.42 / 0.48-0.52 band comparison stays valid; and the qualitative
+cycle-versus-spiral reading.
+
+**For Plan B', the actionable form is one cheap diagnostic**: before trusting an update, compare the
+fitted field's implied edge mass (the outer five per cent of the support at each end) with the
+target's. A deficit means the family cannot carry the shape the target needs, and no ridge or order
+will fix it -- the update will cycle. The number is offline, costs one bin-integration per coordinate
+per round, and is available as plan_c_basis.implied_edge / edge_mass.
+
+### 3.3 What this does to phase 1's selection
+
+The four arms still answer what they were selected for, but the reason for the recommendation
+changes: with the edge gap right, the ORDER should be chosen for the residual, which is what decides
+how fast the loop closes. m=16 is the cheapest order that is both (residual 0.51 kJ/mol at round 1,
+gap +0.002); m=8 is cheaper but leaves 0.64 on the table; m=64 buys 0.43 and costs nothing in
+stability once the ridge is eigenvalue-relative, yet nothing in the arm data shows it converging
+better than m=16 (3.3x against 2.1x the floor at round 4).
+
+
+## 4. The angle arms (C)
+
+*Run as scheduled task plan_c_angle, 2026-09-27 14:39:54 to 15:23:17 (44 minutes, two arms in
+parallel, 6 workers each). Records: results/plan_c/plan_c_CA16.json, plan_c_CBdep.json,
+ensembles_CA16.npz, ensembles_CBdep.npz, fields/{CA16,CBdep}/. The design and its reasons:*
+
+- **CA16** -- the angle refitted on a B-spline m=16 (ridge 1e-3, eigenvalue-relative), bb_bond and the
+  dihedral unchanged at C2s8's K=8 refit. This asks whether the BASIS was what limited the angle:
+  phase 1 measured its residual against -kBT ln p at 1.1-2.2 kJ/mol for a Chebyshev design against
+  0.4-0.6 for a local one.
+- **CBdep** -- the angle on the production rule for that coordinate (target = the deposited marginal
+  p_ref, ibi_bonded.plan_update, gain 1.0), everything else unchanged. This asks whether the TARGET
+  is what limits it: the deposited reference's sigma is 0.32176, and on the full pool the angle's
+  sampled sigma stalls about 9 per cent wider than its target while the table's implied sigma falls
+  about 4 per cent per round and the sampled one only 1.4 (Part 8, commit 3cccd4f).
+
+Why the self-consistent target was NOT used for CBdep, although the task suggested it: it is already
+what every C2s/B/D arm uses for every coordinate -- _target_from_counts builds -kBT ln p of the arm's
+own ensemble -- so switching to it would change nothing. The deposited marginal is the other
+well-defined target and the only one whose sigma can be compared round after round.
+
+Why not the surgical variant (down-weight the edge mass): phase 1 measured the angle's implied edge
+mass to be 1.5-2.4x its target's for every family, so for the angle the fit over-delivers the edges
+rather than failing to reach them; the deficit the edge-gap hypothesis is about belongs to the
+dihedral. Down-weighting would treat a symptom the measurement does not show.
+
+Both arms are read with the clean instrument (round-to-round ensemble distance against the same-field
+floor 0.0521 for the angle) AND with the two pooled quantities the task names: the moment residual
+|d<T>|max against the reference, and sigma_sim against the reference's sigma.
+
+### 4.1 Measured
+
+|d<T>|max is the largest moment difference between the round's simulated ensemble and p_ref on
+ibi_bonded's K=8 Chebyshev design, and its noise floor is measured the same way as everything else in
+this project: the two independent trajectories of the same-field calibration run, compared with each
+other on that basis, read **0.0123**. sigma_ref is the reference's implied sigma, 0.32176 (its stored
+sigma is 0.32027 -- the two-denominator distinction again).
+
+| arm | r | step rms kJ | corr | edge mass | clean x floor | |d<T>|max | / floor | sigma ratio | ret pool |
+| :-- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| CA16 basis m=16 | 1 | 0.977 | -- | 0.115 | -- | 0.1609 | 13.1 | 1.188 | 0.384 |
+| | 2 | 0.262 | +0.58 | 0.118 | 2.15 | 0.1993 | 16.2 | 1.285 | 0.385 |
+| | 3 | 0.111 | +0.17 | 0.117 | **0.94** | 0.2092 | 17.0 | 1.266 | 0.384 |
+| | 4 | 0.163 | -0.09 | 0.128 | 1.34 | 0.2063 | 16.8 | 1.246 | 0.387 |
+| CBdep production rule | 1 | 0.932 | -- | 0.115 | -- | 0.1609 | 13.1 | 1.188 | 0.391 |
+| | 2 | 0.517 | +0.53 | 0.097 | 4.46 | 0.0631 | 5.1 | 1.203 | 0.401 |
+| | 3 | 0.378 | +0.87 | 0.104 | 1.31 | 0.0528 | 4.3 | 1.120 | 0.386 |
+| | 4 | 0.446 | +0.20 | 0.104 | 1.76 | **0.0417** | **3.4** | 1.170 | 0.389 |
+| C2s8 K=8 refit, same target as CA16 | 2 | 1.130 | -- | -- | 5.86 | 0.2564 | 20.9 | 1.496 | 0.392 |
+| | 3 | 0.440 | -- | -- | 2.96 | 0.2936 | 23.9 | 1.452 | 0.401 |
+| | 4 | 0.347 | -- | -- | 1.95 | 0.3234 | 26.3 | 1.487 | 0.401 |
+
+Round 1 is shared by construction: every arm samples the same start field with the same seed, so its
+ensemble, and therefore both pooled quantities, are identical to C2s8's. The arms diverge from round 2.
+
+### 4.2 Verdict: for the angle the lever is the TARGET, not the basis
+
+**CBdep closes both quantities the task named.** The moment residual falls 13.1 -> 5.1 -> 4.3 -> 3.4
+times the noise floor, monotonically, while the same-target baseline (C2s8) RISES to 26.3; and the
+sigma ratio comes down from 1.188 to 1.120-1.170 against the baseline's 1.487. The residual is the
+better-conditioned of the two (the sigma ratio is not monotone: 1.120 at round 3 against 1.170 at round
+4 on a four-round window), so the claim is stated on the residual and the sigma ratio is reported
+beside it. The step falls monotonically, the correlation stays positive, the clean distance reaches
+1.3-1.8x the floor, and retention never leaves 0.386-0.401.
+
+**CA16 converges, but to its own ensemble.** Its clean distance is the best of the three (0.94x the
+floor at round 3: the angle's ensemble stops moving entirely) and its step collapses to 0.111 kJ/mol --
+and yet the offset from the reference GROWS (residual 13.1 -> 16.8, sigma ratio 1.188 -> 1.246 against
+C2s8's 1.487). That is not a failure of the fit; it is what a self-consistent target means: the arm
+chases the ensemble its own field produced, that ensemble is wider than the reference, and the fit
+carries it further from the reference every round. Read correctly, CA16 answers a different question
+than the one the task asked: it says the BASIS was a limit for the angle's step and its self-motion
+(0.111 against C2s8's 0.347 at round 4, clean 1.34 against 1.95), and it says nothing about closing on
+the reference, because closing on the reference is not what its target is.
+
+**The two coordinates have opposite levers.** The dihedral's problem was the BASIS (a
+Chebyshev refit could not carry its edge mass, and the B-spline could); the angle's problem is the
+TARGET (a better basis leaves it chasing its own ensemble, while the production rule closes the
+reference gap by a factor of eight in the residual). Any full-pool change therefore has to be
+per-coordinate on the evidence so far, and that is exactly the trade-off written into failure mode 2 of
+section 5.
+
+## 5. The full-pool validation: proposal, and its launch (the account the operator approves)
+
+### 5.1 What would be validated, now that C has said which lever is which
+
+C's result (section 4.2) is that the two coordinates have OPPOSITE levers, so a single change applied
+to both -- which is what an earlier version of this proposal recommended -- would answer the wrong
+question for one of them. The proposal is therefore a per-coordinate rule, and each coordinate carries
+its own hypothesis and its own criterion:
+
+| coordinate | what changes | what does NOT change | criterion |
+| :-- | :-- | :-- | :-- |
+| dihedral | the refit basis: B-spline m=16, gain 1.0, eigenvalue-relative ridge 1e-3 | the target (the deposited reference) and every other coordinate's operator | edge gap \|gap\| <= 0.05, plus the existing convergence metrics (monotone step, corr >= 0, clean distance towards the floor, retention in band) |
+| angle | the TARGET: the ensemble the field itself produces (self-consistent), basis unchanged | everything else | **the drift stops**: the field's implied sigma stops falling monotonically, the step's shape correlation goes to +1 with a decaying amplitude, and the edge excess stops growing; retention in band |
+
+**The angle's criterion is deliberately NOT the residual against the reference.** A self-consistent
+target is defined as the ensemble the field produced, so the distance from the deposited reference is
+not what that loop descends -- and CA16 already demonstrated it: its step collapsed to 0.111 kJ/mol and
+its ensemble stopped moving (0.94x the same-field floor) while its offset from the reference GREW. That
+growth is the definition of the target, not a failure of the arm, and a proposal that judged it by the
+reference residual would reject the one setting that makes the angle's self-motion converge.
+
+### 5.2 Step 0 is measured, and it is sharper than expected
+
+Step 0 costs no sampling: the per-chain histograms are on disk (results/ibi_relax/tasks_r<N>/<idx>.npz,
+read-only) and the fields are tables_r<N>.npz. Two things came out of it, and the second is why this
+proposal's cost is worth arguing about at all.
+
+**(a) The dihedral's edge gap is real at full pool and does not close.** Fields deliver 0.15-0.18 of
+edge mass against a target holding 0.32-0.52; the gap goes -0.343 (r0) -> -0.176 (r8), and the per-chain
+band is tight (p10 to p90 spans 0.07), so it is a property of the family and the target, not of a few
+odd chains. Per round: -0.343, -0.192, -0.163, -0.156, -0.151, -0.145, -0.202, -0.181, -0.176 -- it
+settles into an oscillation around -0.15..-0.20, i.e. the round-to-round noise of this quantity at full
+pool is about +-0.03.
+
+**(b) The angle's field collapses away from its own sampler.** The field's IMPLIED sigma and the sampled
+sigma, per round:
+
+| round | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+| :-- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| field's implied sigma | 0.3218 | 0.2594 | 0.2150 | 0.1842 | 0.1637 | 0.1511 | 0.1439 | 0.1358 | 0.1307 |
+| sampled sigma | 0.4159 | 0.4050 | 0.3998 | 0.3944 | 0.3916 | 0.3885 | 0.3590 | 0.3541 | 0.3493 |
+| sampled / implied | 1.29 | 1.56 | 1.86 | 2.14 | 2.39 | 2.57 | 2.49 | 2.61 | 2.67 |
+
+The implied sigma falls by a factor of 2.5 over nine rounds while the sampled one falls 16 per cent:
+the loop keeps narrowing the angle's potential and the sampler does not follow. That is the same
+pathology Part 8 describes as 'the sampled sigma stalls 9 per cent wider than the reference', but
+measured against the field's OWN implied sigma it is a factor of 2.67 rather than 1.09 -- the field has
+left its sampler far behind, not just the reference.
+
+**One correction to that table, because the two operators must not be read as one curve.** The
+implied-sigma column above is the LIVE tables_r<N>.npz, and for rounds 1-5 those are not the tables the
+table operator produced: the switch replayed rounds 0-5 under the moment operator and REWROTE them
+(table_operator_archive holds the originals). Printed side by side:
+
+| round | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+| :-- | --: | --: | --: | --: | --: | --: | --: |
+| live (moment trajectory) | 0.3218 | 0.2594 | 0.2150 | 0.1842 | 0.1637 | 0.1511 | 0.1439 |
+| archived (table operator) | 0.3218 | 0.2968 | 0.2776 | 0.2636 | 0.2559 | 0.2573 | (0.2699) |
+| sampled sigma (what was actually sampled) | 0.4159 | 0.4050 | 0.3998 | 0.3944 | 0.3916 | 0.3885 | 0.3590 |
+
+The honest statement has two parts. Under the TABLE operator, which is what rounds 0-5 actually
+sampled, the angle's implied sigma narrows 20 per cent over five rounds and then STOPS: 0.2559 at r4,
+0.2573 at r5 -- a plateau, i.e. a partial fixed point in this quantity, against a sampled sigma that
+fell 6.6 per cent over the same five rounds. Under the MOMENT operator the same coordinate loses 19 per
+cent in its FIRST round alone and 53 per cent by r5, and by r8 it is still falling 4-5 per cent per
+round with no plateau. So the narrowing is NOT operator-independent: the table operator bounds it and
+the moment operator does not, which is what makes the angle's drift a full-pool moment-operator
+phenomenon -- and it is the reason A's angle arm changes the TARGET rather than the basis. The archived
+r6 (0.2699, in parentheses) is the table the table operator wrote and that no round ever sampled under:
+the switch fired first.
+
+
+### 5.3 The tension C does not cover: at full pool the angle failed under BOTH rules
+
+C ran on seven chains, where the production rule CONVERGED for the angle (CBdep: residual 13.1 -> 3.4
+times the noise floor, sigma ratio 1.188 -> 1.12-1.17). At full pool the same rule did not converge: the
+archived table-operator rounds (results/ibi_relax/table_operator_archive, the pre-replay record) give
+the angle's correction as 3.00, 3.94, 3.02, 4.27, 4.31, 3.72 kJ/mol over rounds 0-5 -- **ringing, with
+no decay and no convergence** -- while bb_bond (2.84 -> 0.35 -> 0.62) and the dihedral (5.62 -> 0.27)
+both settled under the same rule. The moment operator then decayed the correction (2.56 -> 1.63 over
+the replay, 2.69 -> 1.68 over the real rounds 6-8) but produced (b) above: a field whose implied sigma
+collapses while its sampler does not move.
+
+So at full pool the angle has two rules that each fail differently -- the table rule rings, the moment
+operator drifts with no fixed point -- and a seven-chain experiment in which the table rule converges.
+The proposal's hypothesis for the angle is therefore the one C's CA16 arm points at: **give it the
+self-consistent target, so that what the loop descends is the ensemble the field produces, and ask
+whether the drift stops.** The three signatures of 'stopped' are measurable per round and are what the
+arm reports; the reference residual is reported beside them but does not decide.
+
+### 5.4 Three rounds or two: what each version can actually resolve
+
+The two levers are independent (nothing in C couples them), so the arm can be shortened. The costs are
+450 core-hours per round measured -- the campaign's own per-chain times sum to 448-461 -- so three
+rounds is about 1,350 core-hours and 48-55 h of wall clock (its rounds took 15.9-18.2 h), and two
+rounds is about 900 core-hours and roughly 36 h. What the third round buys:
+
+| question | 2 rounds | 3 rounds |
+| :-- | :-- | :-- |
+| dihedral: does the gap reach \|gap\| <= 0.05? | **YES, with authority**: the expected change is 0.12 (from -0.17 to the B-spline's +0.002 on seven chains) against a measured round-to-round noise of +-0.03, i.e. a factor of four, and it is visible after the first round and confirmed by the second | same, with one more confirmation |
+| angle: does the drift stop? | **PARTLY**: the first round after the change already carries a large signal -- with a self-consistent target the implied sigma should move from 0.3218 towards the sampled 0.4159 or settle near it, a 20-60 per cent change, against a sampled-sigma noise of about 1 per cent. But two rounds give ONE shape correlation and ONE amplitude comparison, so they can show the direction and not the trend: 'stopped' and 'slowed' look the same | **YES**: three fields give a two-interval trend in the implied sigma (is it still falling 4-5 per cent per round?), two shape correlations (does the sign stay positive?), and a decay comparison for the amplitude -- which is the criterion as written |
+
+**Recommendation:** if the operator wants the dihedral answer alone, two rounds is enough and the angle
+arm can be left out entirely (about 450 core-hours, 18 h). If the angle's drift is to be settled -- and
+it is the open question of the whole campaign, since neither rule has a fixed point there at full pool
+-- three rounds is the honest minimum, because the criterion is a trend.
+
+### 5.5 Failure modes, with the second one already realised
+
+1. **Step 0 shows no bad edge gap at full pool.** Disproved: it is -0.176 at round 8, with a tight
+   per-chain band. (Kept here as the record of what step 0 was for.)
+2. **The two coordinates need different things.** This is no longer a possibility -- it is the measured
+   result of C (the dihedral's lever is the basis, the angle's is the target), and this proposal is
+   written as a per-coordinate rule because of it. Why it is still worth doing: the machinery already
+   supports it (plan_c_loop's per-coordinate specs, used by every arm in this project), so the cost is
+   complexity in the operator table rather than feasibility, and the alternative -- one rule for every
+   coordinate -- is exactly what produced two different failures in one campaign. What would NOT be
+   worth it is a per-coordinate rule for a single coordinate with a marginal effect: that is why the
+   dihedral arm's criterion is a hard number (0.05) and why the angle arm is judged on its own target's
+   definition rather than on a metric that a self-consistent loop does not descend.
+3. **The moment operator's covariance does not accept the new basis without its own ridge.** The
+   eigenvalue-relative rescaling was derived on the refit's Gram, not on moment_correction's
+   covariance. Offline check before the arm: build the B-spline design, form the operator's own matrix,
+   and read its condition number against ridge -- cheap, and it belongs in step 0.
+4. **The edge gap is chain-dependent.** Step 0 says it is not (p10 to p90 spans 0.07 across 867 chains),
+   so the arm can run on the whole pool; that also settles the worry that only a handful of chains show
+   the pile-up.
+5. **Wall-clock risk.** 48-55 h for three rounds is a real cost; the campaign is checkpointed per task,
+   so it can be stopped between rounds without losing one, and the two-round version is the hedge.
+
+### 5.6 What it would cost NOT to run it
+
+Nothing breaks: the production campaign finished, and its fields are the record. What is lost is the
+only arm-level evidence for the two things this project has measured and not yet tested at scale -- that
+a local basis closes the dihedral's edge gap, and that a self-consistent target stops the angle's drift.
+Both are cheap to state and expensive to assume: the dihedral's gap is a factor of three wrong in a
+quantity that the whole loop's update is built on, and the angle is the one coordinate where neither
+rule has a fixed point at full pool. The recommendation is unchanged and now better informed: **run the
+three-round version if the angle's drift is to be settled, the two-round version if only the dihedral's
+gap is; either way step 0 is already done and costs nothing further.**
+
+### 5.7 Launched 2026-10-01: the two-lever arm, and what its launcher has to survive
+
+Launched as the scheduled task **`plan_c_armA`**, output `results/ibi_armA` (the campaign record
+`results/ibi_relax` is never written by it). Command line: 867 chains, 2 rounds, 1 replica, 32500
+steps, stride 5, burn 20000 -- the campaign protocol -- with `IBI_LOOP_OPERATOR=moments`,
+`IBI_LOOP_RULE_DIHEDRAL=bspline16`, `IBI_LOOP_RULE_ANGLE=selfconsistent`, 32 workers at one torch
+thread each. Launcher: `results/plan_c/run_armA.cmd` (CRLF), which carries the one-round,
+three-round and freeze-control variants as comments so the knobs live in one place.
+
+Two defences are in that launcher because the failure was measured, not imagined. Four attempts on
+2026-10-01 ended with **no parent process at all**: 120 orphaned spawn workers, children dying at
+startup with `PermissionError [WinError 5]` inside `reduction.duplicate` (a child cannot duplicate a
+handle from a parent that no longer exists), and one run terminated with exit code -1 -- the code
+`Stop-Process -Force` leaves behind, i.e. a sweep aimed at `python.exe` from outside the task. So:
+(1) the run uses `python_ibiA.exe`, a copy of the venv interpreter under a private name in the same
+directory, which `multiprocessing.spawn` propagates to every worker through `sys.executable`, so a
+name-based sweep misses the whole tree; (2) the launcher loops, because the driver resumes by design
+(it skips tasks already on disk), so a silent death costs a retry instead of the round. Success is
+judged by `results/ibi_armA/round1.json` existing, **not** by an exit code: after a pool collapse the
+driver exits 0, and a launcher that trusted it would report success having produced nothing -- which
+is what this launcher's first version did.
+
+Live evidence from the smoke gate (12 chains, 2 rounds, 2000 steps, short-burn stamp; wiring
+evidence, never a result): both rounds applied `bb_bond/moments`, `angle/selfconsistent` (max |dU|
+26.66 then 10.03) and `dihedral/bspline16` (4.45 then 2.99); with `IBI_LOOP_FREEZE=angle` the round
+file records `status="frozen"`, `rule="frozen"`, `reason="IBI_LOOP_FREEZE"` and a measured
+sim/ref_table of 0.9831 over 143520 samples while the other two coordinates were updated; and
+`joint_J` and `joint_J_all` differ in every round file, as their two definitions require.
+
+## 6. Reproduce
+
+```
+python scripts/plan_c_basis_family.py                 # phase 1, offline, writes basis_family.json
+pytest tests/test_plan_c_basis.py -q
+python scripts/plan_c_loop.py --rounds 4 --arms B08,B16,B32,B64 --tag basis --preflight-retention 0
+python results/plan_c/_analyse_basis.py               # the per-arm table against the floor
+```
+
+Records: results/plan_c/basis_family.json (phase 1), plan_c_basis.json + ensembles_basis.npz +
+fields/basis/ (phase 2). The same-field floor these arms are read against is
+0.0471 / 0.0521 / 0.0589 ln_mean for bb_bond / angle / dihedral (results/plan_c/same_field_floor.json).

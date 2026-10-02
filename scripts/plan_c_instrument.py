@@ -1,6 +1,6 @@
 """The clean instrument: what two SAMPLED ensembles say about each other, and its floor.
 
-WHY THIS EXISTS, measured 2026-09-23 (docs/plan_c_c2_stabilization.md sections 3.4-3.5). The
+WHY THIS EXISTS, measured 2026-09-23 (docs/archive/plan_c_c2_stabilization.md sections 3.4-3.5). The
 instrument the first two passes used to ask whether a self-consistent loop is closing was
 fit_implied_ln_ratio -- the Boltzmann distribution a FIELD implies, compared with the histogram the
 sampler produced. Its floor is small (0.007 / 0.009 / 0.035 median ln-units for bb_bond, angle,
@@ -91,7 +91,7 @@ def chains_of(z, arm_round, coord):
     """{chain index: counts} for one name-round and coordinate, or {} if it was not stored.
 
     The pooled histogram is one number; this is the distribution behind it, which is what turns a
-    floor from a bracket into a line (docs/plan_c_c2_stabilization.md 4.6).
+    floor from a bracket into a line (docs/archive/plan_c_c2_stabilization.md 4.6).
     """
     pre = f"{arm_round}__chain"
     out = {}

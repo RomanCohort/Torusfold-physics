@@ -35,7 +35,7 @@ sys.path.insert(0, str(ROOT / "src"))
 #   1. sequence.txt at the repository root -- git-ignored, the local working copy
 #   2. artifacts/2013nt/sequence.txt  -- committed, the 2,013 nt demo target
 # (2) exists because without it this script exited on line 2 for every reader who was
-# not the author: docs/pipeline_audit_2026-09-13.md:1022 records that the full Level 0
+# not the author: docs/archive/pipeline_audit_2026-09-13.md:1022 records that the full Level 0
 # path was never executed end to end for exactly this reason. A local sequence.txt
 # still wins, so the private workflow is unchanged.
 _root_seq = ROOT / "sequence.txt"

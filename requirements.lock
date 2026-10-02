@@ -40,10 +40,10 @@
 # hardware takes the CPU line.
 #
 # ── core, pinned ───────────────────────────────────────────────────────────────
-openmm==8.5.2          # docs/pipeline_audit_2026-09-13.md:1026; also stamped into the
+openmm==8.5.2          # docs/archive/pipeline_audit_2026-09-13.md:1026; also stamped into the
                        # delivered structure: artifacts/2013nt/isrnaclong_final.pdb,
                        # "REMARK 1 CREATED WITH OPENMM 8.5.2, 2026-08-18"
-ViennaRNA==2.7.2       # docs/pipeline_audit_2026-09-13.md:1026; independently, the two
+ViennaRNA==2.7.2       # docs/archive/pipeline_audit_2026-09-13.md:1026; independently, the two
                        # places the code records what it measured against:
                        # src/torusfold/scheme2/isrnaclong.py:497 and multisource_ss.py:39
 pytest==9.1.1          # measured 2026-10-02 in both environments; the earlier note said

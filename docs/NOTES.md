@@ -155,7 +155,7 @@ while the shipped benchmark CG-refines first and records e0 ~1e14 (`scripts/benc
 That component (`openmm_gpu_refine`) produced no output in our run and is the one open step between
 this wiring and an all-atom marginal on the product's topology.
 
-**What the CG level owes, measured separately** (`docs/cg_allatom_interface.md`): the field's four
+**What the CG level owes, measured separately** (`docs/archive/cg_allatom_interface.md`): the field's four
 scored coordinates are local P-trace quantities, and `stack` is an exact function of `bb_bond` and
 the P-P-P angle. On the 867 fragments the local marginals are length-independent to 4-13 percent over
 a 7x length range, the end effect is 4-5 percent of the sd below L=60 (under 0.2 percent past L=400),
@@ -174,8 +174,8 @@ scoring target** — which is also why `torch_cgsim` sets its spring to zero.
 comments, and the next person needs the story in one read. The topic docs remain the detailed record:
 `docs/timeline.md` (the 134-commit arc), `docs/statistical_potentials_as_forces.md` (the reasoning),
 `docs/dihedral_table_decision.md`, `docs/force_field_comparison.md` (against IsRNA2/IsRNAcirc),
-`docs/ibi_loop_and_oxrna_findings.md` (the iteration campaign), `docs/plan_b_coupled_update.md` and
-`docs/plan_c_basis_family.md` (the two open tracks), `docs/cg_allatom_interface.md`.*
+`docs/ibi_loop_and_oxrna_findings.md` (the iteration campaign), `docs/archive/plan_b_coupled_update.md` and
+`docs/archive/plan_c_basis_family.md` (the two open tracks), `docs/archive/cg_allatom_interface.md`.*
 
 ### 1. It began as springs pinned to target values
 
@@ -251,7 +251,7 @@ it produced, with the numbers that matter:
   only cycling arm read -0.378 while four converging arms sat inside 0.012, including the one with the
   worst residual); a drift-versus-cycle test (a consistent step direction means no fixed point, a sign
   flip every round means a 2-cycle); and the local-geometry transfer measurement behind
-  `docs/cg_allatom_interface.md`.
+  `docs/archive/cg_allatom_interface.md`.
 * **Two plans, two answers.** Plan B' (change the operator) works on the coordinates that are not
   coupling-dominated. Plan C (change the target to the ensemble the field itself produces) buys **no
   retention** on a seven-chain pool (0.39-0.42 A against a 0.40-0.41 A baseline), though it does stop
@@ -263,7 +263,7 @@ it produced, with the numbers that matter:
 
 * **What the CG level owns**: the P trace. Its four scored coordinates are local functions of it, and on
   the 867 fragments those local marginals are length-independent to 4-13 percent, with the closure a
-  circle imposes worth under 0.5 percent (see `docs/cg_allatom_interface.md`).
+  circle imposes worth under 0.5 percent (see `docs/archive/cg_allatom_interface.md`).
 * **What it does not own**: stacking. `stack` = |P(i) - P(i+2)| is algebraically derived from the bond
   and the pseudo-angle, the three-bead residue has no plane, normal, rise or twist to express stacking
   with, and the all-atom level carries that physics -- while inheriting the trace (a 1.5 A trace error

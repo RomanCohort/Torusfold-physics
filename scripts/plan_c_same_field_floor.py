@@ -1,6 +1,6 @@
 """The same-field floor: two independent trajectories under ONE field, measured.
 
-WHY THIS EXISTS. Every floor in docs/plan_c_c2_stabilization.md section 4.2 was bracketed from pairs
+WHY THIS EXISTS. Every floor in docs/archive/plan_c_c2_stabilization.md section 4.2 was bracketed from pairs
 whose FIELDS also moved -- the arms that had all but stopped (<= 1 kJ/mol injected step) -- so those
 numbers bound the sampling noise instead of measuring it. This samples one field twice, with
 different seeds, and the distance between the resulting ensembles is sampling noise and nothing else.
@@ -57,7 +57,7 @@ BLOCKS = 8
 # that is what stopped the first analysis pass after one row. stack is sampled but carried, and the
 # C2s8 verdict this floor is compared against is about these three.
 COORDS = ("bb_bond", "angle", "dihedral")
-# C2s8's last round-to-round distances (ln_mean, docs/plan_c_c2_stabilization.md 4.3), the numbers
+# C2s8's last round-to-round distances (ln_mean, docs/archive/plan_c_c2_stabilization.md 4.3), the numbers
 # this floor exists to be compared with.
 C2S8_LAST = {"bb_bond": 0.114, "angle": 0.102, "dihedral": 0.816}
 

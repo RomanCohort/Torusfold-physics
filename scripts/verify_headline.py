@@ -48,7 +48,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# FIRST, before anything that might import torusfold. docs/pipeline_audit_2026-09-13.md:1030
+# FIRST, before anything that might import torusfold. docs/archive/pipeline_audit_2026-09-13.md:1030
 # records that `torusfold` is also installed in the reference environment from a DIFFERENT
 # checkout, so an import that does not put this tree first silently tests the other tree.
 sys.path.insert(0, str(REPO / "src"))

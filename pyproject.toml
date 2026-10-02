@@ -30,7 +30,7 @@ dependencies = [
     "numpy",
     "scipy",
     # OpenMM IS recorded, in three independent places, so it is pinned:
-    #   docs/pipeline_audit_2026-09-13.md:1026 (the reference env),
+    #   docs/archive/pipeline_audit_2026-09-13.md:1026 (the reference env),
     #   scripts/measure_cpu_constants.py:42 (the platform the constants were measured on),
     #   and the delivered structure itself -- artifacts/2013nt/isrnaclong_final.pdb
     #   carries "REMARK 1 CREATED WITH OPENMM 8.5.2, 2026-08-18".

@@ -1,6 +1,6 @@
 """The correction families, one shared fit, and the diagnostics that decide which of them to sample.
 
-THE PROJECT. Measured 2026-09-24 (docs/plan_c_c2_stabilization.md section 5): on ONE coordinate, ONE
+THE PROJECT. Measured 2026-09-24 (docs/archive/plan_c_c2_stabilization.md section 5): on ONE coordinate, ONE
 ensemble, at gain 1.0, a smooth global K=8 Chebyshev refit cycles -- corr(step_r, step_{r-1}) -0.94,
 amplitude growing 2.72 -> 3.42 -> 4.06 kJ/mol, 13.8x the same-field floor, edge mass stuck at 0.43 --
 while the 1000-bin table inversion converges and is the only rule that MOVES the edge mass (0.495 ->

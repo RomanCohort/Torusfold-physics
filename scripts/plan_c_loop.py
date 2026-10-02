@@ -1,6 +1,6 @@
 """Plan C, first experiment: three arms, ONE seven-chain pool, native retention as the verdict.
 
-docs/plan_c_selfconsistent_target.md:70 is the specification. The three arms differ in two things
+docs/archive/plan_c_selfconsistent_target.md:70 is the specification. The three arms differ in two things
 and nothing else:
 
   C0 (control)  reference = the deposited pooled marginal (results/refit_smooth5.npz),
@@ -70,7 +70,7 @@ from pathlib import Path
 
 # THE PINS GO BEFORE torch IS IMPORTED. Measured 2026-09-21: a worker pool that imports torch first
 # reserves 950 MB of commit per process on this box, against 181 MB with OMP/MKL pinned and
-# KMP_BLOCKTIME at 0 (docs/plan_c_selfconsistent_target.md:174 -- this is the trap the
+# KMP_BLOCKTIME at 0 (docs/archive/plan_c_selfconsistent_target.md:174 -- this is the trap the
 # native-retention launch fell into). setdefault, not assignment: a caller that pins differently on
 # purpose must win.
 for _name, _default in (("OMP_NUM_THREADS", "1"), ("MKL_NUM_THREADS", "1"), ("KMP_BLOCKTIME", "0")):
@@ -111,7 +111,7 @@ DEFAULT_K = 8
 LN_RATIO_FLOOR = 1e-6
 # Plan C's second task: make the parametrised fit stable, or have a rule stop it and say so.
 # RIDGE_REL is moment_correction's own relative ridge -- 1e-3 x trace/K on the same Chebyshev design
-# (ibi_bonded, docs/plan_b_coupled_update.md) -- so C2s and Plan B's operator are fitted the same
+# (ibi_bonded, docs/archive/plan_b_coupled_update.md) -- so C2s and Plan B's operator are fitted the same
 # way and can be read beside each other. SUPPORT_FRAC drops the bins whose ensemble probability is
 # below 1e-3 of the mode, which is where the target -kBT ln p is the logarithm of a pseudo-count.
 # MEASURED, not assumed (scripts, 2026-09-22, on the real round-1 ensembles of the c2stab run).
@@ -166,7 +166,7 @@ DIHEDRAL_ARMS = {
     "Dtbl": {"dihedral": ("plan_update", 1.0)},
 }
 
-# PHASE 2 OF THE BASIS PROJECT (docs/plan_c_basis_family.md). Phase 1 swept locality offline on the
+# PHASE 2 OF THE BASIS PROJECT (docs/archive/plan_c_basis_family.md). Phase 1 swept locality offline on the
 # dihedral's round-4 ensemble and found the threshold is LOW: the global Chebyshev design cannot
 # express that target at any K (mass-weighted residual 2.87-2.91 kJ/mol, edge deficit -0.12..-0.20
 # against the target's 0.313), a cubic B-spline at m=8 still cannot (1.97), and from m=16 up it can
@@ -370,7 +370,7 @@ def _sample_one(task):
                  # THE WINDOW'S BLOCKS COME BACK TOO, and that is a measurement decision rather
                  # than completeness: a pooled histogram cannot be decomposed after the fact, so
                  # the only floor the offline instrument could build from it was a bracket taken
-                 # from pairs whose FIELDS also moved (docs/plan_c_c2_stabilization.md 4.2). With
+                 # from pairs whose FIELDS also moved (docs/archive/plan_c_c2_stabilization.md 4.2). With
                  # the blocks, the same comparison becomes a delete-one jackknife at full window
                  # size; with the per-chain histograms below, seven comparisons instead of one.
                  "blocks": {c: np.asarray([res.b_counts[b][c] for b in range(max(int(blocks), 1))],
@@ -462,7 +462,7 @@ def _chebyshev_fit_stable(table, U_target, counts, K, ridge=RIDGE_REL,
        would put a step in U and a delta in its force.
 
     2. RIDGE. lambda = ridge x trace(A^T W A) / K, the relative form ibi_bonded.moment_correction
-       uses on the same Chebyshev design (Plan B, docs/plan_b_coupled_update.md). Relative, because
+       uses on the same Chebyshev design (Plan B, docs/archive/plan_b_coupled_update.md). Relative, because
        the absolute size of A^T W A follows the ensemble's total weight, which is a property of the
        run (nrep x frames) rather than of the problem.
 
@@ -668,7 +668,7 @@ def _stationarity(p_prev, p_now):
 def summarize_retention(rows):
     """median/mean deposited -> sampled-mean RMSD, spread, and how many chains left the deposit.
 
-    The 10 A threshold is the baseline's own (docs/plan_c_selfconsistent_target.md:160): it is the
+    The 10 A threshold is the baseline's own (docs/archive/plan_c_selfconsistent_target.md:160): it is the
     line between "relaxed to a slightly different but recognisably native geometry" and "melted",
     and it is quoted as a count rather than a fraction so a small group cannot hide behind one.
     """
@@ -877,7 +877,7 @@ def run_arm(arm, start_tables, pool, holdout, args, p_ref, ens_store, flush, rec
 
         # the ensemble, stored so the stationarity claim can be re-derived from disk -- and stored
         # DECOMPOSED as well as pooled, because the decomposition is what the offline instrument
-        # needs to turn one number into a distribution (docs/plan_c_c2_stabilization.md 4.6).
+        # needs to turn one number into a distribution (docs/archive/plan_c_c2_stabilization.md 4.6).
         store_ensembles(ens_store, arm, rnd, counts, n_total, n_outside, sampled, name_to_index)
 
         # the deposited-marginal residual, both denominators, on the field that was just fitted

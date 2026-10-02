@@ -200,7 +200,7 @@ def reconstruct_all_atom(
         #   perpendicular r = direction to the base-pair partner, projected off b;
         #     unpaired residues fall back to the radial direction P[i] - centroid
         # The C1'/C4' offsets are the 1EHZ-measured means decomposed along b
-        # (61 standard residues, chain A; see docs/reconstruction_anchor_audit.md):
+        # (61 standard residues, chain A; see docs/archive/reconstruction_anchor_audit.md):
         #   C1': 3.25 along + 4.16 perpendicular  (|C1'-P| = 5.33 +/- 0.19)
         #   C4': 2.79 along + 2.63 perpendicular  (|C4'-P| = 3.90 +/- 0.04)
         # The previous constants (5.5/1.5 and 4.2/0.0) put every anchor on the backbone

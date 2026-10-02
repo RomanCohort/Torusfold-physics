@@ -383,7 +383,7 @@ one coordinate.
 
 ### 5.2 The moment operator fixes the one that is broken
 
-`docs/plan_b_coupled_update.md`'s operator ran head to head against the marginal inversion on the
+`docs/archive/plan_b_coupled_update.md`'s operator ran head to head against the marginal inversion on the
 seven-chain pool: six rounds, same seed, same 16 replicas, same reference, only the operator
 different (8 workers per arm, K=8). The comparison metric is operator-independent -- the Chebyshev
 moment difference pooled over the chains, computed offline from the stored histograms:

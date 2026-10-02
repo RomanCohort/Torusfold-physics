@@ -23,7 +23,7 @@ Output:
 The sequence is READ OUT of the structure rather than taken from anywhere else,
 because nothing else has it: `sequence.txt` at the repository root is
 git-ignored ("private sequence"), and the audit note at
-`docs/pipeline_audit_2026-09-13.md:1022` records that this is why the full Level
+`docs/archive/pipeline_audit_2026-09-13.md:1022` records that this is why the full Level
 0 path was never executed end to end. Recovering it here is what makes the demo
 runnable by a third party at all. It is not a new release of anything.
 """

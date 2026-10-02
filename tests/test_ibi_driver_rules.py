@@ -103,7 +103,7 @@ def test_bspline16_rule_is_a_different_step_and_uses_the_big_basis():
 
 def test_bspline16_rule_passes_the_eigenvalue_relative_ridge(monkeypatch):
     """What the rule actually hands the operator. The ridge FORM is the measured lesson
-    (docs/plan_c_basis_family.md 2.4): trace/m falls with m while eig_max does not, so the same
+    (docs/archive/plan_c_basis_family.md 2.4): trace/m falls with m while eig_max does not, so the same
     ridge_rel regularises 8.8x less at the fine end and the trace form stops working there."""
     seen = {}
     real = I.moment_correction

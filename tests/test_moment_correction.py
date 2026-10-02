@@ -1,6 +1,6 @@
 """The moment operator (Plan B'): does it descend the thing it claims to descend?
 
-Plan B' (docs/plan_b_coupled_update.md) replaces the per-bin marginal inversion with a low-order
+Plan B' (docs/archive/plan_b_coupled_update.md) replaces the per-bin marginal inversion with a low-order
 correction whose coefficients are the relative-entropy gradient:
 
     U_new(q) = U_table(q) + sum_k d_k T_k(x),    d_k = eta_k (<T_k>_sim - <T_k>_ref)

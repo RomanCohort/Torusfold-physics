@@ -3,7 +3,7 @@
 THE QUESTION PLAN C CANNOT ANSWER WITHOUT THIS. Native retention is C's acceptance test -- "a chain
 started from its deposited geometry stays near it" -- and none of the existing artifacts can decide
 it: the task results carry histograms, moments, joint_J and the entry state, but NOT coordinates.
-Measured before building this (docs/plan_c_selfconsistent_target.md, first free check): the entry
+Measured before building this (docs/archive/plan_c_selfconsistent_target.md, first free check): the entry
 state does not predict the residual (Spearman(J, E0) = +0.04, started-at-cap 0.1746 against
 below-cap 0.1735), so "which chains fail to stay" is not readable off the diagnostics. It needs
 geometry.

@@ -213,7 +213,7 @@ RELAX_STEPS = int(os.environ.get("IBI_LOOP_RELAX", 0))
 OPERATOR = os.environ.get("IBI_LOOP_OPERATOR", "table")
 CORRECTION_K = int(os.environ.get("IBI_LOOP_CORRECTION_K", "8"))
 
-# PER-COORDINATE RULES (the two-lever arm, 2026-10-01; docs/plan_c_basis_family.md section 5). An
+# PER-COORDINATE RULES (the two-lever arm, 2026-10-01; docs/archive/plan_c_basis_family.md section 5). An
 # empty string means "the operator above, for every coordinate" -- today's behaviour -- and that
 # default path is bit-identical: tests/test_ibi_driver_rules.py pins it against golden digests
 # captured before this block existed.
@@ -726,7 +726,7 @@ def update_one_coord(coord, table, counts, n_tot, n_out, p_ref, hist, hist_norm,
         return I.UpdateResult(table=dict(table, U=U_new), dU=dU, diagnostics=diag,
                               status=I.STATUS_OK), rule
     if OPERATOR == "moments":
-        # Plan B' (docs/plan_b_coupled_update.md): the table keeps its shape and the correction is
+        # Plan B' (docs/archive/plan_b_coupled_update.md): the table keeps its shape and the correction is
         # low-order -- d_k = eta_k (<T_k>_sim - <T_k>_ref), the relative entropy's gradient. The
         # divergence guard is the SAME rule plan_update applies, fed the moment norm instead of
         # max|dU|, so a coupled step that starts growing is caught by the same instrument rather than

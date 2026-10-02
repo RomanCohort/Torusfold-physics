@@ -40,7 +40,7 @@ dependencies:
   - python=3.11          # 3.11.15 measured in both environments
   - numpy=2.4.3          # measured 2026-10-02 in the reference environment
   - scipy=1.17.1         # same
-  - openmm=8.5.2         # docs/pipeline_audit_2026-09-13.md:1026
+  - openmm=8.5.2         # docs/archive/pipeline_audit_2026-09-13.md:1026
   - viennarna=2.7.2      # same line; the only reason this file exists
   - pytest=9.1.1         # measured 2026-10-02: 274 passed, 1 skipped, 56 s
   - pip
@@ -54,10 +54,10 @@ dependencies:
 # builds in use in this project and neither belongs in a default environment:
 #   CPU (tests, the IBI sampler):
 #     pip install torch --index-url https://download.pytorch.org/whl/cpu
-#     verified as torch 2.13.0+cpu, docs/pipeline_audit_2026-09-13.md:1026
+#     verified as torch 2.13.0+cpu, docs/archive/pipeline_audit_2026-09-13.md:1026
 #   GPU (ROCm, reference APU only):
 #     torch 2.12.0a0+rocm7.13.0a20260313 on Radeon 8060S / gfx1151, hip 7.2.0
-#     docs/pipeline_audit_2026-09-13.md:519
+#     docs/archive/pipeline_audit_2026-09-13.md:519
 #
 # Then, from the repository root:
 #     pip install -e . --no-deps        # --no-deps: the pins above are the intent
