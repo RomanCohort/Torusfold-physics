@@ -44,6 +44,16 @@ pretrained/
 *.h5
 *.hdf5
 
+# The RL policy weights and the CG statistical potential are the exception: 275 KB
+# and 9 KB, and `isrnaclong_pipeline` looks for them at `data/` on every run. They
+# were on the development machine and not in the checkout, so Levels 2 and 3 ran
+# with `policy_path=None` — a heuristic-only MCTS search — and nothing said so. The
+# names are deliberately exact and not a `data/` wildcard: that way a file added to
+# the directory later is still ignored by default.
+!data/rl_policy_b0.pth
+!data/rl_policy_bootstrap.pth
+!data/cg_statistical_potential.pkl
+
 # ── Bundled data (ships in the folder, never in git) ─────
 # The deposited-structure database and the cgRNASP reference data travel with the working folder
 # so that a copied directory is self-contained, and are listed here so that no future `git add -A`
