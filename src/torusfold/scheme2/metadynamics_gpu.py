@@ -223,6 +223,10 @@ class BatchedMetadynamics:
                 positions, hills_centers, hills_heights, hill_sigma)
             return f_phys + f_bias_new
 
+        # One-shot flag for the snapshot callback's failure report: a callback that
+        # fails must not flood the log, and must not be silent either.
+        _cb_reported = [False]
+
         for step_idx in range(n_hill_events):
             # ── Integrate hill_freq steps ──
             for _ in range(hill_freq):
@@ -312,16 +316,34 @@ class BatchedMetadynamics:
                       f"E_min={energies.min():.0f} "
                       f"hills={n_deposited}")
 
-            # Publish an intermediate structure for the viewer. Wrapped because a
-            # callback that fails must not take a running simulation down with it.
+            # Publish an intermediate structure for the viewer.
+            #
+            # `energies` is a numpy array by this point — it was converted at the
+            # top of the reporting block, which is why `energies.min()` and
+            # `energies[i_min]` work above. This line still called `.detach()` on
+            # it, as though it were a tensor, and the guard's `except Exception:
+            # pass` swallowed the AttributeError on every iteration.
+            #
+            # The effect was that this callback never fired once, at any step, in
+            # any run. Every frame Level 3.5 produced came from the wall-clock
+            # writer instead, so the structure moved on the writer's timer rather
+            # than on simulation progress — and the "a structure every few thousand
+            # steps" this was written to deliver never happened. A silent pass
+            # around a callback is how that stayed invisible, so the failure is
+            # reported now rather than discarded.
             if on_step is not None and step_idx % max(1, report_every // max(1, hill_freq)) == 0:
                 try:
                     _snap = pos.detach().cpu().numpy()
                     if _snap.ndim == 3:            # (B, L, 3) -> the best replica
-                        _snap = _snap[int(np.argmin(energies.detach().cpu().numpy()))]
+                        _snap = _snap[int(np.argmin(energies))]
                     on_step(step_idx * hill_freq, n_steps, np.asarray(_snap, dtype=float))
-                except Exception:
-                    pass
+                except Exception as _cb_exc:
+                    # Never take a running simulation down, but never swallow it
+                    # either: report once, then stay quiet.
+                    if not _cb_reported[0]:
+                        _cb_reported[0] = True
+                        print("    [!] metadynamics snapshot callback failed and was "
+                              "skipped: %s: %s" % (type(_cb_exc).__name__, _cb_exc))
 
         # ── Final: minimize with bias zeroed out ──
         if verbose:
