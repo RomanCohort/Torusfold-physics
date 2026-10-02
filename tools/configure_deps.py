@@ -927,7 +927,7 @@ def _no_interpreter_advice() -> List[str]:
     out.append("  No interpreter here can run the pipeline.")
     out.append("")
     out.append("  Option 1 - plain Python (no Anaconda needed, ~25 MB download)")
-    out.append("    1. Install Python 3.12 or newer from https://www.python.org/downloads/")
+    out.append("    1. Install Python 3.11 or newer from https://www.python.org/downloads/")
     out.append("       Tick \"Add python.exe to PATH\" in the installer.")
     out.append("    2. Open a NEW terminal, then run:")
     out.append("         python -m pip install --upgrade pip")
@@ -943,7 +943,7 @@ def _no_interpreter_advice() -> List[str]:
     out.append("")
     if conda:
         out.append("  Option 2 - the conda you already have  (%s)" % conda)
-        out.append("        conda create -n torusfold -c conda-forge python=3.12 \\")
+        out.append("        conda create -n torusfold -c conda-forge python=3.11 \\")
         out.append("            numpy scipy openmm pytorch matplotlib pandas \\")
         out.append("            biopython einops gemmi")
         out.append("        conda activate torusfold")

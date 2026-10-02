@@ -89,4 +89,11 @@ joblib==1.5.3
 matplotlib==3.11.1
 
 # Python: the verified interpreter is 3.11 (3.11.15 in both environments).
-# pyproject.toml still advertises >=3.9, which was never re-checked against this list.
+# Reconciled 2026-10-02 -- pyproject.toml now says `requires-python = ">=3.11"`
+# instead of >=3.9, which this comment had flagged as never re-checked against
+# this list. The list is what settles it: numpy 2.4.3 and scipy 1.17.1 each
+# declare `Requires-Python: >=3.11`, so 3.9 and 3.10 could not install the pinned
+# set whatever the source parses under. start.bat and tools/configure_deps.py
+# said "3.12 or newer"; they say 3.11 now too. start.bat's own interpreter
+# candidate list was already inconsistent with that message -- it walks down to
+# Python311 and stops there, with no 3.10 or 3.9 entry to fall back to.

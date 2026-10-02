@@ -165,6 +165,27 @@ python serve.py            # default port 8877
 Pre-built interactive demo of the 2013 nt prediction:
 `docs/circrna_3d_viewer.html`.
 
+**AI-assistant skills — the same tool, driven in natural language.** Two
+harnesses are supported, and each looks in its own directory for project skills.
+Both hold the *same* document; only the frontmatter differs:
+
+| Harness | Path | Frontmatter |
+|---|---|---|
+| Claude Code | `.claude/skills/torusfold-predict/SKILL.md` | `name`, `description` |
+| DeepSeek Harness | `.dsh/skills/torusfold-predict/SKILL.md` | `name`, `description`, `whenToUse` |
+
+This skill is written for the assistant, not for a person: it has the agent ask
+the biologist for the sequence and do everything else on their behalf — decide
+whether the question is answerable, start the tool, choose the settings, watch
+the run, and translate the numbers back into their vocabulary. It also encodes
+the one way this tool hands a biologist a confidently wrong answer: a circle
+below about 30 nt runs every stage to completion and returns a structure that is
+not a ring, with nothing in the output saying so
+(`docs/sequence_length_limits.md`).
+
+**The two bodies must stay identical.** `tests/test_skills_in_sync.py` fails if
+they drift, and it runs in CI. Edit both, or neither.
+
 **External predictors & runtime paths** are configured through environment
 variables (no hard-coded machine paths in this repository):
 
@@ -189,6 +210,8 @@ variables (no hard-coded machine paths in this repository):
 ```
 ├── run_2013nt.py          end-to-end 2013 nt demo
 ├── serve.py               SSE + Predict API + web viewer
+├── .claude/skills/        the assistant skill, Claude Code's path
+├── .dsh/skills/           the same skill, DeepSeek Harness's path
 ├── src/torusfold/
 │   ├── scheme2/           pipeline core (47 modules): folding, RL, REMD/MetaD,
 │   │                      NCM detection, ensemble predictor wrappers, Amber refine
@@ -608,16 +631,26 @@ GenBank as needed.
 
 - `tests/test_smoke.py` — compiles every Python file and imports the
   `torusfold.scheme2` package (needs only numpy).
+- `tests/test_skills_in_sync.py` — fails if the two shipped skill copies
+  (`.claude/skills/` and `.dsh/skills/`) drift apart, or if either breaks a rule
+  that would make its harness ignore the file silently. Stdlib only, so it runs
+  in CI.
 - `.gitlab-ci.yml` — runs the smoke suite on every push to keep `main` green.
-- Run locally: `pip install -e . && python -m pytest -q tests`.
-- **274 tests, 56 s** on the reference environment
+- Run locally: `pip install -e . && python -m pytest -q tests`, or simply
+  `pytest`. `testpaths` in `pyproject.toml` scopes the bare command to `tests/`,
+  which matters: `scripts/` holds seven standalone `test_*.py` diagnostics that
+  raise on import, so a bare `pytest` used to exit on a failure that was not one.
+- **279 passed, 1 skipped, 38 s** on the reference environment
   (`C:\ana\envs\comfyui`, Python 3.11.15 / torch 2.12.0a0+rocm7.13.0a20260313 /
-  OpenMM 8.5.2 / ViennaRNA 2.7.2). Measured 2026-10-02, replacing an earlier
-  "145 tests, 24 s" claim that had gone stale. The sibling environment
-  `C:\ana\envs\circrna3d` runs the same suite as **273 passed, 2 skipped, 72 s** —
-  it lacks the `[ml]` extras, so the CUDA half of `test_table_potential_device.py`
-  skips there. Most test files use `pytest.importorskip`, so a numpy-only checkout
-  runs a smaller suite that skips rather than fails.
+  OpenMM 8.5.2 / ViennaRNA 2.7.2). Re-measured 2026-10-02, replacing an earlier
+  "145 tests, 24 s" claim that had gone stale and then a "274 tests" count that
+  the new skill test moved. The sibling environment `C:\ana\envs\circrna3d` runs
+  the same suite as **278 passed, 2 skipped, 45 s** — it lacks the `[ml]` extras,
+  so the CUDA half of `test_table_potential_device.py` skips there. Both wall
+  times were taken with an unrelated MD job occupying the same machine, so treat
+  them as a spread rather than a benchmark. Most test files use
+  `pytest.importorskip`, so a numpy-only checkout runs a smaller suite that skips
+  rather than fails.
 - `python scripts/verify_headline.py --allow-known` — re-derives every number the
   shipped viewer displays, from committed files, with numpy. Needs no OpenMM, no
   torch, no GPU. It is the check to run when you want to know what in this repository

@@ -7,7 +7,13 @@ name = "torusfold-physics"
 version = "0.1.0"
 description = "TorusFold-physics: physics-based circRNA 3D structure prediction (isRNAcircLong pipeline)"
 readme = "README.md"
-requires-python = ">=3.9"
+# 3.11, not 3.9. The syntax does parse under 3.9 -- checked with
+# ast.parse(feature_version=(3, 9)) across src/, serve.py and run_2013nt.py, 60
+# files, no failures -- but the pinned stack does not: numpy 2.4.3 and scipy
+# 1.17.1 each declare `Requires-Python: >=3.11`, and environment.yml:40,
+# .gitlab-ci.yml:5 and both measured environments are 3.11. requirements.lock:92
+# had already flagged the old value as never re-checked against the list.
+requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Ziyi Yan", email = "yanzy8225@mails.jlu.edu.cn" }]
 keywords = ["circRNA", "RNA", "3D-structure", "molecular-dynamics", "OpenMM", "RL"]
@@ -28,6 +34,13 @@ dependencies = [
     #   scripts/measure_cpu_constants.py:42 (the platform the constants were measured on),
     #   and the delivered structure itself -- artifacts/2013nt/isrnaclong_final.pdb
     #   carries "REMARK 1 CREATED WITH OPENMM 8.5.2, 2026-08-18".
+    # Checked 2026-10-02, because two version strings on this machine disagree and
+    # the disagreement is a false alarm worth writing down: `importlib.metadata
+    # .version("openmm")` returns 8.5.2, so this pin IS satisfied, while
+    # `openmm.version.version` returns 8.5.2.dev-36a30cb -- OpenMM's own build
+    # string, carrying the git revision (36a30cbca) and release = False. The
+    # installed distribution is 8.5.2. Do not read the second string as a
+    # violation of this pin.
     "openmm==8.5.2",
 ]
 
@@ -45,3 +58,10 @@ pyrosetta = ["pyrosetta"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# scripts/ holds standalone diagnostic scripts named test_*.py, and seven of them
+# raise on import when pytest collects them. CI has always scoped the run by hand
+# with `pytest -q tests`; a bare local `pytest` collected them too and exited on a
+# failure that is not one. This makes the two commands agree.
+testpaths = ["tests"]

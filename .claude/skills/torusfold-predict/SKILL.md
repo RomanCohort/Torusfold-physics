@@ -62,8 +62,13 @@ So, by length:
   geometry, run it, but tell them first that the result will not be circular.
 - **30–150 nt** — fine, and quick enough to run without ceremony.
 - **Over ~150 nt** — fine, but **say how long it will take and ask before starting.**
-  Minutes for the early stages, then the molecular dynamics dominates. The 2,013 nt
-  demo wants 30–60 GB of memory and several hours. Get a yes first.
+  Minutes for the early stages, then the molecular dynamics dominates. Get a yes
+  first. Cost here is set by the configuration, not the length, so never quote a
+  round number: at the checked-in settings of `run_2013nt.py` the 2,013 nt demo is
+  the full configuration — ≈60 GB and ≈14 days on the GPU path, a figure that was
+  estimated and never measured — against ≈30 GB and ≈7 h for the CPU path in the
+  low configuration, and that 7 h was measured on an earlier build, not on this
+  checkout. `docs/REPRODUCTION_RESOURCES.md` §2 is the table; quote it.
 
 If they are against a deadline, offer the faster settings rather than the full run:
 fewer sampling steps and fewer replicas give a rougher structure in a fraction of the

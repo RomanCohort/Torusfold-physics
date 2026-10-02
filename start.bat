@@ -77,7 +77,7 @@ if not defined PY (
   echo.
   echo   No Python found.
   echo.
-  echo   Python 3.12 or newer is needed. Anaconda is NOT required: every
+  echo   Python 3.11 or newer is needed. Anaconda is NOT required: every
   echo   package the pipeline imports has a Windows installer on PyPI.
   echo.
   echo   1. Install Python from  https://www.python.org/downloads/
@@ -92,7 +92,7 @@ if not defined PY (
   echo   If you already have an interpreter somewhere else:
   echo       set TORUSFOLD_PYTHON=C:\path\to\python.exe
   echo   Or with conda, which also works:
-  echo       conda create -n torusfold -c conda-forge python=3.12 numpy scipy openmm pytorch
+  echo       conda create -n torusfold -c conda-forge python=3.11 numpy scipy openmm pytorch
   echo       conda activate torusfold
   echo       pip install ViennaRNA dm-tree freesasa transformers
   echo.
