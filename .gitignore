@@ -120,3 +120,17 @@ results/plan_c/
 _calib/
 # The empty upload slot the PDB-upload endpoint writes into.
 output_web/uploaded.pdb
+
+# ── Working-tree strays, parked rather than deleted (2026-10-02) ────────────
+# Five untracked files sat in the repository root and travelled with every
+# whole-folder copy of this checkout. docs/dev_machine_handoff.md had already
+# moved two of them out on the source machine (into a `_repo_strays/` folder that
+# does not exist here), and they came back when this copy was made -- which is why
+# the handoff says "the root is clean now" while it was not.
+#
+# They are kept, not removed, and _strays/README.md records what each one is, why
+# two of them are worth keeping and which two are duplicates. The rule this
+# directory follows is the one the rest of this file follows: a checkout must not
+# accumulate files that are not source, and a file that is deleted on one machine
+# and not another is worse than a file that is parked.
+_strays/
