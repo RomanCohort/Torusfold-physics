@@ -79,8 +79,14 @@ def test_every_global_parameter_in_the_built_system_is_read():
 
 
 def test_nonbonded_exceptions_cover_every_bonded_pair_exactly_once():
-    system, *_ = _build(L=30, pairs=[])
+    # The guard must come before _build(), not after it. It used to follow the call,
+    # and _build() reaches mm.System() inside openmm_gpu_refiner -- so in an
+    # environment without OpenMM this test did not skip, it died with
+    # `AttributeError: 'NoneType' object has no attribute 'System'`. That failure is
+    # what the CI gate reported as its only real red, and it was an artefact of the
+    # guard's position rather than a defect in the exception list being measured.
     openmm = pytest.importorskip("openmm")
+    system, *_ = _build(L=30, pairs=[])
     nb = [f for f in system.getForces() if isinstance(f, openmm.NonbondedForce)][0]
 
     actual = []

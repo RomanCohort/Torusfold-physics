@@ -635,22 +635,45 @@ GenBank as needed.
   (`.claude/skills/` and `.dsh/skills/`) drift apart, or if either breaks a rule
   that would make its harness ignore the file silently. Stdlib only, so it runs
   in CI.
-- `.gitlab-ci.yml` — runs the smoke suite on every push to keep `main` green.
+- `tests/test_ci_gate_is_visible.py` — holds the CI gate to its own scope: every
+  excluded module must still need its exclusion, and the coverage is printed so the
+  number in the log can be checked against the files on disk. A gate whose coverage can
+  shrink in silence is worse than a gate that is red.
+- **CI runs on both remotes** — `.gitlab-ci.yml` (the iGEM channel) and
+  `.github/workflows/ci.yml` (the mirror). Both run the same two jobs, and both files
+  say so, because two gates over one codebase that are allowed to diverge is the same
+  defect `test_skills_in_sync.py` exists to catch. `python scripts/validate_ci_config.py`
+  parses both locally: a pipeline file that does not parse fails silently from here.
+  - **Measured scope of the gate**: 36 test modules on disk, **24 excluded, 12
+    executed → 39 passed, 3 skipped in 4.4 s**. Of the 24, fifteen import torch (or call
+    `importorskip("torch")` at module level), eight reach torch through something they
+    import, and one is a standalone script. The CI runner has no torch and no GPU, so
+    this is a smoke gate, not the full suite.
+  - The exclusion list lives in `tests/conftest.py` with the measurement that produced
+    it. A collection error aborts the run, which is what makes the gate trustworthy: a
+    new module that cannot be collected fails CI rather than quietly reducing coverage.
+  - Both configs install with dependencies (`pip install -e .`, not `--no-deps`). The
+    previous GitLab config used `--no-deps` *and* ran a pytest it never installed, so
+    the gate could not pass and the pins in `pyproject.toml` were decorative — openmm
+    resolved to `8.6.1.dev` instead of the pinned `8.5.2`.
 - Run locally: `pip install -e . && python -m pytest -q tests`, or simply
   `pytest`. `testpaths` in `pyproject.toml` scopes the bare command to `tests/`,
   which matters: `scripts/` holds seven standalone `test_*.py` diagnostics that
   raise on import, so a bare `pytest` used to exit on a failure that was not one.
-- **279 passed, 1 skipped, 38 s** on the reference environment
+- **282 passed, 2 skipped, 56 s** on the reference environment
   (`C:\ana\envs\comfyui`, Python 3.11.15 / torch 2.12.0a0+rocm7.13.0a20260313 /
   OpenMM 8.5.2 / ViennaRNA 2.7.2). Re-measured 2026-10-02, replacing an earlier
-  "145 tests, 24 s" claim that had gone stale and then a "274 tests" count that
-  the new skill test moved. The sibling environment `C:\ana\envs\circrna3d` runs
-  the same suite as **278 passed, 2 skipped, 45 s** — it lacks the `[ml]` extras,
-  so the CUDA half of `test_table_potential_device.py` skips there. Both wall
-  times were taken with an unrelated MD job occupying the same machine, so treat
-  them as a spread rather than a benchmark. Most test files use
-  `pytest.importorskip`, so a numpy-only checkout runs a smaller suite that skips
-  rather than fails.
+  "145 tests, 24 s" claim that had gone stale and then a "279 tests" count that the new
+  CI-gate test moved. One of the two skips is `test_ci_gate_is_visible.py`'s opt-in
+  stale-exclusion probe (~50 s, one interpreter per excluded module); set
+  `TF_CHECK_CI_EXCLUSIONS=1` to run it. The sibling environment
+  `C:\ana\envs\circrna3d` runs the same suite as **282 passed, 2 skipped** — it lacks
+  the `[ml]` extras, so the CUDA half of `test_table_potential_device.py` skips there.
+  Both wall times were taken with an unrelated MD job occupying the same machine, so
+  treat them as a spread rather than a benchmark. Most test files use
+  `pytest.importorskip`, so a numpy-only checkout runs a smaller suite that skips rather
+  than fails — and the 23 modules that need torch at *collection* time, where skipping
+  is not possible, are excluded explicitly instead; see `tests/conftest.py`.
 - `python scripts/verify_headline.py --allow-known` — re-derives every number the
   shipped viewer displays, from committed files, with numpy. Needs no OpenMM, no
   torch, no GPU. It is the check to run when you want to know what in this repository
