@@ -1,209 +1,176 @@
 ---
 name: torusfold-predict
-description: "Predict the 3D structure of a circular RNA with TorusFold, for someone who works in a wet lab and has not run structural software before. Covers starting the tool, deciding whether a sequence can physically form a circle at all, preparing the sequence and dot-bracket inputs, choosing the settings that control how long a run takes, and reading the output without mistaking a self-consistency number for an accuracy measurement. Use when the user asks to predict, fold, model, or simulate a circRNA structure; asks why a prediction produced something that does not look circular, or took too long, or failed at Level 1; asks what a TorusFold number means (BSJ closure, bond RMSD, rsRNASP1, pair satisfaction, 3dRNAscore, DFIRE) or whether a result is good; asks how to run TorusFold, start its web interface, or resume an interrupted run; or asks whether their sequence is a sensible thing to predict."
+description: "Help a wet-lab biologist get a circular RNA structure predicted with TorusFold, by doing the work for them in natural language. They should never have to open a terminal, edit a file, choose a parameter, or know what a dot-bracket is. Use this whenever someone mentions a circRNA, circular RNA, a circle or ring structure, or a BSJ, and wants it modelled, folded, predicted, or simulated; whenever they paste an RNA sequence and ask what it looks like in 3D; whenever they ask whether a TorusFold result is any good, or what a number like closure, bond RMSD, rsRNASP1, pair satisfaction, 3dRNAscore or DFIRE means; whenever they ask why a prediction is taking so long, produced something that does not look like a ring, or stopped; and whenever they ask how to run, start, or set up TorusFold at all. Also use it when a sequence is too short for the chemistry to close a circle, which is the most common way a biologist gets a confidently wrong answer here."
 ---
 
-# Predicting a circRNA structure with TorusFold
+# Getting a biologist a circRNA structure without making them operate anything
 
-You are helping someone who understands RNA but not this software. Assume they do not
-know what a dot-bracket string is, what MD or REMD means, or why a "closure" number
-matters. Explain in their vocabulary, and never let a number stand without saying
-whether it is a measurement, a self-consistency check, or an estimate.
+The person you are helping knows RNA and knows their bench. They do not know this
+software, and they should not have to. Your job is to ask for the one thing only they
+can supply — the sequence — and to handle everything else: deciding whether the
+question is answerable, starting the tool, choosing settings, watching the run, and
+explaining what came back in their vocabulary.
 
-## Before anything: is this sequence a candidate?
+Rules for the whole conversation:
 
-**Check the length first, and say so out loud.** This is the single most useful thing
-you can do for a biologist here, because the failure it prevents is invisible in the
-output.
+- **Do not hand them a command to run.** Run it yourself.
+- **Do not hand them a choice of parameters.** Pick, and say why in one line.
+- **Never mention a filename, a path, or a port** unless they ask for it.
+- **Never let a number stand alone.** Say whether it is a measurement, a
+  self-consistency check, or an estimate.
+- If their sequence cannot answer their question, say so **before** spending an hour
+  of their time on it.
 
-A circular RNA has to bend back until its two ends meet. Closing a ring of `n`
-residues requires each residue to turn by `360/n` degrees — the n steps share one
-full turn — and the phosphodiester backbone only tolerates a few degrees before
-stacking and backbone terms resist:
+## Step 1 — ask for the sequence, and nothing else
 
-| length | turn needed per residue | |
+Ask for the sequence in one sentence. They may paste it, attach a file, or name a
+construct. They do **not** need to supply a secondary structure — the tool derives
+one itself. Do not ask for one, and if they offer one, accept it and move on.
+
+While you have it, check three things without asking:
+
+- **Characters.** `A C G U`, or `T` which is converted. Anything else is a typing
+  error or a different molecule — ask.
+- **Length.** This decides everything; see the next step.
+- **Is it actually circular?** A circRNA has no 5′ or 3′ end. If what they pasted has
+  ends that clearly cannot join, or they describe a linear construct, ask.
+
+## Step 2 — decide whether to run, before running
+
+**This is the most valuable thing you do in the whole task.** A circle has to bend
+back until its two ends meet, and closing a ring of `n` residues needs each residue
+to turn by `360/n` degrees:
+
+| length | turn per residue | outcome |
 | --: | --: | :-- |
-| 10 nt | 36° | not achievable |
-| 20 nt | 18° | not achievable |
-| 30 nt | 12° | approximately the ceiling |
+| 10 nt | 36° | impossible |
+| 20 nt | 18° | impossible |
+| 30 nt | 12° | roughly the limit |
 | 100 nt | 3.6° | fine |
+| 1000 nt | 0.36° | fine |
 
-**Below roughly 30 nt the pipeline still runs, every stage succeeds, and the
-structure it returns is not a ring.** Nothing in the output says this. If the
-sequence is short, tell the user before they spend two hours on it.
+**Below about 30 nt the software runs successfully, every stage completes, and the
+structure it returns is not a ring. Nothing in the output warns about this.** Left
+alone, you would hand a biologist a confident non-answer.
 
-Typical circRNAs are hundreds to thousands of nucleotides, so this mostly matters
-for test sequences and very short constructs. Full detail, measured, is in
-`docs/sequence_length_limits.md`.
+So, by length:
 
-## Getting it running
+- **Under ~30 nt** — say plainly that a circle of that length cannot close, so a
+  structure prediction is the wrong tool, and ask what they are actually trying to
+  learn. There may be a better question — about their BSJ junction, or their
+  construct's design — that needs no 3D at all. If they still want to see the
+  geometry, run it, but tell them first that the result will not be circular.
+- **30–150 nt** — fine, and quick enough to run without ceremony.
+- **Over ~150 nt** — fine, but **say how long it will take and ask before starting.**
+  Minutes for the early stages, then the molecular dynamics dominates. The 2,013 nt
+  demo wants 30–60 GB of memory and several hours. Get a yes first.
 
-The web interface is the intended route for someone who is not going to type
-commands:
+If they are against a deadline, offer the faster settings rather than the full run:
+fewer sampling steps and fewer replicas give a rougher structure in a fraction of the
+time. Those are `md_step_scale`, `n_rest2_replicas` and `metad_n_steps` — describe
+them as "a quick look" versus "thorough", not by name.
 
-```
-start.bat                # Windows: finds Python, checks the external tools, serves,
-                         # and opens http://127.0.0.1:8877
-start.bat --check        # report the environment and exit, start nothing
-```
+## Step 3 — start it if it is not already running
 
-Then paste the sequence in the left panel and press **Predict**. A **Demo structure**
-button loads a finished 2,013 nt model, if they want to see a good result before
-committing to a run.
+Check whether the tool is answering:
 
-For someone who would rather not use a browser:
+    curl -s http://127.0.0.1:8877/api/health
 
-```
-activate_deps.bat                  # sets the external-tool paths; starts nothing
-python run_2013nt.py               # a full end-to-end prediction
-python scripts/verify_headline.py  # recompute the published numbers, numpy only
-```
+If nothing answers, start it from the repository root and wait for it to come up. On
+Windows that is `start.bat`. Two flags are worth knowing: `--check` reports the
+environment and exits having started nothing, and `--setup` re-searches for the
+external tools. A missing external predictor does not stop a run — it makes the
+ensemble weaker — so it is worth knowing about but not worth blocking on.
 
-`run_2013nt.py` reads `sequence.txt` at the repository root if present, otherwise the
-committed `artifacts/2013nt/sequence.txt`. It is the wrong entry point for a new
-sequence — for that, use the web interface, or call
-`torusfold.scheme2.isrnaclong.isrnaclong_pipeline(sequence=..., secondary_structure=..., output_dir=...)`
-directly.
+## Step 4 — submit it, then keep them informed
 
-If the external predictors are missing, `start.bat --check` names each one and
-whether it resolved. A missing predictor does not stop the run: it is skipped and the
-ensemble is weaker. That is why the check exists.
+Submit the sequence and let the server own the run. **Do not run the pipeline in the
+foreground**: it takes hours, and you would be unable to report anything until it
+finished.
 
-## The input
+    POST http://127.0.0.1:8877/api/predict
+    {"sequence": "<their sequence>", "params": {}}
 
-**Sequence.** Plain text, `ACGU` or `ACGT` (T is converted to U), FASTA headers
-starting with `>` are ignored. The web panel also accepts a dropped `.fa`, `.fasta`
-or `.txt` file.
+That returns a `job_id` immediately. Then poll `GET /api/current` and translate what
+you see into their language:
 
-**Secondary structure.** Dot-bracket, the same length as the sequence: `(` and `)`
-are paired, `.` is unpaired. For `GGAAACGCGAAACG` that is `((((....))))..`.
+| what you see | what to tell them |
+| :-- | :-- |
+| `stage_index` of `stage_total` | "Stage 4 of 12 — building the coarse-grained fold" |
+| `eta.state = "projected"` | "Still calibrating the time estimate" — at this point it is a guess |
+| `eta.state = "estimated"` | Give the range as a range. It narrows as stages complete |
+| a long, silent stage | Normal. The heavy dynamics stages print little. Do not report it as stuck |
 
-Two rules that matter:
+Only one prediction runs at a time and a second request is refused. If one is already
+running, say so rather than trying to start another.
 
-- **The lengths must match exactly.** A mismatch stops the run at Level 1 with a
-  length error. Count the characters.
-- **Do not pair the two ends of the sequence to each other.** The ends have to come
-  together to close the circle, so a base pair holding them apart works against the
-  thing being predicted. If a folding tool handed the user a dot-bracket that pairs
-  position 1 with position n, that pair should go.
+**The run is resumable.** If it is interrupted, restarting continues from the last
+finished stage rather than from the beginning — but only when the sequence and every
+setting match. If it ever starts over, the reason is recorded in the tool's Resume
+panel; check there before telling them it "just restarted".
 
-If they have no dot-bracket, the pipeline can build restraints from a predicted one.
-Ask what they have rather than guessing.
+## Step 5 — explain what came back
 
-## Choosing settings
+Lead with the shape, not the numbers: did it close into a ring, or not. Then the
+numbers, each labelled for what it is.
 
-Defaults are sensible. Four settings are worth changing, and all four trade time for
-thoroughness. The panel groups them under **Sampling** and **Enhanced sampling**.
+| what to report | what it actually is |
+| :-- | :-- |
+| **Closure** — the distance between the two ends | **A measurement.** Near zero for a circle; the finished 2,013 nt model reads 5.898 Å. A large value means it did not close |
+| **Bond geometry** | **A measurement.** Small is healthy; under 1 Å is good |
+| **Compactness / shape** | **A measurement.** A ring-like fold is far more compact than a straight chain of the same length |
+| **rsRNASP1** | A real statistical score — but see the two traps below |
+| **Pair satisfaction** | **A self-consistency check, not accuracy.** See below |
+| **DFIRE, 3dRNAscore** | Show `n/a` because this software does not compute them. Not a failure |
 
-| setting | default | what changing it does |
-| :-- | --: | :-- |
-| `md_step_scale` | 0.1 | Multiplies the per-round Level 2 step count. **The dominant cost.** 0.05 for a quick look, 0.3–0.5 when a structure is not converging |
-| `n_rest2_replicas` | 16 | Replica count. One CPU core each. 4 for a quick look |
-| `metad_n_steps` | 200000 | Total Level 3.5 steps. 20000 for a quick look |
-| `n_relax_rounds` | 6 | Level 2 iterations. Early stopping usually cuts this short anyway |
+**rsRNASP1 has two traps.** The PASS/FAIL threshold shown beside it has never been
+calibrated against a reference set, so a PASS or FAIL there means nothing — do not
+repeat it as a verdict. And the value is only comparable between sequences of the
+same length: the measured references are crystal 1a9nR (27 nt) -3146.6, crystal 1h4sT
+(61 nt) -7757.6, and this pipeline's own 139 nt prediction **+2289.3**, which is
+positive. Comparing across lengths is meaningless.
 
-Two more worth knowing:
+**"Pair satisfaction" is not an accuracy score, and the documentation once said it
+was.** It reports the fraction of base pairs *found in the structure* that sit at
+hydrogen-bond distance, which partly restates the geometry it was measured from. The
+figure the documentation once attributed to `compute_pair_satisfaction` is 47.2% on
+the delivered structure, not the 100.0% shown elsewhere. Only one quantity here is
+inferred from the structure; two others share the name "pair rate" and score a
+predicted pair list against the geometry that same list was used to build.
 
-- `use_rhofold` (default **off**) — turns on the RhoFold+/RNAbpFlow/trRosettaRNA2
-  ensemble for the first-stage prediction. Better and slower, and it needs the
-  external tools installed.
-- `use_pyrosetta` (default on) — full-atom refinement. Needs WSL with PyRosetta.
-  **Skips in under a second when absent**, so leaving it on is safe.
+**What has actually been validated: one thing.** PDB 2OIU, the only experimentally
+resolved circRNA structure — starting from the crystal, this software's relaxation
+ends 1.83 Å from it. That says the physics does not distort a known structure. It is
+**not** evidence that a prediction from sequence alone is accurate. No accuracy figure
+against experimental ground truth exists for a de-novo prediction, and you must not
+imply one. If they ask how accurate this is, the honest answer is: the geometry is
+physically consistent and the closure is real, and there is no experimental structure
+to score it against.
 
-**Set expectations on time.** This is not a fold-prediction web server that answers
-in seconds; it runs molecular dynamics. A short test sequence is tens of minutes to a
-couple of hours. The committed 2,013 nt demo wants **30–60 GB of memory and hours to
-days**. Say this before the run starts, not after.
+## How to answer what they will actually ask
 
-The interface shows a stage counter and an estimate that sharpens as measured stages
-accumulate: early on it reads "projected" and is a guess; later "estimated" with a
-range. A wide range early is expected, not a fault.
+**"Is it good?"** Report closure and bond geometry as facts, say the rest is
+self-consistency, and do not invent a quality grade.
 
-**Runs are resumable.** Every stage writes a checkpoint and `resume` is on by
-default, so an interrupted run continues from the last finished stage. The checkpoint
-is reused only when the sequence *and* every content-bearing setting match; otherwise
-it is set aside and the run starts over rather than mixing two configurations. The
-**Resume** tab in the right panel reports which will happen, and can roll back to an
-earlier level. If a run unexpectedly starts from scratch, that tab is where the
-reason is written.
+**"Why doesn't it look like a ring?"** Check the length first — under ~30 nt it cannot
+be, by arithmetic. Otherwise the run may still be early: during the dynamics stages
+the panel shows a working trace, not the answer.
 
-## Reading the output
+**"Why is it taking so long?"** It runs molecular dynamics, not a lookup. Give them
+the stage count and the estimate, and offer the faster settings only if they want
+them.
 
-### The picture
+**"Can I stop it and change something?"** Yes, and it resumes from the last finished
+stage. Changing the sequence or a setting starts it over deliberately, because mixing
+two configurations would produce a structure belonging to neither.
 
-The 3D panel shows the newest structure the run has produced. A coarse-grained trace
-early on is one phosphate per residue, drawn as sticks; the finished all-atom model
-is drawn as a ribbon. **A model that is still running looks worse than it will** —
-that is expected, not a failure.
+**"Can I look at the structure myself?"** Tell them the page at
+`http://127.0.0.1:8877/` shows it in 3D, and that it can be exported as a PDB for
+PyMOL or ChimeraX. This is the one place a URL is worth giving.
 
-What "correct" looks like at the end: a closed loop, no long straight run of
-backbone, no chain passing through itself.
+## Where the detail is, if you need it
 
-### The numbers, and which kind each one is
-
-This is where a biologist is most likely to be misled, so be explicit about which
-kind of number each one is.
-
-| shown as | what it is | how to read it |
-| :-- | :-- | :-- |
-| **BSJ closure** | distance between the first and last phosphate | **A measurement.** For a circle it should be small — the delivered 2,013 nt model reads 5.898 Å. A large value means it did not close |
-| **Bond RMSD** | deviation of adjacent-phosphate distances from A-form geometry | **A measurement.** Should be well under 1 Å; the delivered model reads 0.0082 Å |
-| **Shape / Rg** | radius of gyration, and whether the shape is compact or elongated | **A measurement.** A ring-like fold has an Rg far below a straight rod of the same length |
-| **rsRNASP1** | statistical potential energy of the structure | **A real score, but read it carefully — see below** |
-| **pair satisfaction** | fraction of base pairs *found in the structure* at hydrogen-bond distance | **Self-consistency, not accuracy.** See the warning below |
-| **DFIRE**, **3dRNAscore** | — | Shown as `n/a`. **This pipeline does not compute them.** That is not a failed run |
-
-**rsRNASP1 has two traps, both written into the source comments.** First, the
-PASS/FAIL threshold at -2000 has no recorded provenance — it has never been
-calibrated against a reference set, so do not present a PASS or FAIL as meaningful.
-Second, **the value is only comparable between sequences of the same length.** The
-measured reference points: crystal 1a9nR (27 nt) -3146.6, crystal 1h4sT (61 nt)
--7757.6, and this pipeline's own 139 nt prediction **+2289.3**, which is positive.
-Comparing across lengths is meaningless.
-
-**"Pair satisfaction" is not an accuracy score, and part of the documentation once
-said it was.** An earlier version attributed the panel's figure to
-`pdb_analyzer.compute_pair_satisfaction`; run on the delivered structure that
-function returns **47.2%**, not the 100.0% shown elsewhere. Three different
-quantities in this codebase are called "pair rate" and only one is inferred from the
-structure — the other two score a predicted pair list against the geometry that same
-list was used to build, which is close to tautological. The correction is recorded in
-`docs/REPRODUCTION_RESOURCES.md` section 5.
-
-### What has actually been validated
-
-Exactly one experimental cross-check exists in this repository, and it is worth
-naming so nobody claims more: **PDB 2OIU**, the only experimentally resolved circRNA
-structure. Starting from the crystal structure, the Level-2 relaxation takes 17
-minutes on CPU and ends at **1.83 Å RMSD** from the crystal. That is evidence the
-force field does not distort a known structure. It is not evidence that a prediction
-from sequence alone is accurate.
-
-Everything else is internal self-consistency. **No accuracy claim against
-experimental ground truth is available for a de-novo prediction**, and you should say
-so rather than let a good-looking structure imply otherwise.
-
-## Reporting back
-
-When you hand results to the user, include:
-
-1. The sequence length, and whether it can form a circle at all.
-2. Which settings were used, if not the defaults.
-3. BSJ closure and bond RMSD, named as measurements.
-4. That pair satisfaction and the shape numbers are self-consistency checks.
-5. The 2OIU result as the only experimental validation, if validation comes up.
-6. Any stage that was skipped, and why — a missing external tool or an absent
-   checkpoint both cause skipping, and `start.bat --check` and the **Resume** tab are
-   where that is visible.
-
-## Where the details are
-
-- `docs/sequence_length_limits.md` — why short sequences cannot close, measured
-- `docs/REPRODUCTION_RESOURCES.md` — hardware, runtimes, the access path for a reader
-  who will not run anything, and the pair-satisfaction correction
+- `docs/sequence_length_limits.md` — the closing arithmetic, measured
+- `docs/REPRODUCTION_RESOURCES.md` — runtimes, memory, and the pair-satisfaction correction
 - `docs/DEPLOY_EXTERNAL.md` — installing the external predictors
-- `docs/silent_defects.md` — the force-field defects that were found and fixed, each
-  with the measurement that found it
-- `README.md` — install, usage, and the AI/model disclosure table
-- `artifacts/2013nt/quality.json` — every number the shipped viewer displays, with a
-  note on whether a third party can recompute it
+- `artifacts/2013nt/quality.json` — every number the interface shows, with whether a third party can recompute it
