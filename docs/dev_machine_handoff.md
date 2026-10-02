@@ -232,3 +232,46 @@ git checkout HEAD -- src/torusfold/scheme2/torch_cgsim.py          # 用完立�
 
 torch_cgsim 自己挑设备（torch.device("cuda" if torch.cuda.is_available() else "cpu")），
 determine_k_bb.py、check_field_after_fix.py 等照此。ROCm 机器上 torch 的 cuda 命名空间同样可用。
+
+## 九、**不要按镜像名杀进程** —— 这台机器上跑着多个互不相干的活
+
+写这条是因为它今天造成了实际损失：`armA` 第一次启动就死了，A/B 六次夭折。`results/plan_c/run_armA.cmd:14-30`
+已经记了现场（`exit code -1`，正是 `Stop-Process -Force` 留下的；随后 120 个孤儿 spawn worker，
+子进程在 `reduction.duplicate` 里报 `PermissionError [WinError 5]` —— 父进程没了，句柄复制不了）。
+
+**禁止**：
+
+```
+taskkill /F /IM python.exe          # 杀掉这台机器上每一个 python
+Stop-Process -Name python -Force    # 同上
+Get-Process python | Stop-Process   # 同上，没有 CommandLine 过滤
+```
+
+**要这样** —— 按 CommandLine 认领，再按 PID 杀：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
+  Where-Object { $_.CommandLine -like '*serve.py*' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+同一目录下的三个 ps1（`extend_when_round3_done` / `reload_when_round0_done` /
+`switch_when_round4_done`）已经是这个写法：`Where-Object { $_.CommandLine -like '*ibi_loop.py*' }`
+之后 `taskkill /PID $p.ProcessId /T /F`。**照抄它们的形状**，不要简化成按名字。
+
+### 已经存在的防御，不要拆掉
+
+`C:\ana\envs\circrna3d\python_ibiA.exe` 和 `C:\ana\envs\comfyui\python_ab.exe`
+是**解释器的副本，只是换了个名字**。名字里带下划线不是笔误：
+
+- `multiprocessing.spawn` 用 `sys.executable`，所以整个 worker 树都继承这个私有名字
+- 一次针对 `python.exe` 的宽杀**碰不到它们**
+
+所以看到 `python_ibiA.exe` / `python_ab.exe` 在跑，**那就是正在进行的实验，别当成陌生进程清掉**。
+`run_armA.cmd:42` 的 `set PY=...python_ibiA.exe` 就是这套防御的接入点。
+
+### 顺带一条：不要用会等待的长命令去轮询别人的实验
+
+跑在同一个工作区的会话之间不共享状态。一个用 `Get-Process python` 或
+`taskkill /IM` 做"清理"的会话，等于把别人跑了几小时的东西一起清掉，而它自己看不到这一点。
+
