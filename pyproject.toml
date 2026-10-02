@@ -18,9 +18,17 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Chemistry",
 ]
 dependencies = [
+    # numpy and scipy carry no version here on purpose: no version of either was ever
+    # recorded in this repository, so any pin would be a guess wearing a lock's clothes.
+    # See requirements.lock ("UNKNOWN") and environment.yml.
     "numpy",
     "scipy",
-    "openmm",
+    # OpenMM IS recorded, in three independent places, so it is pinned:
+    #   docs/pipeline_audit_2026-09-13.md:1026 (the reference env),
+    #   scripts/measure_cpu_constants.py:42 (the platform the constants were measured on),
+    #   and the delivered structure itself -- artifacts/2013nt/isrnaclong_final.pdb
+    #   carries "REMARK 1 CREATED WITH OPENMM 8.5.2, 2026-08-18".
+    "openmm==8.5.2",
 ]
 
 [project.optional-dependencies]

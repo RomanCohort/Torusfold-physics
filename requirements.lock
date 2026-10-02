@@ -1,0 +1,47 @@
+# TorusFold-Hybrid — reference environment, pinned where a version was recorded.
+#
+# WHAT THIS FILE IS. `requirements.txt` is the loose, human-facing list; this is the
+# recorded one. Every pin below carries the file that recorded it, because a pin
+# without a source is a guess, and this repository's rule is that figures are never
+# estimated. Where no version was ever recorded, the entry says so instead of
+# inventing a range that would look like a lock and behave like a wish.
+#
+# THE ENVIRONMENT THESE COME FROM. `C:\ana\envs\circrna3d` (conda, Windows) is the
+# CPU environment the pipeline and its tests were run in
+# (docs/pipeline_audit_2026-09-13.md:1026, :534). The GPU environment is
+# `C:\ana\envs\comfyui` (:535, :519). The tests pass there: 145 tests in 24 s (:1027).
+# Nothing here was measured on a second machine, so nothing here is known to be
+# sufficient — it is known to be what ran.
+#
+# HOW TO CLOSE THE GAPS, on the reference machine:
+#     conda activate circrna3d
+#     python -m pip freeze > requirements.freeze.txt
+# and replace the UNKNOWN block below with the numpy/scipy lines from that file,
+# keeping this header. A full freeze is more useful than the three lines below: it is
+# what makes `pip install -r` reproduce the environment rather than approximate it.
+#
+# ── core, pinned ───────────────────────────────────────────────────────────────
+openmm==8.5.2          # docs/pipeline_audit_2026-09-13.md:1026; also stamped into the
+                       # delivered structure: artifacts/2013nt/isrnaclong_final.pdb,
+                       # "REMARK 1 CREATED WITH OPENMM 8.5.2, 2026-08-18"
+ViennaRNA==2.7.2       # docs/pipeline_audit_2026-09-13.md:1026; independently, the two
+                       # places the code records what it measured against:
+                       # src/torusfold/scheme2/isrnaclong.py:497 and multisource_ss.py:39
+pytest==9.1.1          # docs/pipeline_audit_2026-09-13.md:1027 (145 tests, 24 s)
+
+# ── torch, pinned per path ─────────────────────────────────────────────────────
+# CPU path (tests, IBI sampler, everything that does not touch the GPU):
+torch==2.13.0+cpu      # docs/pipeline_audit_2026-09-13.md:1026, :534
+# GPU path (AMD APU, ROCm) — a version string that only exists on that machine:
+#   torch==2.12.0a0+rocm7.13.0a20260313   # :519, Radeon 8060S / gfx1151, hip 7.2.0
+# The two are not interchangeable and the pipeline does not select between them.
+
+# ── UNKNOWN: never recorded anywhere in this repository ────────────────────────
+# numpy and scipy are imported by nearly every module and their exact versions are
+# not written down in any doc, manifest or result file. They are left unpinned rather
+# than given a plausible range, because a plausible range is exactly the kind of
+# number that gets mistaken for a measurement. Fill them from the freeze above.
+#   numpy  >= 1.23   (the lower bound requirements.txt already claimed; unverified)
+#   scipy  >= 1.11   (same)
+# Python: the verified interpreter is 3.11. pyproject.toml still advertises >=3.9,
+# which was never re-checked against this list.

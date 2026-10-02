@@ -100,7 +100,7 @@ in `openmm_gpu_refiner.py`, `rest2_remd_2d.py`, `metadynamics_sampler.py`,
 - REST2 × T-REMD and well-tempered metadynamics enhanced sampling
 - 1EHZ-crystal-template all-atom reconstruction + Amber14-OL3 refinement
 - Atomic checkpoint resume, per-level success guards
-- Web UI with SSE log streaming and Mol* 3D viewer
+- Web UI with SSE log streaming and a 3Dmol 3D viewer
 - Per-residue confidence + immune/structure fingerprints
 
 ## Installation
@@ -159,7 +159,7 @@ Per-stage step counts for the current code are tabulated in
 
 ```bash
 python serve.py            # default port 8877
-# open http://127.0.0.1:8877  (SSE log stream + Predict API + Mol* 3D viewer)
+# open http://127.0.0.1:8877  (SSE log stream + Predict API + 3Dmol viewer)
 ```
 
 Pre-built interactive demo of the 2013 nt prediction:
@@ -193,7 +193,7 @@ variables (no hard-coded machine paths in this repository):
 │   ├── scheme2/           pipeline core (47 modules): folding, RL, REMD/MetaD,
 │   │                      NCM detection, ensemble predictor wrappers, Amber refine
 │   ├── circrna_library/   CIF/PDB ingest + circular QC (gemmi)
-│   └── web/               browser frontend (Mol*, live logs, prediction panel)
+│   └── web/               browser frontend (3Dmol, live logs, prediction panel)
 ├── scripts/               curated analysis & diagnostics
 └── docs/                  architecture, viewer, library notes
 ```
@@ -234,24 +234,33 @@ Jilin University.
 
 ## For judges & non-experts (quick tour)
 
-You do **not** need to run the full pipeline to evaluate this tool:
+You do **not** need to run the full pipeline to evaluate this tool, and you should
+not try to: the 2,013 nt demo wants 30-60 GB of memory and hours to days of wall
+time. What you can do instead, in increasing order of effort:
 
 1. **See a real predicted structure in seconds** — open
    [`docs/circrna_3d_viewer.html`](docs/circrna_3d_viewer.html) in any browser:
    it loads the pre-built 2013 nt prediction with no install (hover, rotate,
-   recolor).
-2. **Try the web UI** — `python serve.py` serves the Mol* viewer with live
-   logs and a Predict API at `http://127.0.0.1:8877`.
-3. **Reproduce the headline result** — install (below), put the 2013 nt
-   sequence in `sequence.txt`, run `python run_2013nt.py`, and inspect
-   `output_2013nt/isrnaclong_final.pdb`.
+   recolor). The same structure is committed as a plain PDB at
+   [`artifacts/2013nt/isrnaclong_final.pdb`](artifacts/2013nt/isrnaclong_final.pdb)
+   — 42,831 atoms, openable in Mol\*, PyMOL or ChimeraX.
+2. **Check the numbers yourself, with numpy and nothing else** —
+   `python scripts/verify_headline.py`. It re-derives every figure the viewer
+   displays from the committed files, prints which ones do not come back, and says
+   why. It takes seconds. `artifacts/2013nt/quality.json` is the same information
+   in machine-readable form.
+3. **Try the web UI** — `python serve.py` serves the 3Dmol viewer with live
+   logs and a Predict API at `http://127.0.0.1:8877`. Its heavy imports are lazy,
+   so it starts on numpy alone.
+4. **Run the pipeline** — install (below), then `python run_2013nt.py`; it reads
+   the committed demo sequence from `artifacts/2013nt/sequence.txt` unless a local
+   `sequence.txt` overrides it, and writes `output_2013nt/isrnaclong_final.pdb`.
+   This one needs OpenMM, ViennaRNA, the external predictors for the full
+   ensemble, and (ideally) a GPU — see
+   [docs/DEPLOY_EXTERNAL.md](docs/DEPLOY_EXTERNAL.md).
 
-Running the full ensemble needs external predictors and (ideally) a GPU — see
-[docs/DEPLOY_EXTERNAL.md](docs/DEPLOY_EXTERNAL.md).
-
-Hardware requirements, measured runtime profiles (≈7 h CPU for the 2,013 nt
-demo, dominated by the Level-2 REMD sampling; GPU-mode notes) and a
-three-level access guide — view-only / download / reproduce — are in
+Hardware requirements, measured runtime profiles and a three-level access guide —
+view-only / download / reproduce — are in
 [docs/REPRODUCTION_RESOURCES.md](docs/REPRODUCTION_RESOURCES.md).
 
 ## AI / model disclosure
@@ -591,8 +600,17 @@ GenBank as needed.
   `torusfold.scheme2` package (needs only numpy).
 - `.gitlab-ci.yml` — runs the smoke suite on every push to keep `main` green.
 - Run locally: `pip install -e . && python -m pytest -q tests`.
+- **145 tests, 24 s** on the reference environment
+  (`C:\ana\envs\circrna3d`, Python 3.11 / OpenMM 8.5.2 / ViennaRNA 2.7.2) —
+  `docs/pipeline_audit_2026-09-13.md:1027`. Most test files use
+  `pytest.importorskip`, so a numpy-only checkout runs a smaller suite that skips
+  rather than fails.
+- `python scripts/verify_headline.py` — re-derives every number the shipped viewer
+  displays, from committed files, with numpy. Needs no OpenMM, no torch, no GPU.
+  It is the check to run when you want to know what in this repository is actually
+  reproducible rather than reproducible in principle.
 
 ## License
 
 [Apache-2.0](LICENSE). External components retain their own licenses
-(RNAbpFlow, TriRNASP, ViennaRNA, Mol*, RhoFold+, trRosettaRNA2, OpenMM).
+(RNAbpFlow, TriRNASP, ViennaRNA, 3Dmol, RhoFold+, trRosettaRNA2, OpenMM).

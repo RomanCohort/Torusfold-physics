@@ -7,11 +7,27 @@ def main():
     import numpy as np
     from openmm.app import PDBFile
 
-    OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "output_2oiu")
+    REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    OUT = os.path.join(REPO, "output_2oiu")
     os.makedirs(OUT, exist_ok=True)
 
     # ── 1. Parse 2OIU ──
-    pdb = PDBFile(os.path.join(OUT, "2oiu.pdb"))
+    # Search order: this benchmark's own working copy, then the committed crystal
+    # structure. The committed one exists so this check runs from a fresh clone --
+    # before it did, the run died on a missing output_2oiu/2oiu.pdb that nothing
+    # in the repository produced (see docs/REPRODUCTION_RESOURCES.md, L2).
+    src = os.environ.get("TF_2OIU_PDB")
+    if not src:
+        for cand in (os.path.join(OUT, "2oiu.pdb"), os.path.join(OUT, "2OIU.pdb"),
+                     os.path.join(REPO, "artifacts", "2oiu", "2OIU.pdb")):
+            if os.path.exists(cand):
+                src = cand
+                break
+    if not src or not os.path.exists(src):
+        raise SystemExit("2OIU.pdb not found. Expected artifacts/2oiu/2OIU.pdb "
+                         "(committed) or set TF_2OIU_PDB to a local copy.")
+    print(f"2OIU source: {os.path.relpath(src, REPO)}")
+    pdb = PDBFile(src)
     topo = pdb.topology
     positions = pdb.positions
 

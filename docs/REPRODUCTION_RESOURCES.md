@@ -3,6 +3,17 @@
 > Judge-facing reference (English). All figures were measured on the team's
 > reference machine, September 2026. Figures marked [TBD] are measurements
 > still running or not yet collected — they are never estimated.
+>
+> **2026-10-01 — what changed here, and why.** This page described a four-step
+> access path in which three of the four steps could not be taken. The demo
+> sequence and the predicted structure were git-ignored, no release existed, and
+> `scripts/benchmark_2oiu.py` read an input that nothing in the repository wrote.
+> The audit note at `docs/pipeline_audit_2026-09-13.md:1022` had already recorded
+> the consequence for the Level 0 path. That is fixed: the outputs are in
+> `artifacts/`, the crystal structure is too, and `scripts/verify_headline.py`
+> re-derives the published numbers from committed files with numpy alone. One
+> claim did not survive being checked and is corrected in §5 (pair satisfaction).
+> Nothing else in this document was re-measured, so the [TBD] markers still stand.
 
 ## 1. Reference hardware
 
@@ -88,14 +99,24 @@ search. The search is carried by the CG fold and the segmented ensemble.
 Level 3 (RL fine-tuning) trains a policy and runs no MD; Level 2.6 (PyRosetta)
 is conditional; Level 5.5 (PPR repair) is a geometric repair pass with no MD.
 
-## 3. Three-level access for judges (no one needs to run the full pipeline)
+## 3. Four-level access for judges (no one needs to run the full pipeline)
 
 | Level | What you get | Effort | Where |
 |---|---|---|---|
-| L0 — View | Interactive 3D of the predicted 2,013 nt structure (42,831 atoms, Level 4.9 PPR repaired) | Open a file in a browser | `docs/circrna_3d_viewer.html` (fully self-contained: structure + 3Dmol.js + pako inlined; opens offline, no network needed) |
-| L1 — Download | Full-atom PDB + per-level outputs + quality JSON | 1 click | GitLab release artifact at Wiki Freeze + Zenodo (DOI at freeze) |
-| L2 — Force-field check | 2OIU (≈100 nt; only experimentally resolved circRNA): X-ray structure → Level-2 relaxation → RMSD vs crystal | **17 min (CPU), measured** — final RMSD **1.83 Å** | Evidence that the force field does not distort known structures; see wiki Validation page |
-| L3 — Full run | End-to-end 2,013 nt all-atom structure | Memory 30–60 GB depending on path; wall time must come from a fresh measurement (see §1 note) | `python run_2013nt.py` — adjust the call arguments for a shorter run (see README and §2.1) |
+| L0 — Verify | Every number the viewer displays, re-derived from committed files | `python scripts/verify_headline.py` — seconds, **numpy only** | `scripts/verify_headline.py`; the same data in `artifacts/2013nt/quality.json`, which names the entries that do *not* come back and why |
+| L1 — View | Interactive 3D of the predicted 2,013 nt structure (42,831 atoms, Level 4.9 PPR repaired) | Open a file in a browser | `docs/circrna_3d_viewer.html` (fully self-contained: structure + 3Dmol.js + pako inlined; opens offline, no network needed) |
+| L2 — Download | Full-atom PDB + the demo sequence + the 2OIU crystal structure | 1 click, already in the repository | `artifacts/2013nt/isrnaclong_final.pdb`, `artifacts/2013nt/sequence.txt`, `artifacts/2oiu/2OIU.pdb`. Archived copies (per-level outputs, quality JSON, DOI) are still to come at Wiki Freeze / Zenodo |
+| L3 — Force-field check | 2OIU (≈100 nt; only experimentally resolved circRNA): X-ray structure → Level-2 relaxation → RMSD vs crystal | **17 min (CPU), measured** — final RMSD **1.83 Å**; needs OpenMM + ViennaRNA | `python scripts/benchmark_2oiu.py`, reading the committed crystal structure. Evidence that the force field does not distort known structures |
+| L4 — Full run | End-to-end 2,013 nt all-atom structure | Memory 30–60 GB depending on path; wall time must come from a fresh measurement (see §1 note) | `python run_2013nt.py` — it falls back to the committed demo sequence, so it starts; adjust the call arguments for a shorter run (see README and §2.1) |
+
+*Why L0 comes first. A level that says "reproduce the headline result" and then
+asks for 30 GB and a day is not a reproduction path, it is a description of the
+authors' machine. What a reader can actually check is a number, and the numbers are
+now checkable: `verify_headline.py` re-reads the committed structure and the
+committed IBI histograms with numpy and reports 20 of 32 checks reproducing, with
+the other 12 localised to one coordinate (`intra_pc`, off by 2.2-4.2x in all
+twelve committed runs) and explained in its own output. That ratio being published
+is the point; a clean 32/32 would have meant the checks were too weak.*
 
 ## 4. External tools (why setup is non-trivial, and what it costs)
 
@@ -118,13 +139,31 @@ All machine-specific paths are environment variables — no hard-coded paths.
 ## 5. Known-limitation cross-check (single source of truth)
 
 - Viewer stat panel (Level 4.9 PPR repaired structure): BSJ closure 5.898 Å;
-  bond RMSD 0.0082 Å; pair satisfaction **100.0%** — 100% of the residue pairs
-  *detected in the 3D structure* within 15 Å that are Watson–Crick complements
-  (the high-confidence pairing signal) lie within 12 Å (H-bond distance);
-  computed by `pdb_analyzer.compute_pair_satisfaction` on the delivered
-  structure. 3dRNAscore 27.18; global RMSD 1.23 Å. **All figures are internal
-  self-consistency metrics of the PPR-repaired model — none are comparisons
-  against predicted base pairs or experimental ground truth.**
+  bond RMSD 0.0082 Å; 3dRNAscore 27.18; global RMSD 1.23 Å. **All figures are
+  internal self-consistency metrics of the PPR-repaired model — none are
+  comparisons against predicted base pairs or experimental ground truth.**
+  `artifacts/2013nt/quality.json` carries each of them with the recipe that
+  re-derives it, if one exists.
+- **Correction, measured 2026-10-01: "pair satisfaction 100.0%" is not what
+  `pdb_analyzer.compute_pair_satisfaction` returns.** An earlier version of this
+  file attributed the panel's 100.0% to that function. Run on the committed
+  structure it returns **47.2%**: 5,532 P-P pairs within 15 Å, 1,723 of them
+  Watson–Crick complements, 814 of those within 12 Å. Three different quantities in
+  this codebase are called "pair rate" and only one of them is structure-inferred:
+
+  | Quantity | Definition | Value on the delivered structure |
+  |---|---|---|
+  | `pdb_analyzer.compute_pair_satisfaction` | WC-complement pairs found within 15 Å, fraction of them within 12 Å — inferred from the structure alone | **47.2%** |
+  | `isrnaclong._compute_pair_rate(coords, pairs)` | fraction of the *predicted* pair list with P-P < 12 Å; the pipeline prints it as "CG pair_rate (P-P<12A)" | the 100% family |
+  | `isrnaclong._validate_structure` → `pair_rate` | the same at 15 Å | the 100% family |
+
+  The panel's 100.0% is consistent with the second and third, not with the first.
+  They are not the same measurement and should not share a label: the second and
+  third score a pair list against the geometry it was derived from, so they are near
+  tautological on any structure that is used to generate its own pairs. Whether the
+  panel label, this file, or neither changes is a maintainer decision; the
+  measurement is here so the decision is made on a number. It is re-run by
+  `scripts/verify_headline.py` on every invocation.
 - Experimental ground truth: only one circRNA structure exists (PDB 2OIU).
   2OIU is used as a force-field validity test: starting from the X-ray
   structure, the Level-2 relaxation takes 17 min (CPU) and ends at

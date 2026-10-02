@@ -1,0 +1,85 @@
+{
+  "_what": "The delivered 2013 nt model, and the numbers the shipped viewer displays for it. Every entry says whether a third party can recompute it from the committed files, and with what.",
+  "artifact": "artifacts/2013nt/isrnaclong_final.pdb",
+  "artifact_sha256": "88B226AD0B3FEE87090E14E4AD598C4F589E09DFFE6DBFC4C4436845D429EDB8",
+  "artifact_provenance": {
+    "decoded_from": "docs/circrna_3d_viewer.html",
+    "payload": "var pdbB64 (gzip + base64), 956,464 base64 chars -> 3,469,391 chars of PDB",
+    "payload_b64_sha256": "8001177b7fafe9d141b9ce2f8f533d48eaa2e633252b0285c11c8f28a536bc8d",
+    "pdb_remark_1": "REMARK   1 CREATED WITH OPENMM 8.5.2, 2026-08-18",
+    "decode_tool": "scripts/extract_viewer_payload.py",
+    "is_a_rerun": false,
+    "note": "Decoded, not re-run. The run that produced this structure is not in this repository (docs/dev_machine_handoff.md, and the provenance note in docs/REPRODUCTION_RESOURCES.md section 1). These are the same bytes the viewer renders."
+  },
+  "panel_source": "docs/circrna_3d_viewer.html, the #stats block (the Prediction panel)",
+  "entries": [
+    {
+      "metric": "atoms",
+      "displayed": 42831,
+      "unit": "records",
+      "recompute": "count ATOM/HETATM records in the committed PDB",
+      "tolerance": 0,
+      "verdict": "reproducible"
+    },
+    {
+      "metric": "sequence_length",
+      "displayed": 2013,
+      "unit": "nt",
+      "recompute": "count distinct residues in the committed PDB",
+      "tolerance": 0,
+      "verdict": "reproducible"
+    },
+    {
+      "metric": "bsj_closure",
+      "displayed": 5.898,
+      "unit": "angstrom",
+      "recompute": "|P(first residue) - P(last residue)| in the committed PDB",
+      "tolerance": 0.001,
+      "verdict": "reproducible"
+    },
+    {
+      "metric": "bond_rmsd",
+      "displayed": 0.0082,
+      "unit": "angstrom",
+      "recompute": "pdb_analyzer.compute_bond_rmsd on the committed PDB",
+      "tolerance": 0.0005,
+      "verdict": "reproducible",
+      "caveat": "The analyzer returns 3 decimals (5.901 A mean over 2,012 backbone bonds, 0 violations), so the panel prints one digit more than the function produces."
+    },
+    {
+      "metric": "pair_satisfaction",
+      "displayed": 100.0,
+      "unit": "percent",
+      "recompute": null,
+      "verdict": "NOT reproduced",
+      "measured": 47.2,
+      "measured_recipe": "pdb_analyzer.compute_pair_satisfaction on the committed PDB: 5,532 P-P pairs within 15 A, 1,723 of them Watson-Crick complements, 814 of those within 12 A -> 814/1723 = 47.2%.",
+      "note": "docs/REPRODUCTION_RESOURCES.md section 5 attributes this 100.0% to compute_pair_satisfaction. That function returns 47.2% on this structure, so the attribution does not hold. Three different quantities in this codebase are called 'pair rate' and only one of them is structure-inferred: (a) pdb_analyzer.compute_pair_satisfaction, WC-complement filtered, 15 A neighbourhood, 12 A criterion -- 47.2% here; (b) isrnaclong._compute_pair_rate(coords, pairs), a fraction over the PREDICTED pair list with a 12 A criterion -- this is the 100% family, and it is near-tautological when the pair list is read off the structure it scores; (c) isrnaclong._validate_structure's pair_rate, the same but at 15 A. The panel value is consistent with (b)/(c), not with (a). Whether the panel label, the doc, or neither should change is a maintainer decision; this file records the measurement so the choice is made on a number."
+    },
+    {
+      "metric": "3drna_score",
+      "displayed": 27.18,
+      "unit": "3dRNAscore units",
+      "recompute": null,
+      "verdict": "not recomputable here",
+      "note": "Produced by the external 3dRNAscore scorer, which is not in this repository."
+    },
+    {
+      "metric": "global_rmsd",
+      "displayed": 1.23,
+      "unit": "angstrom",
+      "recompute": null,
+      "verdict": "not recomputable here",
+      "note": "Internal self-consistency metric of the PPR-repaired model (docs/REPRODUCTION_RESOURCES.md section 5); the reference it is measured against is not committed."
+    },
+    {
+      "metric": "runtime",
+      "displayed": "~7 h (CPU)",
+      "unit": "wall time",
+      "recompute": null,
+      "verdict": "historical, not reproducible from this checkout",
+      "note": "Measured on an earlier build that is no longer in the repository; see the provenance note in docs/REPRODUCTION_RESOURCES.md section 1."
+    }
+  ],
+  "warning": "Three entries here are self-consistency metrics of this repository's own model (bond RMSD, BSJ closure, pair satisfaction). None of them is a comparison against an experimental structure, and none of them is a de-novo accuracy claim. The only experimental cross-check in this repository is the 2OIU test (artifacts/2oiu/)."
+}

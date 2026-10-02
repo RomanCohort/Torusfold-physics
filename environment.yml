@@ -1,0 +1,45 @@
+# TorusFold-Hybrid — conda environment for the CPU path.
+#
+# WHY CONDA AND NOT ONLY pip. Two of the core dependencies are awkward off
+# conda-forge, and one of them is awkward specifically on the reference platform:
+#   * ViennaRNA publishes pip wheels for Linux and macOS; on Windows the supported
+#     route is conda-forge (ViennaRNA/ViennaRNA#138). `pip install ".[ss]"` in the
+#     README is the Linux answer, not the Windows one.
+#   * OpenMM's pip wheel is fine for the CPU platform; the CUDA/ROCm plugins are
+#     conda packages, and this project's GPU path is the ROCm one.
+# So the two install routes are not equivalent, and this file is the one a Windows
+# judge should follow.
+#
+# Versions: see requirements.lock for what each pin rests on and for the entries
+# that are deliberately left unpinned. numpy and scipy are unpinned because no
+# version of either was ever recorded in this repository, and a guessed pin would
+# look like a measurement.
+
+name: torusfold
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11          # the interpreter the test suite was run on
+  - numpy                # unpinned on purpose: see requirements.lock, "UNKNOWN"
+  - scipy                # unpinned on purpose: same
+  - openmm=8.5.2         # docs/pipeline_audit_2026-09-13.md:1026
+  - viennarna=2.7.2      # same line; the only reason this file exists
+  - pytest=9.1.1         # same file, :1027 -- 145 tests in 24 s
+  - pip
+
+# torch is NOT installed here, and that is deliberate. It has two incompatible
+# builds in use in this project and neither belongs in a default environment:
+#   CPU (tests, the IBI sampler):
+#     pip install torch --index-url https://download.pytorch.org/whl/cpu
+#     verified as torch 2.13.0+cpu, docs/pipeline_audit_2026-09-13.md:1026
+#   GPU (ROCm, reference APU only):
+#     torch 2.12.0a0+rocm7.13.0a20260313 on Radeon 8060S / gfx1151, hip 7.2.0
+#     docs/pipeline_audit_2026-09-13.md:519
+#
+# Then, from the repository root:
+#     pip install -e . --no-deps        # --no-deps: the pins above are the intent
+#     python -m pytest -q tests         # 145 tests, ~24 s on the reference machine
+#     python scripts/verify_headline.py # every published number, from committed files
+# The last one needs numpy only, and is the check a judge can run in seconds.

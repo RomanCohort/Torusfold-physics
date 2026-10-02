@@ -986,13 +986,18 @@ input[type="range"]::-moz-range-thumb{
 @keyframes toastIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
 .loading{color:var(--ink-3)}
 
-/* ═══════════════ MOL* DEFAULTS ═══════════════ */
-.mol-star{position:static!important;width:100%!important;height:100%!important}
-.molstar-plugin{position:static!important}
-msp-plugin{display:block!important;width:100%!important;height:100%!important}
-msp-plugin .msp-plugin{position:static!important}
-.mol-star viewport{overflow:visible!important}
-#viewer > div{position:static!important;width:100%!important;height:100%!important;overflow:visible!important}
+/* The Mol* sizing overrides that used to sit here (`.mol-star`, `.molstar-plugin`,
+   `msp-plugin`, and a `#viewer > div` rule) are gone with Mol* itself, which was
+   replaced by 3Dmol — 4.8 MB and its own expand/controls/settings chrome against
+   532 KB and a canvas.
+
+   They were dead on arrival rather than merely unused. `msp-plugin` is a custom
+   element Mol* created and nothing creates now; `#viewer > div` selects a `div`
+   child, and the only child of `#viewer` is the canvas, so it matched nothing. The
+   canvas is sized by 3Dmol's own inline styles, which the `!important` rules here
+   would have overridden had they ever applied. Removed rather than left, because a
+   block of `!important` rules naming a library the page does not load reads as
+   load-bearing to anyone sizing this panel next. */
 
 /* ═══════════════ RESPONSIVE ═══════════════ */
 /* No fixed minimum on the pipeline tracks.

@@ -31,14 +31,24 @@ _patch_openmm_no_opencl()
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-# Read the sequence from a file (not hard-coded, to protect IP)
-_seq_file = ROOT / "sequence.txt"
-if _seq_file.exists():
-    SEQUENCE = _seq_file.read_text().strip().replace("\n", "")
-else:
-    print(f"Error: sequence file not found: {_seq_file}")
-    print("Create sequence.txt and write the RNA sequence (T->U conversion supported)")
+# The sequence is read from a file, not hard-coded (to protect IP). Search order:
+#   1. sequence.txt at the repository root -- git-ignored, the local working copy
+#   2. artifacts/2013nt/sequence.txt  -- committed, the 2,013 nt demo target
+# (2) exists because without it this script exited on line 2 for every reader who was
+# not the author: docs/pipeline_audit_2026-09-13.md:1022 records that the full Level 0
+# path was never executed end to end for exactly this reason. A local sequence.txt
+# still wins, so the private workflow is unchanged.
+_root_seq = ROOT / "sequence.txt"
+_demo_seq = ROOT / "artifacts" / "2013nt" / "sequence.txt"
+_seq_file = _root_seq if _root_seq.exists() else _demo_seq
+if not _seq_file.exists():
+    print("Error: no sequence file found.")
+    print(f"  looked for: {_root_seq}")
+    print(f"              {_demo_seq}")
+    print("Write the RNA sequence (plain text, T->U handled) to either path.")
     sys.exit(1)
+SEQUENCE = _seq_file.read_text().strip().replace("\n", "")
+print(f"Sequence source: {_seq_file.relative_to(ROOT)} ({len(SEQUENCE)} nt)")
 
 
 def main():

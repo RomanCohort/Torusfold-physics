@@ -1,0 +1,12 @@
+{
+  "source_file": "docs/circrna_3d_viewer.html",
+  "source_payload": "var pdbB64 (gzip + base64)",
+  "payload_b64_sha256": "8001177b7fafe9d141b9ce2f8f533d48eaa2e633252b0285c11c8f28a536bc8d",
+  "pdb_sha256": "88b226ad0b3fee87090e14e4ad598c4f589e09dffe6dbfc4c4436845d429edb8",
+  "sequence_sha256": "e1ade50e496e84861061ef814d7a7bfca6006322714ad64f382fb3bd6ccda0e7",
+  "n_atoms": 42831,
+  "n_residues": 2013,
+  "pdb_remark_1": "REMARK   1 CREATED WITH OPENMM 8.5.2, 2026-08-18",
+  "recovered_by": "scripts/extract_viewer_payload.py",
+  "note": "Decoded, not re-run. These are the bytes the shipped viewer renders; the run that produced them is not in this repository. docs/REPRODUCTION_RESOURCES.md, section 'Provenance of the delivered model'."
+}
