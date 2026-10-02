@@ -97,6 +97,13 @@ test_*_ss.txt
 # .claude/ is ignored except the iGEM AI-use notice
 .claude/*
 !.claude/RESPONSIBLE_AI_USE.md
+# The project's Claude Code skills are source, not local configuration, and
+# `CLAUDE.md` at the root already depends on this directory. Without this exception
+# a skill written for the team stays on one machine: `.claude/skills/` is the path
+# Claude Code loads project skills from, so the files have to travel with the
+# checkout for anyone else to get them.
+!.claude/skills/
+!.claude/skills/**
 torusfold-paper/
 
 # ── Runtime state written by the server, never source ───

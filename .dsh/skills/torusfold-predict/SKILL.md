@@ -166,11 +166,11 @@ kind of number each one is.
 | **DFIRE**, **3dRNAscore** | — | Shown as `n/a`. **This pipeline does not compute them.** If they read `n/a`, that is not a failed run |
 
 **rsRNASP1 has two traps, both written into the source comments.** First, the
-PASS/FAIL threshold at −2000 has no recorded provenance — it has never been
+PASS/FAIL threshold at -2000 has no recorded provenance — it has never been
 calibrated against a reference set, so do not present a PASS or FAIL as meaningful.
 Second, **the value is only comparable between sequences of the same length.** The
-measured reference points are: crystal 1a9nR (27 nt) −3146.6, crystal 1h4sT
-(61 nt) −7757.6, and this pipeline's own 139 nt prediction **+2289.3**, which is
+measured reference points are: crystal 1a9nR (27 nt) -3146.6, crystal 1h4sT
+(61 nt) -7757.6, and this pipeline's own 139 nt prediction **+2289.3**, which is
 positive. Comparing across lengths is meaningless.
 
 **"Pair satisfaction" is not an accuracy score, and part of the documentation once
