@@ -1077,12 +1077,30 @@ def isrnaclong_pipeline(
     # reading whichever binding it captured. "level" rides along so the file can say
     # which stage it came from — see `latest_cg.meta`.
     _coord_holder = {"coords": None, "level": "1"}
-    # 12 s, not the 45 s the writer defaulted to: a reader polls every couple of
-    # seconds, and a coarse-grained trace for the test sequence is about a kilobyte,
-    # so there is no reason for the panel to lag the run by the better part of a
-    # minute. Step-driven callbacks fill the gaps where a stage reports them.
+    # 3 s. The cost was measured rather than assumed: one snapshot write is 0.002 s
+    # on a 120-atom trace and 0.01 s on the full 2,013 nt model (42,831 atoms), so
+    # the interval is not a throughput question — it is only how long the panel
+    # waits for nothing. At 12 s the view lagged the run by up to twelve seconds
+    # while the pipeline was doing 0.002 s of work per frame.
+    #
+    # The write is atomic (temp file then rename), so a reader either sees the old
+    # file or the new one; there is no torn read to trade against the rate. Where a
+    # stage reports its own progress the step/chunk callback publishes on top of
+    # this, so those frames arrive at the sampler's cadence instead.
+    #
+    # TF_SNAPSHOT_INTERVAL overrides it. A long run rewrites the file 1.1 GB in
+    # total at this cadence (7,200 x 161 KB over six hours, on the 2,013 nt model):
+    # nothing on an SSD, but on a spinning disk or a network share a write every
+    # three seconds is a real cost, and that is a property of the machine rather
+    # than of the pipeline. The setting exists so the trade can be made without
+    # editing this file.
+    try:
+        _snap_interval = float(os.environ.get("TF_SNAPSHOT_INTERVAL") or 3.0)
+    except ValueError:
+        _snap_interval = 3.0
+    _snap_interval = max(0.5, _snap_interval)
     _stop_snapshots = _start_snapshot_writer(_coord_holder, sequence, output_path,
-                                             interval=12.0)
+                                             interval=_snap_interval)
 
     # Structures published from inside a sampler, keyed to simulation steps.
     _snap_steps = 5000
@@ -1105,7 +1123,10 @@ def isrnaclong_pipeline(
         state["calls"] = state.get("calls", 0) + 1
         if ok:
             state["n"] += 1
-            if verbose and state["n"] % 4 == 1:
+            # One line per ~60 s at the writer's 3 s cadence: enough to confirm the
+            # frames are flowing, not enough to bury the pipeline's own output in a
+            # log that a multi-hour run writes megabytes to.
+            if verbose and state["n"] % 20 == 1:
                 # `total` is a count of steps for the samplers and a count of chunks
                 # for Level 1, so it carries the unit with it rather than being
                 # formatted as a bare number.
@@ -1359,8 +1380,8 @@ def isrnaclong_pipeline(
     _coord_holder["coords"] = coords_vfold
     _coord_holder["level"] = "1.5"
     if verbose:
-        print("  [snapshots] latest_cg.pdb tracks the run from here (~12s), with a "
-              "frame at every chunk and REMD report")
+        print("  [snapshots] latest_cg.pdb every ~%gs for the structure panel, plus a "
+              "frame at every chunk and REMD report" % _snap_interval)
 
     # ── Level 1.5 data export ──
     try:

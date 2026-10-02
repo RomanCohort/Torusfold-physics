@@ -1674,12 +1674,22 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
                     self.wfile.flush()
 
-                # A heartbeat every 0.5s for a run measured in hours is ~14k
-                # frames, nearly all identical. Send one whenever the state
-                # actually moves (which also carries a new log line), and a
-                # keepalive only every few seconds so a quiet stage stays quiet.
+                # Send one whenever the state actually moves (which also carries a
+                # new log line), and a keepalive otherwise.
+                #
+                # The keepalive was 3.0 s, which set the floor on how quickly the
+                # 3D panel could follow a run: the snapshot writer republishes the
+                # structure every 3 s, and a reader that only hears about it every
+                # 3 s sees the two delays add up. 1.0 s makes the writer's cadence
+                # the binding one instead of the sum of both.
+                #
+                # The payload is a small dict of scalars and the latest measurement
+                # summary — not the structure itself, which the browser fetches from
+                # /api/structure once per change — so the extra frames cost little.
+                # A run measured in hours still sends these, but at 1/s rather than
+                # the 0.5 s this deliberately moved away from.
                 now = time.time()
-                if new_entries or (now - last_beat) >= 3.0:
+                if new_entries or (now - last_beat) >= 1.0:
                     last_beat = now
                     beat = dict(pub)
                     beat["level"] = "heartbeat"
