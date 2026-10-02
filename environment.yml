@@ -1,5 +1,17 @@
 # TorusFold-Hybrid — conda environment for the CPU path.
 #
+# ── READ THIS FIRST: this file is NOT the environment the numbers were measured in ──
+# It builds a fresh environment named `torusfold`, which no result in this repository
+# came from. The environment that was actually measured is:
+#
+#     C:\ana\envs\comfyui      python 3.11.15, torch 2.12.0a0+rocm7.13.0a20260313
+#                              274 passed, 1 skipped  (`python -m pytest -q tests`, 56 s)
+#
+# It is a ComfyUI install that happens to carry every dependency this project needs,
+# including the [ml] group, and it was used for the GPU path. If you are on the
+# reference machine, use it rather than this file. This file is the bootstrap for a
+# machine that does not have it. See requirements.lock for the measured pins.
+#
 # WHY CONDA AND NOT ONLY pip. Two of the core dependencies are awkward off
 # conda-forge, and one of them is awkward specifically on the reference platform:
 #   * ViennaRNA publishes pip wheels for Linux and macOS; on Windows the supported
@@ -10,10 +22,14 @@
 # So the two install routes are not equivalent, and this file is the one a Windows
 # judge should follow.
 #
-# Versions: see requirements.lock for what each pin rests on and for the entries
-# that are deliberately left unpinned. numpy and scipy are unpinned because no
-# version of either was ever recorded in this repository, and a guessed pin would
-# look like a measurement.
+# The reference hardware is an AMD APU (Radeon 8060S / gfx1151). There is no NVIDIA
+# device and no CUDA on it, so a CUDA build of torch is the wrong choice there.
+# On a ROCm build torch.cuda.is_available() is True and the device reports as
+# "AMD Radeon(TM) 8060S Graphics" — PyTorch keeps the `cuda` namespace for HIP.
+#
+# Versions: see requirements.lock for what each pin rests on. numpy and scipy were
+# the last two entries recorded as UNKNOWN; both were measured on 2026-10-02 and are
+# pinned there now (numpy 2.4.3, scipy 1.17.1 — the reference environment's values).
 
 name: torusfold
 
@@ -21,13 +37,18 @@ channels:
   - conda-forge
 
 dependencies:
-  - python=3.11          # the interpreter the test suite was run on
-  - numpy                # unpinned on purpose: see requirements.lock, "UNKNOWN"
-  - scipy                # unpinned on purpose: same
+  - python=3.11          # 3.11.15 measured in both environments
+  - numpy=2.4.3          # measured 2026-10-02 in the reference environment
+  - scipy=1.17.1         # same
   - openmm=8.5.2         # docs/pipeline_audit_2026-09-13.md:1026
   - viennarna=2.7.2      # same line; the only reason this file exists
-  - pytest=9.1.1         # same file, :1027 -- 145 tests in 24 s
+  - pytest=9.1.1         # measured 2026-10-02: 274 passed, 1 skipped, 56 s
   - pip
+
+# The [ml] extras are NOT optional for a full test run. Without them the suite still
+# passes but skips a test: measured in circrna3d (which lacks them) as
+# "274 -> 273 passed, 2 skipped", the extra skip being the cuda half of
+# tests/test_table_potential_device.py.
 
 # torch is NOT installed here, and that is deliberate. It has two incompatible
 # builds in use in this project and neither belongs in a default environment:
@@ -40,6 +61,9 @@ dependencies:
 #
 # Then, from the repository root:
 #     pip install -e . --no-deps        # --no-deps: the pins above are the intent
-#     python -m pytest -q tests         # 145 tests, ~24 s on the reference machine
-#     python scripts/verify_headline.py # every published number, from committed files
+#     python -m pytest -q tests         # measured 2026-10-02: 274 passed, 1 skipped, 56 s
+#     python scripts/verify_headline.py --allow-known   # every published number, from
+#                                       # committed files. Keep the flag: without it the
+#                                       # command exits 1, because the 12 checks that do not
+#                                       # come back are all one known coordinate (intra_pc).
 # The last one needs numpy only, and is the check a judge can run in seconds.

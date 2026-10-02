@@ -6,19 +6,38 @@
 # estimated. Where no version was ever recorded, the entry says so instead of
 # inventing a range that would look like a lock and behave like a wish.
 #
-# THE ENVIRONMENT THESE COME FROM. `C:\ana\envs\circrna3d` (conda, Windows) is the
-# CPU environment the pipeline and its tests were run in
-# (docs/pipeline_audit_2026-09-13.md:1026, :534). The GPU environment is
-# `C:\ana\envs\comfyui` (:535, :519). The tests pass there: 145 tests in 24 s (:1027).
-# Nothing here was measured on a second machine, so nothing here is known to be
-# sufficient — it is known to be what ran.
+# ── WHICH ENVIRONMENT IS THE REFERENCE, corrected 2026-10-02 ───────────────────
+# This header previously named `C:\ana\envs\circrna3d` as the CPU reference and
+# `C:\ana\envs\comfyui` as the GPU one, and stated "the tests pass there: 145 tests
+# in 24 s". Both halves of that were wrong when re-measured, and the numbers here
+# are now the measured ones rather than the recorded ones.
 #
-# HOW TO CLOSE THE GAPS, on the reference machine:
-#     conda activate circrna3d
-#     python -m pip freeze > requirements.freeze.txt
-# and replace the UNKNOWN block below with the numpy/scipy lines from that file,
-# keeping this header. A full freeze is more useful than the three lines below: it is
-# what makes `pip install -r` reproduce the environment rather than approximate it.
+#   C:\ana\envs\comfyui    <- THE REFERENCE. Run this.
+#       python 3.11.15, torch 2.12.0a0+rocm7.13.0a20260313 (hip 7.2.0), GPU visible
+#       `python -m pytest -q tests` -> 274 passed, 1 skipped, 56 s
+#       It carries the [ml] extras (gemmi, transformers, scikit-learn, joblib,
+#       matplotlib), which is why the GPU half of tests/test_table_potential_device.py
+#       runs here and does not run in the other environment.
+#       Before 2026-10-02 this command collected ZERO tests in every environment,
+#       from either the repository root or from inside tests/, and reported
+#       `INTERNALERROR> SystemExit: 0` -- see tests/conftest.py. The counts above are
+#       after that fix; an A/B with conftest.py removed reproduces the old failure
+#       exactly (no tests ran in 1.78s).
+#
+#   C:\ana\envs\circrna3d  <- incomplete; kept, not recommended.
+#       python 3.11.15, torch 2.13.0+cpu, no CUDA device, and MISSING every [ml]
+#       extra. `python -m pytest -q tests` -> 273 passed, 2 skipped, 72 s, with the
+#       second skip being "no CUDA device: the cuda half of this test needs one".
+#
+# On the ROCm build `torch.cuda.is_available()` is True and the device reports as
+# "AMD Radeon(TM) 8060S Graphics" — PyTorch keeps the `cuda` namespace for HIP. The
+# GPU here is an AMD APU (gfx1151); there is no NVIDIA hardware and no CUDA, so any
+# instruction to install a CUDA build of torch is wrong for this machine.
+#
+# WHAT IS STILL NOT ESTABLISHED. Nothing here was measured on a second machine, so
+# nothing here is known to be sufficient — it is known to be what ran. The GPU
+# version string below exists only on the reference APU; a judge without that
+# hardware takes the CPU line.
 #
 # ── core, pinned ───────────────────────────────────────────────────────────────
 openmm==8.5.2          # docs/pipeline_audit_2026-09-13.md:1026; also stamped into the
@@ -27,21 +46,47 @@ openmm==8.5.2          # docs/pipeline_audit_2026-09-13.md:1026; also stamped in
 ViennaRNA==2.7.2       # docs/pipeline_audit_2026-09-13.md:1026; independently, the two
                        # places the code records what it measured against:
                        # src/torusfold/scheme2/isrnaclong.py:497 and multisource_ss.py:39
-pytest==9.1.1          # docs/pipeline_audit_2026-09-13.md:1027 (145 tests, 24 s)
+pytest==9.1.1          # measured 2026-10-02 in both environments; the earlier note said
+                       # "145 tests, 24 s" and the suite has grown since — see the
+                       # per-environment counts above
 
 # ── torch, pinned per path ─────────────────────────────────────────────────────
-# CPU path (tests, IBI sampler, everything that does not touch the GPU):
-torch==2.13.0+cpu      # docs/pipeline_audit_2026-09-13.md:1026, :534
-# GPU path (AMD APU, ROCm) — a version string that only exists on that machine:
-#   torch==2.12.0a0+rocm7.13.0a20260313   # :519, Radeon 8060S / gfx1151, hip 7.2.0
+# GPU path — the reference environment. A version string that only exists on that
+# machine, which is why the lock names a source and not a range:
+torch==2.12.0a0+rocm7.13.0a20260313    # comfyui, Radeon 8060S / gfx1151, hip 7.2.0
+torchvision==0.26.0a0+rocm7.13.0a20260313
+torchaudio==2.11.0a0+rocm7.13.0a20260313
+# CPU path — for anything that does not touch the GPU, and for a machine without
+# this APU:
+#   torch==2.13.0+cpu   # measured 2026-10-02 in circrna3d
 # The two are not interchangeable and the pipeline does not select between them.
+# NOTE: `scripts/ibi_loop.py` states, with measurements, that the IBI sampler does
+# not use the GPU at all — bead-steps/s is flat from B=64 to B=16384 and the CPU
+# stays ahead. So the armA experiment is correct on either build.
 
-# ── UNKNOWN: never recorded anywhere in this repository ────────────────────────
-# numpy and scipy are imported by nearly every module and their exact versions are
-# not written down in any doc, manifest or result file. They are left unpinned rather
-# than given a plausible range, because a plausible range is exactly the kind of
-# number that gets mistaken for a measurement. Fill them from the freeze above.
-#   numpy  >= 1.23   (the lower bound requirements.txt already claimed; unverified)
-#   scipy  >= 1.11   (same)
-# Python: the verified interpreter is 3.11. pyproject.toml still advertises >=3.9,
-# which was never re-checked against this list.
+# ── numpy and scipy: NOW MEASURED, previously UNKNOWN ──────────────────────────
+# These were the only genuinely missing pins in this repository. They are imported
+# by nearly every module, and the reason given for leaving them out was sound ("a
+# plausible range is exactly the kind of number that gets mistaken for a
+# measurement") — but the versions were readable from the working environment all
+# along, so they were measured rather than guessed on 2026-10-02.
+#
+# The two environments disagree by one patch version, and the reference wins:
+numpy==2.4.3           # comfyui (the reference). circrna3d has 2.4.6.
+scipy==1.17.1          # identical in both environments
+# numpy 2.x is a major break from 1.x, so the old `>= 1.23` lower bound in
+# requirements.txt admitted a range this pipeline was never run against. A judge
+# installing today from an unpinned list can silently land outside it. That is the
+# reason these two are worth pinning even though every other line here is stable.
+
+# ── [ml] extras, measured 2026-10-02 in comfyui ────────────────────────────────
+# pyproject.toml lists this group as optional. It is not optional for the reference
+# environment: its absence is exactly what makes circrna3d's suite skip a test.
+gemmi==0.7.5
+transformers==4.57.6
+scikit-learn==1.9.0
+joblib==1.5.3
+matplotlib==3.11.1
+
+# Python: the verified interpreter is 3.11 (3.11.15 in both environments).
+# pyproject.toml still advertises >=3.9, which was never re-checked against this list.

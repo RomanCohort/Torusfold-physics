@@ -11,6 +11,17 @@ Each test here corresponds to a defect that was observed, not imagined:
 
 Run: python tests/test_checkpoint_store.py
 """
+# ── This file is excluded from pytest by tests/conftest.py ────────────────────
+# It asserts at module level and ends in sys.exit(0/1) by design. Testing showed
+# that pytest's collection phase IMPORTS the module regardless of what the module
+# says about itself, so under `python -m pytest -q tests` (the command README.md
+# recommends for a judge checking the numbers) this import ran the whole script,
+# hit the sys.exit, and pytest reported INTERNALERROR with ZERO of the repo's 145
+# tests collected. `__test__ = False` does NOT fix this -- the import happens to
+# read that flag, so the side effect fires before the flag can be honoured.
+# collect_ignore in tests/conftest.py is the mechanism that skips the file without
+# importing it. Both callers work: pytest skips it, `python tests/test_checkpoint_store.py`
+# still runs it as the self-contained check it is.
 import json
 import os
 import shutil

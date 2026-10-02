@@ -1029,6 +1029,29 @@ pytest 9.1.1: **the full suite passes, 145 tests in 24 s**, including the new
 three interpreters" without ever looking in the conda environments; that was wrong. Note that
 `torusfold` is *also* installed in that environment, from a different checkout
 (`C:\Users\...\TorusFold-scheme2-rl\src\torusfold`), so a script that imports it without putting
+
+> **CORRECTION, 2026-10-02 (the paragraph above is the 09-13 record and is kept as written).**
+> The environment recommendation has inverted, and the test count was stale by the time anyone
+> re-ran it:
+>
+> * **`C:\ana\envs\comfyui` is the reference environment, not `circrna3d`.** Measured:
+>   **274 passed, 1 skipped, 56 s**. It carries the `[ml]` extras (gemmi, transformers,
+>   scikit-learn, joblib, matplotlib) and a working ROCm torch
+>   (2.12.0a0+rocm7.13.0a20260313, hip 7.2.0, device `AMD Radeon(TM) 8060S Graphics`), which
+>   is why the CUDA half of `tests/test_table_potential_device.py` runs there.
+> * `circrna3d` runs the same suite as **273 passed, 2 skipped, 72 s**, the second skip being
+>   `"no CUDA device: the cuda half of this test needs one"`. It is missing every `[ml]` extra.
+> * **`python -m pytest -q tests` collected ZERO tests in either environment**, and this was
+>   not a dependency problem. `tests/test_checkpoint_store.py` is a standalone script
+>   (module-level assertions, trailing `sys.exit`); pytest imports every candidate module
+>   during collection, so the import ran the script and died on `SystemExit: 0` as
+>   `INTERNALERROR`. Fixed by `collect_ignore` in `tests/conftest.py` — note that
+>   `__test__ = False` inside the file does **not** work, because the import happens in order
+>   to read that attribute. This is worth recording here because the command above is the one
+>   a judge is told to run.
+> * The "145 tests" figure was already stale when written; the suite is 274. Live counts now
+>   live in `requirements.lock` and `README.md`, not here.
+
 this repository's `src/` first will silently test the other tree. The test files do insert it;
 anything else should be checked.
 
