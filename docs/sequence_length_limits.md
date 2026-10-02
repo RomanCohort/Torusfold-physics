@@ -32,8 +32,8 @@ chain simply does not come back to its own start.
 ## Why, in closed form
 
 A ring of `n` steps of length `s` has radius `R = s / (2 sin(pi/n))`, so the
-backbone must bend by `180 - 360/n` degrees at every residue. With `s = 5.93 A`,
-measured above:
+backbone must turn by `360/n` degrees at every residue — the n steps of a closed
+polygon share one full turn between them. With `s = 5.93 A`, measured above:
 
 | n | ring radius | bend per residue | |
 | --: | --: | --: | :-- |
@@ -86,9 +86,8 @@ on short input" when the accurate reading is "this input has no circular solutio
 The check is arithmetic and cheap, and it can be made from a length alone before any
 stage runs:
 
-    bend_per_residue = 180 - 360/n
+    bend_per_residue = 360/n
     warn when bend_per_residue > 12 degrees   # n below about 30
-
 Nothing in this document has been wired into the pipeline. It is recorded here
 because it was measured, and because the next person to run a short test sequence
 will otherwise spend the same time working out why the answer has no ring in it.
