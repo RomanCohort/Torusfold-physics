@@ -1343,6 +1343,81 @@ def _watch_for_step_progress(line):
         # is delegated to the stream being wrapped.
         return getattr(self.__dict__["_orig"], name)
 
+# ── Connection limits ───────────────────────────────────────────
+#
+# A long-running prediction lives in this process as a thread, so anything that
+# kills the process kills hours of work. These two bounds exist because that is
+# reachable from outside: an SSE stream holds a connection for the length of a
+# run, and nothing stopped a client from opening them until the thread table was
+# full — which was measured, at 1 h 2 m into a Level 3.5 run, as
+# `RuntimeError: can't start new thread`.
+MAX_CONNECTIONS = int(os.environ.get("TF_MAX_CONNECTIONS") or 64)
+# An established connection that sends nothing for this long is closed. The SSE
+# stream writes a heartbeat every second, so a live one never looks idle; a
+# half-open socket from a client that vanished does.
+SOCKET_IDLE_TIMEOUT = float(os.environ.get("TF_SOCKET_IDLE_TIMEOUT") or 30.0)
+_active_connections = [0]
+_conn_lock = threading.Lock()
+
+
+class TorusFoldServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with a ceiling on concurrent connections.
+
+    Past the ceiling a request is refused with 503 rather than served, because the
+    alternative — spawning without limit — fails later and worse: the OS refuses
+    the thread, the exception escapes `process_request`, and it takes the process
+    down with the prediction inside it. A 503 is a client that retries; a dead
+    server is a run that has to start over.
+    """
+
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def process_request_thread(self, request, client_address):
+        try:
+            request.settimeout(SOCKET_IDLE_TIMEOUT)
+        except OSError:
+            pass
+        with _conn_lock:
+            _active_connections[0] += 1
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            with _conn_lock:
+                _active_connections[0] -= 1
+
+    def process_request(self, request, client_address):
+        with _conn_lock:
+            n = _active_connections[0]
+        if n >= MAX_CONNECTIONS:
+            # Answer on the bare socket: no handler was constructed, so there is
+            # nothing to send a response with.
+            #
+            # `Content-Length` must equal the body exactly. It said 79 against a
+            # 74-byte body, so the client waited for five bytes that never came and
+            # reported the refusal as `ConnectionAbortedError` — the limit working,
+            # presented as a network fault. The number is computed now rather than
+            # written down.
+            body = (b"Too many open connections to the prediction server; "
+                    b"close some and retry.\n")
+            try:
+                request.settimeout(5.0)
+                request.sendall(
+                    b"HTTP/1.1 503 Service Unavailable\r\n"
+                    b"Content-Type: text/plain\r\n"
+                    b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+                    b"Connection: close\r\n\r\n" + body)
+            except OSError:
+                pass
+            finally:
+                try:
+                    self.shutdown_request(request)
+                except OSError:
+                    pass
+            return
+        super().process_request(request, client_address)
+
+
 # ── Global prediction state ─────────────────────────────────────
 _predict_state = {
     "status": "idle",       # idle | running | done | error
@@ -1717,6 +1792,37 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
                     self.wfile.write(f"event: {event_type}\ndata: {final}\n\n".encode("utf-8"))
                     self.wfile.flush()
                     break
+
+                # Then check whether anyone is still listening.
+                #
+                # Without this the loop only learns the client is gone when a write
+                # fails, and a write to a socket whose peer has closed does not fail
+                # at once — the local side keeps accepting into the send buffer. So
+                # a client that reads a few bytes and disconnects leaves this loop
+                # running for as long as the run lasts, one thread each. Enough of
+                # them and the process dies with `can't start new thread`, taking
+                # the prediction with it, which is exactly what was measured.
+                #
+                # A non-blocking recv is the direct test, and its three outcomes are
+                # distinguishable: BlockingIOError means nothing is waiting and the
+                # peer is still there; b"" means end of stream; anything else is a
+                # client sending on a one-way stream, drained so the buffer cannot
+                # fill. The stream is one-way, so no data is expected and none is
+                # interpreted.
+                try:
+                    self.connection.setblocking(False)
+                    try:
+                        if self.connection.recv(4096) == b"":
+                            break
+                    except BlockingIOError:
+                        pass                     # nothing pending: still connected
+                except (ConnectionResetError, OSError):
+                    break
+                finally:
+                    try:
+                        self.connection.setblocking(True)
+                    except OSError:
+                        pass
 
                 time.sleep(0.5)
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -3166,11 +3272,30 @@ def main():
     # request at a time — so while a browser was streaming, every other request
     # (including the status polls that drive the progress bar) queued behind it
     # and the UI appeared frozen. Each connection now gets its own thread.
-    server = ThreadingHTTPServer(("0.0.0.0", port), TorusFoldHandler)
+    #
+    # Bounded, because "a thread per connection" with no ceiling is how a
+    # long-running job dies for a reason that has nothing to do with the job.
+    # Measured: a run reached 1 h 2 m of Level 3.5 and the process then raised
+    # `RuntimeError: can't start new thread` while accepting a request. The
+    # prediction runs as a thread inside THIS process, so the server running out
+    # of threads takes the prediction with it — an hour of GPU work lost to a
+    # client that opened connections and did not close them.
+    #
+    # Two things made that reachable. SSE connections are long-lived by design,
+    # and an SSE handler only learns its client is gone when a write fails — with
+    # `Connection: keep-alive` and a 1 s heartbeat that is not soon. A client that
+    # reads a few bytes and disconnects leaves the loop running.
+    #
+    # So: refuse past a limit instead of exhausting, and close connections that
+    # have gone quiet. A refused request is a visible 503; an exhausted thread
+    # table is a dead process and a dead run.
+    server = TorusFoldServer(("0.0.0.0", port), TorusFoldHandler)
     server.daemon_threads = True
     print(f"TorusFold server: http://127.0.0.1:{port}/")
     print(f"  Static root: {ROOT}")
     print(f"  Web dir: {WEB_DIR}")
+    print(f"  Concurrent connections: at most {MAX_CONNECTIONS}, "
+          f"{SOCKET_IDLE_TIMEOUT:.0f}s idle timeout")
     # Printing which external tools resolved, at startup, is the point: every
     # predictor fails quietly when its ROOT variable is unset — the run continues
     # and simply produces a worse ensemble — so the only place this was visible
