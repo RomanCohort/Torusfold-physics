@@ -275,3 +275,77 @@ Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
 跑在同一个工作区的会话之间不共享状态。一个用 `Get-Process python` 或
 `taskkill /IM` 做"清理"的会话，等于把别人跑了几小时的东西一起清掉，而它自己看不到这一点。
 
+## 十、**锁** —— 2026-10-02 那十九小时就是这么丢的，别再重新发现一次
+
+这一节是整份交接里最难靠读代码补回来的部分，所以写全。
+
+### 症状长什么样
+
+`run_armA.cmd` 的 retry 循环**每次 attempt 都在一秒内返回 `exit=0`、写入 0 字节、
+arm 从不启动**。日志看起来像成功：`exit=0` 是写上去的，`echo` 行也正常打印。
+八个 attempt 一轮，二十秒一次，整下午都是这样。
+
+### 真正发生了什么
+
+`scripts/ibi_loop.py:958` 用上下文管理器开 worker 池：
+
+```python
+with ctx.Pool(processes=min(_N_WORKERS, len(remaining))) as pool_procs:
+```
+
+**上下文管理器只在正常退出时回收 worker。** driver 一旦被强杀、或在 with 块之外异常退出，
+`__exit__` 不执行，32 个 worker 就成了孤儿 —— 而它们**继承了重定向的 stdout 句柄**，
+于是继续持有 `results/plan_c/armA.out`。
+
+而 **cmd 的 `>>` 打不开被锁的目标时，它跳过那条命令** —— 不是报错，是跳过。
+ERRORLEVEL 保持 0，循环体照常跑完。所以：
+
+```
+echo 行正常打印      ← 块在执行
+exit=0 被记录        ← 命令从未运行，ERRORLEVEL 没被动过
+python 从未启动      ← 没让它做任何事
+目标文件 mtime 冻结   ← >> 从未打开它
+```
+
+实测两次：`armA_smoke.out` 被 4 个 10-01 的孤儿持有 **19 小时**（文件 mtime 冻在
+`19:11:32`，正是它们启动后 11 秒）；随后 `armA.out` 又被上一次 run 的孤儿 driver 持有。
+
+### 怎么判断是不是它
+
+**先查锁，不要先查引号。** 引号不是原因，这一点我用一整天和三次错误结论换来的：
+
+```powershell
+$f = 'results\plan_c\armA.out'
+try { [IO.File]::Open($f,'Append','Write','None').Close(); 'openable' }
+catch { 'LOCKED: ' + $_.Exception.Message }
+```
+
+`Move-Item` 同样的路径也能测：锁住的文件重命名也会失败。
+
+### 怎么解
+
+按 **PID** 停掉持有者。已经写成脚本，`run_armA.cmd` 每次启动前会调用它：
+
+```
+"%PY_BOOT%" results\plan_c\stop_stale_workers.py
+```
+
+它按 CommandLine 匹配 `ibi_loop` 找 driver，按父 PID 找 worker，再逐个 `taskkill /F /PID`。
+`PY_BOOT` 是**另一个解释器**（`comfyui\python.exe`），故意不用 `%PY%`。
+
+### 两个坑，都踩过
+
+1. **别用 PowerShell 的一行模糊匹配。** 最自然的写法
+   `Get-CimInstance Win32_Process | Where-Object CommandLine -like '*ibi_loop*'`
+   **会匹配到它自己的命令行**，于是杀掉自己的进程树。这个错误在 2026-10-02 犯了**两次**。
+   所以清理脚本用 Python 写：它跑在 `python.exe` 下，只杀 `python_ibiA.exe`，两者不可能混淆。
+
+2. **前置检查不够。** 我加过一个"进循环前试写目标"的检查，实测**它通过而运行照样失败** ——
+   检查采样的是一个瞬间，而重定向需要的是整段跨度。**先杀遗留进程才是真修复**，
+   检查只是把静默 no-op 变成具名 ABORT 的放大器。两个都要，但别把后者当前者。
+
+### 兄弟任务的免疫是结构性的
+
+`plan_c_ab2oiu` 跑 `python_ab.exe`，armA 跑 `python_ibiA.exe`，清理脚本的过滤器只认后者，
+所以它碰不到兄弟任务。**这不是巧合，是那两个改名解释器的用处之一** —— 别把它们改回 `python.exe`。
+

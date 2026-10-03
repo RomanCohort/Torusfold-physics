@@ -32,7 +32,7 @@ DOCS = ROOT / "docs"
 
 SKIP_DIRS = {".git", "__pycache__", "_calib", "_strays", "results", "output_web",
              "output_2013nt", "_cgdata", "_civenv", "node_modules",
-             "_empty_strays", "_docs_video"}
+             "_empty_strays", "_docs_video", "_park_20261002"}
 SCAN_EXT = {".py", ".md", ".txt", ".yml", ".yaml", ".toml", ".js", ".cmd", ".bat",
             ".json", ".mermaid", ".cfg", ".lock"}
 
