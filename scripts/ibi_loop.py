@@ -172,6 +172,25 @@ DEFAULT_BURN_STEPS = 20000
 # IBI_LOOP_GAIN sets the default for every coordinate; IBI_LOOP_GAIN_<COORD> overrides one.
 GAIN = float(os.environ.get("IBI_LOOP_GAIN", 1.0))
 GAIN_BY_COORD = {c: float(os.environ.get(f"IBI_LOOP_GAIN_{c.upper()}", GAIN)) for c in UPDATED}
+# THE SUPPORT GATE IS A KNOB NOW (2026-10-04), and the record says what refusing it costs.
+#
+# Arm A refused bb_bond BOTH rounds -- 1.02 then 1.08 percent of observations outside
+# [0.373417, 0.809522] against a 1 percent gate -- and bb_bond is the one coordinate whose sampled
+# width tracks its own table almost 1:1: measured over the nine campaign rounds, sigma_sampled against
+# sigma_implied has slope 1.111 (R2 0.94), against 0.311 for the angle and 0.019 for the stack (which
+# has no table at all). Its sampled sigma ends at 0.05405 against a 0.05402 target -- it is the one
+# coordinate the loop actually finished, and arm A spent two rounds not touching it.
+#
+# The gate exists so the moments are not taken on a truncated view (ibi_bonded.plan_update), and the
+# size of that truncation is bounded and small here: f*d with f = 0.0102 and the measured excursion
+# d = 0.18 nm (this file's wall note) is a mean shift of 0.0018 nm, 3.4 percent of the target sigma --
+# the same order as the round-to-round noise in a 3.3e8-sample histogram. So the gate can be raised
+# rather than removed, and the fraction is now REPORTED for every coordinate whether or not it refuses.
+#
+# Default unchanged (0.01): every table in results/ holds this value, and tests/test_ibi_driver_rules
+# pins the default path against golden digests. A launcher that wants the working knob to work sets
+# IBI_LOOP_SUPPORT_GATE=0.03.
+SUPPORT_GATE = float(os.environ.get("IBI_LOOP_SUPPORT_GATE", I.DEFAULT_MAX_OUTSIDE_FRAC))
 # "table" alone has no restoring force outside its support (both edge slopes of the shipped
 # bb_bond table are exactly 0.0), so the wall is what bounds an excursion.
 #
@@ -689,7 +708,7 @@ def update_one_coord(coord, table, counts, n_tot, n_out, p_ref, hist, hist_norm,
         A = PB.design_bspline(table["centre"], float(table["lo"]), float(table["hi"]),
                               int(RULE_BSPLINE_M))
         res = I.moment_correction(table, counts, n_tot, n_out, p_ref, K=int(RULE_BSPLINE_M),
-                                  gain=GAIN_BY_COORD[coord], design=A,
+                                  gain=GAIN_BY_COORD[coord], design=A, max_outside_frac=SUPPORT_GATE,
                                   ridge_rel=RULE_RIDGE_REL, ridge_form="eig")
         _norm = float(res.diagnostics.get("moment_norm", float("nan")))
         if _norm == _norm:
@@ -732,7 +751,7 @@ def update_one_coord(coord, table, counts, n_tot, n_out, p_ref, hist, hist_norm,
         # max|dU|, so a coupled step that starts growing is caught by the same instrument rather than
         # by a second opinion.
         res = I.moment_correction(table, counts, n_tot, n_out, p_ref, K=CORRECTION_K,
-                                  gain=GAIN_BY_COORD[coord])
+                                  gain=GAIN_BY_COORD[coord], max_outside_frac=SUPPORT_GATE)
         _norm = float(res.diagnostics.get("moment_norm", float("nan")))
         if _norm == _norm:
             _div, _msg = I.divergence_check(hist_norm[coord], _norm)
@@ -743,11 +762,76 @@ def update_one_coord(coord, table, counts, n_tot, n_out, p_ref, hist, hist_norm,
             hist_norm[coord].append(_norm)
         return res, OPERATOR
     res = I.plan_update(table, hist, p_ref, history=hist_by_coord[coord],
-                        gain=GAIN_BY_COORD[coord], smooth_bins=(B.SMOOTH_WIDTH - 1) // 2)
+                        gain=GAIN_BY_COORD[coord], max_outside_frac=SUPPORT_GATE,
+                        smooth_bins=(B.SMOOTH_WIDTH - 1) // 2)
     # AN UNRECOGNISED RULE RUNS THE OPERATOR, AND REPORTS THE OPERATOR. Echoing the unknown string
     # would put a rule name in the round json that no code path implements -- measured by
     # test_unknown_rule_falls_back_to_the_default_path, which caught exactly that.
     return res, OPERATOR
+
+
+def marginal_report(table, U_after, counts, p_ref, edge_frac=0.05):
+    """One coordinate's marginals, in the currencies the loop has to be read in.
+
+    WHY THIS IS IN THE ROUND JSON. Two of the loop's three controlled coordinates turned out not to be
+    controllable by their own table, and neither side's numbers say so on their own:
+
+      * the DIHEDRAL's sampled outer-5-percent mass sat at 0.318-0.361 for four campaign rounds while
+        its table's own implied edge moved 0.170 -> 0.152 -- the table moved, the ensemble did not;
+      * the ANGLE's table walked its implied sigma 0.3218 -> 0.1307 while the sampled sigma followed
+        only 0.4159 -> 0.3493. The least-squares slope over nine rounds is 0.311 (R2 0.70): a table
+        change reaches the ensemble at about a third of its size, and the pooled width cannot go below
+        that line's intercept, 0.3253, which is 1 percent ABOVE the 0.3218 target. The angle's
+        remaining discrepancy is the model's floor, not the table's.
+
+    So every round now records, per coordinate: the sampled sigma and edge mass (what the pool did), the
+    target's own sigma and edge mass (what the reference holds), the table's implied sigma and edge mass
+    before and after the update (what the fit asked for), and the ratios between them. sigma_implied is
+    exp(-U/kBT) of the table ALONE; it is not the distribution the chain samples, which is exactly why
+    the two are quoted side by side rather than one standing in for the other.
+
+    Verified against the record: on arm A's round 0 this returns implied_sigma_after = 0.68491 (angle)
+    and 0.51862 (dihedral), the two numbers ibi_armA_verdict.py reads back out of tables_r1.
+    """
+    def _sigma(p, centre):
+        m = float((p * centre).sum())
+        return float(np.sqrt(max((p * (centre - m) ** 2).sum(), 0.0)))
+
+    def _edge(p):
+        k = max(1, int(len(p) * edge_frac))
+        return float(p[:k].sum() + p[-k:].sum())
+
+    def _implied(U):
+        U = np.asarray(U, dtype=float)
+        p = np.exp(-(U - U.min()) / B.KBT)
+        return p / p.sum()
+
+    centre = np.asarray(table["centre"], dtype=float)
+    c = np.asarray(counts, dtype=float)
+    tot = float(c.sum())
+    p_sim = c / tot if tot > 0 else np.zeros_like(c)
+    p_ref = np.asarray(p_ref, dtype=float)
+    p_before = _implied(table["U"])
+    s_sim, s_tgt, s_before = _sigma(p_sim, centre), _sigma(p_ref, centre), _sigma(p_before, centre)
+    e_sim, e_tgt = _edge(p_sim), _edge(p_ref)
+    out = {"sampled_sigma": s_sim, "sampled_edge": e_sim,
+           "target_sigma": s_tgt, "target_edge": e_tgt,
+           "implied_sigma_before": s_before, "implied_edge_before": _edge(p_before),
+           "sim_over_implied_before": (s_sim / s_before) if s_before else float("nan"),
+           "sim_over_target": (s_sim / s_tgt) if s_tgt else float("nan"),
+           "edge_gap_sampled": e_sim - e_tgt,
+           "implied_sigma_after": None, "implied_edge_after": None,
+           "implied_sigma_ratio": None, "sim_over_implied_after": None,
+           "edge_gap_table_after": None}
+    if U_after is not None:
+        p_after = _implied(U_after)
+        s_after, e_after = _sigma(p_after, centre), _edge(p_after)
+        out["implied_sigma_after"] = s_after
+        out["implied_edge_after"] = e_after
+        out["implied_sigma_ratio"] = (s_after / s_before) if s_before else float("nan")
+        out["sim_over_implied_after"] = (s_sim / s_after) if s_after else float("nan")
+        out["edge_gap_table_after"] = e_after - e_tgt
+    return out
 
 
 def main():
@@ -839,10 +923,15 @@ def main():
           f"{burn * 0.002:.0f} ps, window {(nsteps - burn) * 0.002:.0f} ps at stride {stride}")
     _rules = {c: RULE_BY_COORD.get(c, "") for c in UPDATED if RULE_BY_COORD.get(c, "")}
     print(f"  friction {friction}/ps, 300 K, constraints ON, wall_k {WALL_K:g}, gain " + " ".join(f"{c}={GAIN_BY_COORD[c]:g}" for c in UPDATED)
+          + f", support gate {SUPPORT_GATE:g}"
           + (f", relax {RELAX_STEPS} steps" if RELAX_STEPS else "")
           + (f", operator {OPERATOR}" + (f" (K={CORRECTION_K})" if OPERATOR == "moments" else ""))
         + (", per-coordinate rules " + " ".join(f"{c}={r}" for c, r in _rules.items())
-           if _rules else ""))
+           if _rules else "")
+        # The frozen list belongs in the header: a run with IBI_LOOP_FREEZE set is judged on the
+        # coordinates it did NOT touch, and the log is the only place that says so. (The launcher
+        # records it too; the header is what a reader of the output file sees.)
+        + (", frozen " + ",".join(FROZEN) if FROZEN else ""))
     # Truncated: the all-chains pool is 867 names, which buries the rest of the header. The full
     # list is recoverable from the round json's per_structure entries.
     _ls = [len(s["pos"]) for s in structs]
@@ -1042,7 +1131,11 @@ def main():
                 _meas = float(np.mean(_rt)) if _rt else float("nan")
                 updates[c] = {"status": "frozen", "rule": "frozen", "reason": "IBI_LOOP_FREEZE",
                               "max_abs_dU": 0.0, "n_samples": int(n_tot), "n_outside": int(n_out),
-                              "measured_sim_ref_table": None if _meas != _meas else _meas}
+                              "measured_sim_ref_table": None if _meas != _meas else _meas,
+                              # A frozen coordinate is still MEASURED: the acceptance criteria are on
+                              # the sampled marginal now, and a table that is carried unchanged still
+                              # has to be read against what the pool did under it.
+                              "marginals": marginal_report(tables[c], None, counts, p_ref[c])}
                 print(f"  update {c:9s} frozen   table carried; measured sim/ref_table "
                       f"{_meas:.4f}  n={n_tot}" if _meas == _meas
                       else f"  update {c:9s} frozen   table carried; no measured ratio")
@@ -1084,6 +1177,8 @@ def main():
                 new_table = None
                 entry["status"] = "refused"
                 entry["reason"] = str(exc)
+            entry["marginals"] = marginal_report(
+                tables[c], (new_table["U"] if new_table is not None else None), counts, p_ref[c])
             updates[c] = entry
             print(f"  update {c:9s} {entry['status']:8s} max|dU|={entry['max_abs_dU']:.4f} "
                   f"kBT={entry['max_abs_dU'] / B.KBT:.4f}  n={entry['n_samples']} "

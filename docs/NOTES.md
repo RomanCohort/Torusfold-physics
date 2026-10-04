@@ -329,5 +329,61 @@ edge-mass deficit (-0.18 at full pool) that the basis work showed is a Chebyshev
 rounds problem; the angle's table is the pre-campaign one, i.e. the best available and not a converged
 object. Both would be refit by the per-coordinate rules that work argues for.
 
+---
+
+## 2026-10-04 — The criterion was the defect: what the field delivers, and what the loop was chasing
+
+Two more arms ran, both failed their stated criteria, and the failure turned out to be the criteria.
+The full account is Part 12 of `docs/ibi_loop_and_oxrna_findings.md`; this is the part a reader of the
+field needs.
+
+**The measurement that reframed it.** For each of the campaign's nine rounds, the table that round
+sampled under and the pooled histogram it produced are both on disk, so the loop's effective gain can be
+regressed per coordinate (`scripts/ibi_transmission_scan.py`, sampled sigma against the table's own
+implied sigma):
+
+| coordinate | slope | R2 | pooled sigma at an infinitely narrow table | target sigma |
+| :-- | --: | --: | --: | --: |
+| bb_bond | 1.111 | 0.94 | 0.0004 | 0.0540 |
+| angle | 0.311 | 0.70 | **0.3253** | **0.3218** |
+| dihedral | 0.970 (campaign) / 0.251 (arm A) | 0.82 | 0.159 | 0.625 |
+| stack | 0.019 | 0.00 | 0.146 | 0.127 |
+
+The angle's line says its pooled width cannot fall below 0.3253 — **one percent above its target**. The
+campaign drove its implied sigma 0.3218 -> 0.1307 while the ensemble followed a third of the way; that
+coordinate was finished and the loop could not tell. The dihedral's two slopes disagree because the two
+runs moved the ANGLE in opposite directions: a coordinate whose marginal is not its own table's
+Boltzmann distribution cannot be measured with another coordinate moving.
+
+**The verdict on the shipped field** (`scripts/ibi_verdict.py`, criteria |ln(sigma_sampled/sigma_target)|
+<= 0.10 and |edge gap| <= 0.05): bb_bond, angle and dihedral all PASS at the campaign's round 8 —
+sampled 0.05405 / 0.34930 / 0.61074 against targets 0.05402 / 0.32176 / 0.62471, with edge gaps of
++0.0000 / -0.0034 / -0.0015. bb_bond and the dihedral passed at round 1; the angle from round 7. `stack`
+is DERIVED (no table, algebraic in the other two) and is excluded rather than judged. **So the tables in
+`results/production_tables.npz` reproduce the target's pooled local-geometry marginals to within 8
+percent in width and 0.003 in edge mass — and the nine rounds of table churn after round 1 bought the
+ensemble almost nothing.**
+
+**What that does not mean.** The pass is at the *pooled equilibrium* marginal, which is what the tables
+were fitted to. It is not a statement about any single structure's geometry: that is what the 2OIU A/B
+measures, and its single draw showed the fitted dihedral field halving the log width error
+(|ln(sd/target)| 0.635 -> 0.307) while the two products differed by 13.5 Å from REMD's unseeded start.
+Ten draws per arm are running now, analysed as a PAIRED difference so the scatter cancels.
+
+**Which of the failures were real.** Three, and all three are now handled in code rather than by taste:
+the support gate (arm A refused bb_bond, the one coordinate with unit gain, at 1.02 percent against a
+1 percent gate — now `IBI_LOOP_SUPPORT_GATE`, printed in the header, with the out-of-support fraction
+recorded for refused and frozen coordinates too); the undamped replacement step (the angle's
+self-consistent refit overshoots its own target by 1.64x at gain 1 and is neutral at 0.3, measured in
+`scripts/ibi_step_gain_scan.py`; the dihedral's edge loss is monotone in gain, -0.016 at 0.1 against
+-0.137 at 1.0); and the missing per-round record (every round json now carries a `marginals` block —
+sampled and implied sigma and edge, before and after, with the edge gaps).
+
+**Still open.** Whether a table-side fixed point exists at all: an arm with the angle and bb_bond frozen
+and only the dihedral stepping is running (seven chains, gain 0.5), which is the first clean measurement
+of one coordinate's own transmission. And the record itself moved — the campaign's 0.44 GB sat at
+`results/ibi_relax` for nine rounds and was parked elsewhere on 2026-10-01; `ibi_core.campaign_root()`
+resolves it now, and eight scripts still hard-code the old path.
+
 
 

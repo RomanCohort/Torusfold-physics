@@ -730,6 +730,101 @@ Two lessons, both applicable without a new arm, and the second is the more expen
   production loop's Chebyshev K=8 (-0.154 to -0.173). Whatever the seven-chain pool leaves out, it is
   not only the basis order -- so the cheap pool is a screen for a *rule*, not a stand-in for the pool.
 
+## Part 12 — The criterion was the defect: the campaign converged on the ensemble while its tables churned (2026-10-04)
+
+Part 10 judged arm A on table-side quantities and it failed. The obvious next move was another arm. The
+cheaper move was to ask what the table-side quantities are a proxy FOR, and the record was already on
+disk: nine campaign rounds, each with the table it sampled under (tables_r{r}.npz) and the pooled
+histogram it produced (tasks_r{r}, 867 chains). scripts/ibi_transmission_scan.py regresses one against
+the other -- sampled sigma against the table's own implied sigma -- and that slope is the loop's
+effective gain, per coordinate:
+
+| coordinate | slope | R2 | intercept (pooled sigma at an infinitely narrow table) | target sigma |
+| :-- | --: | --: | --: | --: |
+| bb_bond | 1.111 | 0.94 | 0.0004 | 0.0540 |
+| angle | 0.311 | 0.70 | **0.3253** | **0.3218** |
+| dihedral | 0.970 | 0.82 | 0.159 | 0.625 |
+| stack | 0.019 | 0.00 | 0.146 | 0.127 |
+
+1. **The angle was at the model's floor, and the loop kept pushing a table nobody was sampling.** Its
+   line says a table change reaches the ensemble at about a third of its size, and that the pooled width
+   cannot go below 0.3253 -- one percent ABOVE the 0.3218 target. The campaign drove the angle's implied
+   sigma 0.3218 -> 0.1307 (-59 percent) while the sampled sigma came down 0.4159 -> 0.3493 (that is all
+   it could do) and the table kept walking away from the target. Nothing was wrong with the angle.
+2. **bb_bond is the one coordinate the loop FINISHED, at slope 1.11**, and arm A refused it both
+   rounds on a 1 percent support gate. A knob with unit gain was locked out to protect the moments from
+   a tail whose bias is bounded by f*d = 0.0102 x 0.18 nm = 0.0018 nm, 3.4 percent of the target sigma.
+3. **The dihedral's two estimates disagree, and the disagreement is the coupling.** 0.97 over the
+   campaign, 0.251 in arm A -- in the same table-move range (-17 percent implied). The difference
+   between the two runs is what the ANGLE did at the same time: the campaign narrowed the angle's
+   implied sigma, arm A widened it 2.1x. So a dihedral step measured while the angle moves is
+   measuring both.
+
+THE VERDICT, ON THE SAMPLED MARGINAL (scripts/ibi_verdict.py, criteria |ln(sigma_sampled/sigma_target)|
+<= 0.10 and |edge gap| <= 0.05, both taken from the record's own scatter and from the basis project's
+frozen edge tolerance):
+
+| round | bb_bond | angle | dihedral |
+| --: | :-- | :-- | :-- |
+| 0 | sampled 0.0606 (FAIL 0.122) | 0.4159 (FAIL 0.260) | 0.7770 (FAIL 0.218) |
+| 1 | **PASS** 0.0546 (0.011) | 0.4050 (FAIL 0.231) | **PASS** 0.6753 (0.078) |
+| 3 | PASS (0.004) | 0.3944 (FAIL 0.204) | PASS (0.015) |
+| 7 | PASS (0.003) | **PASS** 0.3541 (0.096) | PASS (0.024) |
+| 8 | PASS 0.05405 (0.001) | PASS 0.34930 (0.082) | PASS 0.61074 (0.023) |
+
+**Every controlled coordinate of the production campaign passes at round 8, on the sampled marginal the
+field is actually asked to reproduce**, and every one of them passed at least five rounds before the
+campaign was stopped. The stack is excluded as DERIVED, not judged: it has no table, its implied sigma
+is identical to ten digits in all nine rounds, and its pooled width tracks the angle's.
+
+So the "limit cycle" of Parts 8-10 is a TABLE-side phenomenon. The loop's convergence monitors watch the
+size of the update -- max|dU|, the moment norm, the divergence guard -- and an update can shrink, ring,
+or grow while the ensemble it describes sits still. Part 8 measured the same thing from one side (the
+moment operator narrowing a marginal the sampler ignores); Part 9 saw it in the edge gap; this is the
+same fact stated as a number that can be used: **transmission, per coordinate, and where its line
+crosses the target.**
+
+WHAT CHANGED IN THE CODE, each because of a measurement above:
+
+* `IBI_LOOP_SUPPORT_GATE` (default 0.01, unchanged; the arms set 0.03): the gate was already a
+  parameter of both operators, and the driver now passes it and prints it in the header. The
+  out-of-support fraction was always recorded; now it is recorded for coordinates that are REFUSED and
+  for coordinates that are FROZEN too, which is where arm A's bb_bond lived.
+* Every round json now carries a `marginals` block per coordinate -- sampled sigma and edge, the
+  target's sigma and edge, the table's implied sigma and edge before and after, the ratios, and the two
+  edge gaps. Verified against the record: it reproduces arm A's applied tables to the digit (angle
+  implied 0.68491, dihedral 0.51862).
+* `scripts/ibi_verdict.py` judges an arm on the sampled marginal and reports the table-side numbers as
+  diagnostics, with the transmission slope beside them, and `scripts/ibi_step_gain_scan.py` replayed
+  each rule across a gain ladder to size the damping rather than guess it: the angle's self-consistent
+  refit overshoots its OWN target by 1.64x at gain 1 (implied sigma 0.685 against the sigma 0.417 of the
+  ensemble it was fitted to) and is neutral at gain 0.3 (0.41281 against 0.41746); the dihedral's table
+  edge gap is monotone in gain, -0.016 at 0.1 and -0.137 at 1.0, so a half step costs half the edge
+  mass arm A lost.
+* `ibi_core.campaign_root()`: the campaign record is no longer at results/ibi_relax -- a housekeeping
+  pass parked it on 2026-10-01 and only part of it came back under _strays -- so the scripts that read
+  it resolve it instead of hard-coding a path that stopped existing. Eight of them still hard-code it;
+  the list is in the resolver's docstring.
+
+WHAT IS RUNNING, and what each one decides. Two arms, launched together, neither a repeat of arm A:
+
+* `results/plan_c/run_dih7.cmd` -- seven chains, three rounds, production protocol, the angle and
+  bb_bond FROZEN, the dihedral alone at B-spline m=16 and gain 0.5 with the gate at 0.03. This is the
+  designed experiment for point 3: with nothing else moving, the dihedral's own transmission is
+  measurable, and its edge gap either holds (a stable table exists) or does not.
+* `results/plan_c/run_ab2oiu10.cmd` -- the 2OIU A/B through the shipped GPU refiner, TEN draws per arm
+  instead of one, so the dihedral effect (|ln(sd/target)| 0.635 analytic against 0.307 fitted in the
+  single draw) becomes a paired mean +- sd with a win count. The arms share the input and the draw
+  index, so the paired difference ln(sd_tables/sd_analytic) cancels the scatter the single draw carried.
+
+NOT CLAIMED HERE. The sampled-side pass is at the POOLED equilibrium marginal, which is what the tables
+were fitted to; it is not a claim about any single structure's geometry -- the 2OIU repeats are that
+claim, and they are running. The dihedral's transmission is still two numbers (0.97 and 0.25) until the
+frozen-angle arm reports. And the tolerances, 10 percent in width and 0.05 in edge, are choices read off
+the record's own round-to-round scatter (1-3 percent) and the basis project's frozen edge tolerance;
+they are not derived.
+
+
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 
 The pipeline switch in `torch_gpu_refine` (TORUSFOLD_CG_TABLES, 2026-10-01) made this the first

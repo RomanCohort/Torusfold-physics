@@ -10,10 +10,15 @@ pool (867 chains):
     rounds. The campaign's dihedral table is still the best available one.
   * angle did NOT converge under EITHER operator: the marginal inversion rang (3.00 / 3.94 / 3.02 /
     4.27 / 4.31 / 3.72 kJ/mol over rounds 0-5, no decay) and the moment operator drove the table's
-    implied sigma from 0.3218 down to 0.1307 while the SAMPLED sigma fell only 16 percent -- an update
-    the coupling absorbs (docs/ibi_loop_and_oxrna_findings.md Part 8). Every update made this coordinate
-    worse, so the production field keeps the PRE-CAMPAIGN refit table for it, which is also the target
-    the campaign was inverting against.
+    implied sigma from 0.3218 down to 0.1307 while the SAMPLED sigma followed only a third of the way
+    (0.4159 -> 0.3493). The measured transmission over the nine rounds is 0.311 (R2 0.70,
+    scripts/ibi_transmission_scan.py) and the same line's intercept -- the pooled width at an
+    infinitely narrow table -- is 0.3253, ABOVE the 0.3218 target: the angle was at the model's floor
+    by round 8 (|ln(sampled/target)| = 0.082, inside the 10 percent the sampled-side verdict asks for,
+    scripts/ibi_verdict.py), and what the campaign kept buying with more rounds was table drift, not
+    geometry. So the production field keeps the PRE-CAMPAIGN refit table for it, which is also the
+    target the campaign was inverting against, and it is kept for the reason that matters: the table
+    stops moving, and the sampled marginal it produces is already inside tolerance.
   * stack is not injected at all: it is an exact function of bb_bond and the P-P-P angle, the sampler
     has no stack potential, and its spring in torch_cgsim is zero for the same reason.
 """
@@ -23,7 +28,14 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
-CAMPAIGN = REPO / "results" / "ibi_relax" / "tables_r9.npz"
+sys.path.insert(0, str(REPO / "scripts"))
+import ibi_core as IC                     # noqa: E402  (the campaign record moved: see below)
+
+# THE CAMPAIGN RECORD MOVED, and this path used to be hard-coded to it. results/ibi_relax is gone --
+# a housekeeping pass parked the 0.44 GB of per-chain histograms out of results/ on 2026-10-01 and
+# only part of it came back under _strays. ibi_core.campaign_root() is the one place that knows the
+# candidates and prefers the complete copy, so this builder runs again from a fresh checkout.
+CAMPAIGN = IC.campaign_root() / "tables_r9.npz"
 REFIT = REPO / "results" / "refit_smooth5.npz"
 DEST = REPO / "results" / "production_tables.npz"
 KBT = 2.494

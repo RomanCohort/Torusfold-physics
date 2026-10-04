@@ -18,7 +18,9 @@ sys.path.insert(0, str(REPO / "src"))
 import ibi_core as IC          # noqa: E402
 
 ARM = REPO / "results" / "ibi_armA"
-CAMPAIGN = REPO / "results" / "ibi_relax"
+# Resolved, not hard-coded: the campaign record was moved out of results/ on 2026-10-01 and only its
+# tables and round jsons came back under _strays (see ibi_core.campaign_root).
+CAMPAIGN = IC.campaign_root(need_tasks=True)
 REF = REPO / "results" / "refit_smooth5.npz"
 COORDS = ("bb_bond", "angle", "dihedral", "stack")
 KBT = 2.494

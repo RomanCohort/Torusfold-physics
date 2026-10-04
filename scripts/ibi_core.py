@@ -28,6 +28,7 @@ the force recomputed at the post-update coordinates, sampling every STRIDE steps
 cumulative line -- see run_round's note.
 """
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -559,3 +560,43 @@ def write_round(outdir, res, tab, meta=None):
     if meta is not None:
         (out / "manifest.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     return out
+
+
+# --- where the campaign record lives ---------------------------------------------------------
+#
+# results/ibi_relax was the production campaign's own directory for nine rounds. It no longer exists:
+# a housekeeping pass moved it out of results/ on 2026-10-01, and what came back into a "_strays"
+# area on 2026-10-02 is only PART of it -- the tables and the round jsons are in both places, while
+# the 867-chain tasks_r0..r8 directories are in the parked copy alone. Nine scripts in this directory
+# still hard-code the old path, so a reader that "returns nothing" there looks like an empty record
+# rather than a moved one. This resolver is the one place that knows the candidates:
+#
+#     $IBI_CAMPAIGN_DIR            explicit override, for a record that moves again
+#     results/ibi_relax            the historical location, preferred whenever it exists
+#     _park_20261002/ibi_relax     the complete parked copy (tables_r0..r9, tasks_r0..r8, jsons)
+#     _strays/ibi_relax_campaign   tables and jsons only, NO per-chain histograms
+#
+# need_tasks=True skips a candidate that has no tasks_r0: a caller about to glob per-chain files
+# wants a loud miss here, not an empty sum later. Verified on this box: the parked copy is complete
+# (867 npz per round, rounds 0-8) and the stray copy is not.
+def campaign_root(need_tasks=False):
+    """Path of the production campaign's record, or raise with every candidate that was tried."""
+    cands = []
+    env = os.environ.get("IBI_CAMPAIGN_DIR")
+    if env:
+        cands.append(Path(env))
+    cands += [REPO / "results" / "ibi_relax",
+              REPO / "_park_20261002" / "ibi_relax",
+              REPO / "_strays" / "ibi_relax_campaign"]
+    tried = []
+    for c in cands:
+        if not c.is_dir():
+            tried.append(f"{c} (missing)")
+            continue
+        if need_tasks and not (c / "tasks_r0").is_dir():
+            tried.append(f"{c} (no tasks_r0)")
+            continue
+        return c
+    raise FileNotFoundError("campaign record not found; tried: " + ", ".join(tried) +
+                            " -- set IBI_CAMPAIGN_DIR to its location")
+
