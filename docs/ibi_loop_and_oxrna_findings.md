@@ -669,6 +669,110 @@ Three readings, and the first two are the point:
 Not claimed here: the bb_bond gap is zero at full pool (the +0.238 the basis arms measured for
 Chebyshev was a seven-chain number), and there is no arm-level evidence for K=16 or K=32.
 
+## Part 10 — The A-round verdict: a full-strength replacement overshoots, and one refusal starves another coordinate (2026-10-04)
+
+Parts 8 and 9 diagnosed the production loop's cycle from its own record. Arm A is the intervention
+those diagnoses implied: a fresh two-round loop on the same 867-chain pool with one rule per
+coordinate, each chosen by a different measurement.
+
+| coordinate | rule | why that rule |
+| :-- | :-- | :-- |
+| bb_bond | moments | its table already sits within 0.0003 of the target's edge; keep the change smallest |
+| angle | selfconsistent | Part 8: the moment operator is absorbed by the coupling |
+| dihedral | bspline16 | Part 9's edge-gap arm: B-spline m=16 held \|gap\| <= 0.012 where Chebyshev K=8 was -0.378 |
+
+Round 0 ran 17.05 h, round 1 17.00 h (61 383 + 61 210 s), 867 of 867 chains in both, and both criteria
+the basis project set for "the cycle is broken" fail on the round 1 tables:
+
+| round | bb_bond | angle | dihedral | per-chain J median | J_all median |
+| --: | :-- | --: | --: | --: | --: |
+| 0 | refused | applied, max \|dU\| 23.94 kJ/mol (9.60 kBT) | applied, 4.70 (1.89 kBT) | 0.1623 | 0.1716 |
+| 1 | refused | applied, 9.95 (3.99 kBT) | applied, 2.63 (1.06 kBT) | **0.2343** | **0.3043** |
+
+Round 0's table columns are the starting tables by construction (every gap exactly zero, every implied
+sigma equal to the target); the informative columns are round 1's, measured on the tables round 0 applied
+and sampled by the chains that ran under them.
+
+| round | coordinate | sampled sigma | table implied | sim/implied | edge gap |
+| --: | :-- | --: | --: | --: | --: |
+| 0 | angle | 0.41746 | 0.32176 | 1.297 | 0.0000 |
+| 0 | dihedral | 0.77650 | 0.62471 | 1.243 | 0.0000 |
+| 1 | angle | 0.54072 | **0.68491** | **0.789** | **+0.3393** |
+| 1 | dihedral | 0.74991 | 0.51862 | 1.446 | **-0.1368** |
+
+(targets, refit_smooth5: angle sigma 0.32176, dihedral 0.62471.)
+
+1. **The angle's full-strength replacement overshot by a factor 2.1 in implied width, and the sampler
+   followed it 30 percent.** Round 0's self-consistent update -- maximum |dU| = 9.6 kBT, the largest
+   update this campaign has ever applied -- installed a table whose implied sigma is 0.685 against a
+   0.322 target, and the pool then sampled 0.417 -> 0.541. A rule that is right when the ensemble
+   matches the table (Part 8) is not safe when it does not: the update is a ratio of two histograms
+   that are 30 percent apart in width, and nothing in the rule caps how far one step may go.
+2. **Correcting the angle starved the dihedral.** Round 1's dihedral update was fitted to chains whose
+   angle marginal had just moved; its implied sigma fell 0.625 -> 0.519 (edge gap -0.137) while its
+   sampled width barely moved (0.7765 -> 0.7499). That is Part 9's signature read in the opposite
+   direction, and it is the coupling: the two applied updates are not independent, so an arm that lets
+   each coordinate take its own step can have one coordinate's overshoot disable the other's correction.
+3. **bb_bond never updated at all.** Both rounds refused it on support drift -- 1.02 then 1.08 percent
+   of observations outside [0.373417, 0.809522] against a 1 percent gate (3 385 037 and 3 594 522 of
+   331 737 500). The gate exists so the moments are not taken on a truncated distribution, and it did
+   its job; the cost is that the one coordinate whose rule was already known to work contributed
+   nothing, in an arm whose whole point was to let the working rules work.
+
+Two lessons, both applicable without a new arm, and the second is the more expensive one:
+
+- **Blend, do not replace.** `U_new = (1 - g) U_old + g U_fit` with g in 0.1-0.5 bounds a single step
+  by the field it is a correction to, which is exactly what fails when the ensemble and the table
+  disagree by 30 percent. The production loop's own moment operator is implicitly a small-g step (it
+  fits a correction, not a distribution); the self-consistent and B-spline rules are not.
+- **A basis that fixes the seven-chain pool does not automatically fix the full one.** The B-spline
+  family that measured +0.012 at seven chains measured -0.137 here, the same sign and order as the
+  production loop's Chebyshev K=8 (-0.154 to -0.173). Whatever the seven-chain pool leaves out, it is
+  not only the basis order -- so the cheap pool is a screen for a *rule*, not a stand-in for the pool.
+
+## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
+
+The pipeline switch in `torch_gpu_refine` (TORUSFOLD_CG_TABLES, 2026-10-01) made this the first
+end-to-end test of the field as delivered. Both arms run the same shipped refiner on this machine's GPU
+from the same crystal P trace, the same secondary structure and the same pair list; the only difference
+is which field the CG energy calls take. 2OIU, 71 nt, 27 pairs, input BSJ 0.592 nm. The production
+table mixes sources by measurement: bb_bond and dihedral from the campaign's round 9, angle from
+refit_smooth5, all three on one shared support (`scripts/build_production_tables.py`).
+
+| arm | wall | final energy (its own field) | BSJ |
+| :-- | --: | --: | --: |
+| fitted tables (`results/production_tables.npz`) | 629.5 s | 708.417 | 0.687 nm |
+| analytic field | 622.0 s | 730.05 | 0.649 nm |
+
+The energies are not comparable across arms; the geometry is. P-trace widths (all four coordinates are
+functions of the P trace alone) against the fit target:
+
+| coordinate | target sd | analytic | tables | \|ln(sd/target)\| an / tab |
+| :-- | --: | --: | --: | --: |
+| bb_bond | 0.0633 | 0.0042 | 0.0045 | 2.720 / 2.648 |
+| angle | 0.3203 | 0.4155 | 0.4188 | 0.260 / 0.268 |
+| dihedral | 0.6299 | 0.3337 | 0.4634 | **0.635 / 0.307** |
+| stack | 0.1390 | 0.1729 | 0.1730 | 0.219 / 0.219 |
+
+1. **The one coordinate the tables were fitted to change is the one that moved.** The dihedral's width
+   over the analytic field goes 0.334 -> 0.463, halving its log error; no other coordinate moves by more
+   than 0.004 in sd (and stack, which is algebraic in bb_bond and angle and has no table of its own,
+   moves the least of all -- an internal consistency check that the raw P-trace statistics are being
+   read the same way in both arms). The fitted field does what it was fitted to do through the shipped
+   GPU path, and it leaves the dihedral 26 percent narrow against a target the free refinement never
+   reaches.
+2. **Two of the four rows are not field verdicts.** The bb_bond row is dominated by the refiner's own
+   bond restraints at this stage, so both arms sit at 0.004 against a 0.063 target; the ln ratios there
+   say nothing about the field. The angle row is the analytic field's own error, and the angle table it
+   used is the refit target's, so a table-side gain was not expected and none appears.
+3. **One draw per arm, and it is reported as one.** REMD velocities are unseeded, and the two products
+   differ by 13.5 A P-only Kabsch RMSD. That number bounds nothing by itself -- it says the refinement
+   is not deterministic, not that the fields disagree -- and it is why this is recorded as a single
+   observation of a real effect (the dihedral is far outside any draw-to-draw scatter this pipeline has
+   shown) rather than as an effect size.
+
+Chebyshev was a seven-chain number), and there is no arm-level evidence for K=16 or K=32.
+
 
 
 
