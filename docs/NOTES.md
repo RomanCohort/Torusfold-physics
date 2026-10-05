@@ -640,3 +640,23 @@ scan. The model can carry stacking; this term cannot reach it.
 spread -- a demonstration, not a converged measurement; the ten-draw 2OIU products predate the sink and
 carry no beads; and 75.7 percent is a reconstruction validation on ideal input, not a product claim.
 \n**Second and third strength (same day).** eps = 2.3 kJ/mol with the same weights cut joint_J_base from 0.92\nto **0.30** and changed the error's shape: base_rise is now 1.8-1.9x too WIDE, base_cos 1.15-1.19x, base_dist\nstill slightly narrow (0.88-0.93). Applying sigma ~ 1/sqrt(eps) per coordinate gives the rise 7.9, the\norientation 3.1 and the distance 0.56 kJ/mol of effective strength, i.e. **eps = 7.9 with weights\n(0.07, 1, 0.39)** -- the per-coordinate weighting the scans kept asking for, now derived rather than\nsearched. Third arm is running. The loop's sigma scoreboard is the calibration instrument now: the first\nstrength came from a 5000-step scan and was wrong by 15x, the second and third come from two-round\nseven-chain arms that take 25 minutes each.\n
+
+## 2026-10-05 (8) — The stacking term costs nothing on retention
+
+The fourth calibration (eps 16.6, weights 0/1/0.19 -- the rise's derived lever, the distance term dropped)
+brings joint_J_base to **0.190** from 0.918 at the first strength, with base_rise 1.21x the crystal width
+and base_cos 0.90x. And the retention instrument, run twice on the same tables with only the base-level term
+toggling (seven length-stratified chains, 12 ps, 5000-step relaxation):
+
+| arm | median dep->mean | median spread | chains > 10 A |
+| :-- | --: | --: | --: |
+| term OFF | 0.46 A | 0.19 A | 0 of 7 |
+| term ON (7.9, 0.07/1/0.39) | 0.43 A | 0.18 A | 0 of 7 |
+
+**Retention is unchanged** -- the two arms agree chain by chain to within 0.03 A on six of seven. The
+coordinates the crystals actually constrain can be brought to their targets without giving up the property
+the field was already good at.
+
+The distance term stays dropped: taking it from 0.07 to 0.0 moved base_dist's sigma ratio from 0.834 to
+0.738 -- the wrong way for a term being removed, which is what "this coordinate's width is the backbone's"
+looks like when it is tested rather than argued.

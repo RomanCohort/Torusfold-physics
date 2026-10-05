@@ -211,7 +211,8 @@ def describe(spec, coord=None):
     return repr(spec)
 
 
-def build_potential_kwargs(table_path, wall_k=2000.0, coords=("bb_bond", "angle", "dihedral")):
+def build_potential_kwargs(table_path, wall_k=2000.0, coords=("bb_bond", "angle", "dihedral"),
+                          base_stack=None):
     """(pots, pot_kw) for one CG energy call, built from table_path.
 
     THE ONE PLACE THIS IS WRITTEN, so the calibration harness and the production pipeline cannot
@@ -221,6 +222,14 @@ def build_potential_kwargs(table_path, wall_k=2000.0, coords=("bb_bond", "angle"
     bb_bond gets the WALL spec because its stored table is flat at both support edges: without the
     wall there is no restoring force at all outside the fitted range (see force_reference.bond_table).
     angle and dihedral take the bare table.
+
+    base_stack: {"eps": .., "form": .., "w_d"/"w_r"/"w_t": ..} adds the base-level stacking term (None
+    adds nothing). It is a dict rather than three arguments because the term belongs to
+    torusfold.scheme2.base_stacking, whose parameters are measured in findings Parts 16-21 -- and it is
+    routed through here so the loop, the retention instrument and any scan inject the SAME object.
+
+    (This function was defined twice in this file, identically, until 2026-10-05; the second copy won
+    and the first was dead. Collapsed here, with the base_stack argument added.)
     """
     use_table_file(str(table_path))
     pots = []
@@ -228,27 +237,14 @@ def build_potential_kwargs(table_path, wall_k=2000.0, coords=("bb_bond", "angle"
         spec_text = "table_wall:%.6g" % wall_k if coord == "bb_bond" else "table"
         spec = resolve_spec(spec_text, coord)
         pots.append((coord, spec, make_potential(coord, spec)))
-    return pots, potential_kwargs(pots)
-
-
-def build_potential_kwargs(table_path, wall_k=2000.0, coords=("bb_bond", "angle", "dihedral")):
-    """(pots, pot_kw) for one CG energy call, built from table_path.
-
-    THE ONE PLACE THIS IS WRITTEN, so the calibration harness and the production pipeline cannot
-    disagree about which field they ran. scripts/ibi_loop.py carries the same three lines for
-    historical reasons (and is being edited elsewhere); consolidate when convenient.
-
-    bb_bond gets the WALL spec because its stored table is flat at both support edges: without the
-    wall there is no restoring force at all outside the fitted range (see force_reference.bond_table).
-    angle and dihedral take the bare table.
-    """
-    use_table_file(str(table_path))
-    pots = []
-    for coord in coords:
-        spec_text = "table_wall:%.6g" % wall_k if coord == "bb_bond" else "table"
-        spec = resolve_spec(spec_text, coord)
-        pots.append((coord, spec, make_potential(coord, spec)))
-    return pots, potential_kwargs(pots)
+    kw = potential_kwargs(pots)
+    if base_stack:
+        from torusfold.scheme2.base_stacking import make_base_stack_potential
+        kw = dict(kw, base_stack_potential=make_base_stack_potential(
+            eps=float(base_stack.get("eps", 0.0)), form=base_stack.get("form", "sum"),
+            w_d=float(base_stack.get("w_d", 1.0)), w_r=float(base_stack.get("w_r", 1.0)),
+            w_t=float(base_stack.get("w_t", 1.0))))
+    return pots, kw
 
 
 def use_table_file(path, coord=None):

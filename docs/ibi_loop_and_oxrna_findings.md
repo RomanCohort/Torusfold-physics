@@ -1352,6 +1352,47 @@ property and should probably be dropped from the term or given a cosmetic weight
 0.07 already makes it almost inactive, and the result is 0.83); and then the question this all served --
 whether the field that carries stacking also reproduces the standard this project is judged on, retention.
 
+## Part 22 — The fourth calibration, and the retention answer (2026-10-05)
+
+THE FOURTH ARM: eps = 16.6 kJ/mol, weights (0.0, 1, 0.19) -- the rise's derived lever applied, the
+orientation's effective strength held where it was, and the distance term DROPPED rather than tuned (a
+parameter the measurement says does not control its own coordinate should not carry a value that looks
+tuned).
+
+| arm | (eps, weights) | joint_J (trace) | **joint_J_base** | base_dist | base_rise | base_cos |
+| :-- | :-- | --: | --: | --: | --: | --: |
+| 1 | (35, 0.3/1/1) | 0.078 | 0.918 | 0.805 | 0.246 | 0.254 |
+| 2 | (2.3, 0.3/1/1) | 0.185 | 0.316 | 0.925 | 1.92 | 1.19 |
+| 3 | (7.9, 0.07/1/0.39) | 0.193 | 0.254 | 0.834 | 1.50 | 1.07 |
+| **4** | **(16.6, 0/1/0.19)** | 0.118 | **0.190** | 0.738 | **1.21** | **0.90** |
+| target | -- | -- | 0 | 1.0 | 1.0 | 1.0 |
+
+joint_J_base falls 0.918 -> 0.316 -> 0.254 -> **0.190**: a factor of five from the first strength, with two
+of the three coordinates within 20 percent of the crystal width (rise 1.21 wide, orientation 0.90) and the
+third confirmed once more not to be under the term's control -- **dropping the distance penalty from 0.07 to
+0.0 moved its sigma ratio from 0.834 to 0.738**, the wrong way for a term being removed, which is what "this
+coordinate's width is the backbone's" looks like when it is tested rather than argued.
+
+AND THEN THE QUESTION THIS ARC WAS FOR. Does a field that carries stacking still keep a chain near the
+geometry it was deposited in? The retention instrument (`measure_native_retention.py`, seven
+length-stratified chains to 400 residues, 12 ps, 5000-step relaxation) run twice on the SAME tables, the
+only difference being the base-level term:
+
+| arm | median dep->mean | median spread | chains > 10 A | per-chain range |
+| :-- | --: | --: | --: | --: |
+| term OFF | **0.46 A** | 0.19 A | **0 of 7** | 0.22 - 1.47 A |
+| term ON (7.9, 0.07/1/0.39) | **0.43 A** | 0.18 A | **0 of 7** | 0.22 - 1.45 A |
+
+**Retention is unchanged.** The stacking term costs nothing on the standard this project is judged by, at
+the strength the calibration landed on, and the two arms agree chain by chain to within 0.03 A on six of
+seven. That is the answer the whole base-level arc was pointing at: the coordinates the crystals actually
+constrain can be brought to their targets without giving up the property the field was already good at.
+
+Caveats, because they bound the claim: one strength (the calibrated one, not the 16.6 of the fourth arm),
+seven chains from a length-stratified sample rather than the full pool, 12 ps, and the tables are the merged
+reference rather than the campaign's own `tables_r9` -- so the numbers compare the two arms to EACH OTHER,
+which is what the question needed, and not to the historical baseline directly.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

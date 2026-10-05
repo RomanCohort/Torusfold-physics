@@ -50,7 +50,25 @@ import cg_potentials as P                 # noqa: E402
 import ibi_core as IC                     # noqa: E402
 import torusfold.scheme2.torch_cgsim as C  # noqa: E402
 
-RUN_DIR = REPO / "results" / "ibi_relax"
+# THE CAMPAIGN RECORD MOVED (2026-10-01) and this path used to be hard-coded to it; the resolver in
+# ibi_core knows the candidates. `TABLES` can point the instrument at any table file directly, which is
+# what the base-level comparison below does: it runs the same protocol with and without the stacking
+# term, so both arms must be on the SAME tables.
+RUN_DIR = REPO / "results" / "ibi_relax"       # kept for the historical default; resolved at run time
+TABLES_OVERRIDE = os.environ.get("NATIVE_RETENTION_TABLES", "")
+# The base-level term, if the caller wants it: "eps" or "eps:w_d,w_r,w_t". Shared names with ibi_loop's
+# IBI_LOOP_BASE_STACK so the loop and this instrument cannot be running different fields.
+BASE_STACK_SPEC = os.environ.get("NATIVE_RETENTION_BASE_STACK", "")
+
+
+def base_stack_kwargs():
+    """The base_stacking parameters from NATIVE_RETENTION_BASE_STACK, or None."""
+    if not BASE_STACK_SPEC:
+        return None
+    parts = BASE_STACK_SPEC.split(":")
+    w = [float(x) for x in parts[1].split(",")] if len(parts) > 1 else [1.0, 1.0, 1.0]
+    return {"eps": float(parts[0]), "form": os.environ.get("NATIVE_RETENTION_BASE_STACK_FORM", "sum"),
+            "w_d": w[0], "w_r": w[1], "w_t": w[2]}
 OUT_DIR = REPO / "results" / "native_retention"
 WALL_K = 2000.0
 FRICTION = 1.0
@@ -58,7 +76,21 @@ FORCE_CAP = 5000.0
 
 
 def newest_tables():
-    """The highest-numbered tables_r<N>.npz in the run directory: the field as it stands."""
+    """The field as it stands: NATIVE_RETENTION_TABLES if given, else the newest tables_r<N>.npz.
+
+    The campaign record was moved out of results/ on 2026-10-01 (see ibi_core.campaign_root), so the
+    directory is resolved rather than hard-coded -- and a caller comparing two fields wants to name the
+    exact file instead, which is what the base-level comparison does.
+    """
+    if TABLES_OVERRIDE:
+        if not Path(TABLES_OVERRIDE).exists():
+            raise SystemExit(f"NATIVE_RETENTION_TABLES={TABLES_OVERRIDE} does not exist")
+        return TABLES_OVERRIDE
+    global RUN_DIR
+    try:
+        RUN_DIR = IC.campaign_root()
+    except FileNotFoundError:
+        pass
     found = []
     for p in glob.glob(str(RUN_DIR / "tables_r*.npz")):
         m = re.search(r"tables_r(\d+)\.npz$", p)
@@ -83,13 +115,10 @@ def _one(task):
     idx, name, L, pos_np, pairs, tables, nsteps, relax, seed = task
     torch.set_num_threads(1)
     t0 = time.time()
-    P.use_table_file(str(tables))
-    pots = []
-    for coord in ("bb_bond", "angle", "dihedral"):
-        spec = P.resolve_spec(f"table_wall:{WALL_K:g}", coord) if coord == "bb_bond" \
-            else P.resolve_spec("table", coord)
-        pots.append((coord, spec, P.make_potential(coord, spec)))
-    pot_kw = P.potential_kwargs(pots)
+    # ONE PLACE builds the field, so this instrument and the loop cannot disagree about which one ran.
+    _pots, pot_kw = P.build_potential_kwargs(str(tables), wall_k=WALL_K,
+                                             coords=("bb_bond", "angle", "dihedral"),
+                                             base_stack=base_stack_kwargs())
     tab = IC.load_tables(str(tables))
 
     dep = np.asarray(pos_np, dtype=np.float64).reshape(-1, 3)
