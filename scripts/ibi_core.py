@@ -61,7 +61,7 @@ def load_tables(npz_path, skip=()):
     the same check, applied to the set that actually reaches the binning loop.
     """
     z = np.load(npz_path)
-    keep = [n for n in B.COORDS if n not in set(skip)]
+    keep = [n for n in B.scored_coords() if n not in set(skip)]
     need = [f"{n}__{k}" for n in keep
             for k in ("centre", "U", "binw", "sigma", "lo", "hi")]
     missing = [k for k in need if k not in z.files]
@@ -79,10 +79,10 @@ def load_tables(npz_path, skip=()):
 
 def summed(b_counts, b_acc, nb):
     """Whole-window counts and moments, as the sum over the blocks."""
-    ct = {c: np.zeros_like(b_counts[0][c]) for c in B.COORDS}
-    ac = {c: [0.0, 0.0, 0] for c in B.COORDS}
+    ct = {c: np.zeros_like(b_counts[0][c]) for c in B.scored_coords()}
+    ac = {c: [0.0, 0.0, 0] for c in B.scored_coords()}
     for b in range(nb):
-        for c in B.COORDS:
+        for c in B.scored_coords():
             ct[c] += b_counts[b][c]
             a = b_acc[b][c]
             ac[c][0] += a[0]
@@ -166,7 +166,7 @@ def simref_table(acc, tab, skip=()):
     the ones that are (bb_bond 0.853, stack 0.913), which is exactly the point of carrying both.
     """
     skip = set(skip)
-    vals = [float("nan") if c in skip else sim_ref_ratio_table(acc, c, tab) for c in B.COORDS]
+    vals = [float("nan") if c in skip else sim_ref_ratio_table(acc, c, tab) for c in B.scored_coords()]
     js = [abs(float(np.log(r))) for r in vals if r == r and r > 0]
     return vals, (float(np.mean(js)) if js else float("nan"))
 
@@ -174,10 +174,10 @@ def simref_table(acc, tab, skip=()):
 def simref(acc, tab, skip=(), only=None):
     """(per-coordinate sim/ref values, joint J) from a moments accumulator.
 
-    J is the mean over the coordinates of |ln(sim/ref)|. Returned in B.COORDS order, with nan for
+    J is the mean over the coordinates of |ln(sim/ref)|. Returned in B.scored_coords() order, with nan for
     anything skipped or unscorable.
 
-    THE DENOMINATOR IS NOT len(B.COORDS), AND THAT IS THE POINT. Three things shrink it: a
+    THE DENOMINATOR IS NOT len(B.scored_coords()), AND THAT IS THE POINT. Three things shrink it: a
     coordinate named in `skip`; a coordinate with no samples; and -- the one that bites -- a
     coordinate whose sigma_sim is exactly zero, which is counted out by the `r > 0` guard rather
     than scored. A rigid constraint produces exactly that: measured on a six-residue round, a
@@ -193,13 +193,13 @@ def simref(acc, tab, skip=(), only=None):
     """
     skip = set(skip)
     only = None if only is None else set(only)
-    vals = [float("nan") if c in skip else sim_ref_ratio(acc, c, tab) for c in B.COORDS]
+    vals = [float("nan") if c in skip else sim_ref_ratio(acc, c, tab) for c in B.scored_coords()]
     # "only" restricts the MEAN, not the values: added 2026-10-01 because J's job is to score what the
     # loop is converging, and two kinds of coordinate are outside that -- a derived observable (stack,
     # see ibi_loop.UNCONTROLLED) and a coordinate the operator deliberately froze (IBI_LOOP_FREEZE).
     # The four-coordinate mean is still reported beside it as joint_J_all, so rounds from before this
     # change stay comparable. Default None reproduces the old mean bit for bit.
-    js = [abs(float(np.log(r))) for c, r in zip(B.COORDS, vals)
+    js = [abs(float(np.log(r))) for c, r in zip(B.scored_coords(), vals)
           if r == r and r > 0 and (only is None or c in only)]
     return vals, (float(np.mean(js)) if js else float("nan"))
 
@@ -216,7 +216,7 @@ def j_denominator(acc, tab, skip=()):
     a denominator comes to disagree with its own numerator.
     """
     skip = set(skip)
-    offered = [c for c in B.COORDS if c not in skip]
+    offered = [c for c in B.scored_coords() if c not in skip]
     scored = [c for c in offered
               if (lambda r: r == r and r > 0)(sim_ref_ratio(acc, c, tab))]
     return len(scored), len(offered)
@@ -362,8 +362,8 @@ class RoundResult:
         # plan_update's SimHistogram wants n (every observation offered, in support or not) and
         # n_outside (how many fell outside [lo, hi]) next to the in-support counts. Counted here
         # rather than reconstructed by the caller, because only the binning loop knows them.
-        self.n_total = {c: 0 for c in B.COORDS}
-        self.n_outside = {c: 0 for c in B.COORDS}
+        self.n_total = {c: 0 for c in B.scored_coords()}
+        self.n_outside = {c: 0 for c in B.scored_coords()}
         self.skip = ()            # the coordinates excluded from J, by name
         self.j_coords = (0, 0)    # (averaged over, offered), as j_denominator returns
         self.values = None        # {coord: (frames, M)} raw q, only when collect_values
@@ -424,13 +424,13 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
         skip = tuple(skip)
 
     res = RoundResult()
-    res.b_counts = {b: {c: np.zeros(len(tab[c]["U"]), dtype=np.int64) for c in B.COORDS}
+    res.b_counts = {b: {c: np.zeros(len(tab[c]["U"]), dtype=np.int64) for c in B.scored_coords()}
                     for b in range(nb)}
-    res.b_acc = {b: {c: [0.0, 0.0, 0] for c in B.COORDS} for b in range(nb)}
+    res.b_acc = {b: {c: [0.0, 0.0, 0] for c in B.scored_coords()} for b in range(nb)}
     res.b_frames = [0] * nb
     res.skip = skip
     if collect_values:
-        res.values = {c: [] for c in B.COORDS}
+        res.values = {c: [] for c in B.scored_coords()}
     if collect_positions:
         res.positions = []
 
@@ -477,7 +477,7 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
             blk = min(((step - burn) * nb) // max(nsteps - burn, 1), nb - 1)
             res.b_frames[blk] += 1
             with torch.no_grad():
-                for c in B.COORDS:
+                for c in B.scored_coords():
                     if c in _skip_set:
                         continue
                     q = B.coords_of(pos, c).reshape(-1).numpy().astype(np.float64)
@@ -509,7 +509,7 @@ def run_round(*, pos, vel, ij, pw, temps, tab, nsteps, burn, stride, blocks, fri
             _ct, _ac = summed(res.b_counts, res.b_acc, nb)
             vals, j = simref(_ac, tab, skip)
             _used, _off = j_denominator(_ac, tab, skip)
-            parts = [f"{c[:5]} {v:5.3f}" if v == v else f"{c[:5]}   --" for c, v in zip(B.COORDS, vals)]
+            parts = [f"{c[:5]} {v:5.3f}" if v == v else f"{c[:5]}   --" for c, v in zip(B.scored_coords(), vals)]
             log(f"  {step+1:>7d} {el:6.0f}s  " + "  ".join(parts) +
                 f"   J {j:.4f} over {_used}/{_off}")
 
@@ -545,7 +545,7 @@ def write_round(outdir, res, tab, meta=None):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     nb = len(res.b_frames)
-    for c in B.COORDS:
+    for c in B.scored_coords():
         vals = res.values[c] if res.values is not None else np.zeros((0, 1), dtype=np.float64)
         np.savez(out / f"{c}.npz",
                  counts=res.counts[c],

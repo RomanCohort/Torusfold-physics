@@ -40,7 +40,41 @@ import numpy as np
 import torch
 
 KBT = 2.494          # kJ/mol at 300 K
+# THE BASE-LEVEL COORDINATES (2026-10-05) are the ones the TRACE cannot express: the base plane, its
+# orientation relative to its neighbour's, and how far one base sits above the other along the mean
+# normal. They are functions of the three beads alone, through the rigid template map
+# (torusfold.scheme2.base_frames, one pooled triple, 6.573 degrees off the template's own planes), so a
+# potential can use them and so can this file.
+#
+# They are SCORED, never injected: the dynamics that moves them is base_stacking's term, and the tables
+# here are the crystal-marginal targets the loop measures against -- the same role `stack` has had since
+# it was found to be an algebraic function of the bond and the angle.
 COORDS = ("bb_bond", "intra_pc", "intra_cn", "angle", "dihedral", "stack")
+
+# THE BASE-LEVEL COORDINATES (2026-10-05) are the ones the TRACE cannot express: the base plane, its
+# orientation relative to its neighbour's, and how far one base sits above the other along the mean
+# normal. They are functions of the three beads alone through the rigid template map
+# (torusfold.scheme2.base_stacking.base_normals), so a potential can use them and so can this file.
+#
+# They are kept OUT of COORDS, and that is deliberate rather than tidy: COORDS is what a table file must
+# contain for every existing caller, and adding names to it makes results/refit_smooth5.npz unloadable
+# (measured: load_tables raises "missing 18 key(s)" the moment the tuple grows). scored_coords() below is
+# the opt-in way in: with IBI_SCORE_BASE=1 a round bins and scores them as well, and every table file then
+# has to carry them (scripts/build_base_level_ref.py writes the merged reference).
+BASE_COORDS = ("base_dist", "base_rise", "base_cos")
+_scored = None
+
+
+def scored_coords():
+    """The coordinates a round bins: COORDS, plus BASE_COORDS when IBI_SCORE_BASE=1.
+
+    Cached, because ibi_core calls it in its per-frame loops and the environment does not change mid-run.
+    Default (env unset) returns COORDS itself, so every shipped path is bit-identical.
+    """
+    global _scored
+    if _scored is None:
+        _scored = COORDS + (BASE_COORDS if os.environ.get("IBI_SCORE_BASE", "0") == "1" else ())
+    return _scored
 # The two coordinates the model holds RIGID, by SHAKE/RATTLE, rather than by a spring
 # (src/torusfold/scheme2/rigid_bonds.py; the field's K_INTRA_PC/K_INTRA_CN are deleted).
 #
@@ -139,6 +173,31 @@ def coords_of(pos, name):
         a = torch.arange(L - 3, device=dev)
         return _cos_dihedral(pos[:, P(a)], pos[:, P(a + 1)],
                              pos[:, P(a + 2)], pos[:, P(a + 3)])
+    if name in ("base_dist", "base_rise", "base_cos"):
+        # Imported here rather than at module scope: base_stacking lives in src/torusfold/scheme2 and
+        # this module is imported by the loop's workers before any torch device is chosen.
+        # base_normals defaults to the nm-scaled coefficient triple, which is the unit pos comes in.
+        from torusfold.scheme2.base_stacking import base_normals  # noqa: PLC0415
+        if L < 2:
+            return torch.zeros(pos.shape[0], 0, dtype=pos.dtype, device=dev)
+        n = base_normals(pos)                                   # (B, L, 3) unit base-plane normals
+        nb = pos[:, NN(idx)]                                    # (B, L, 3) the N9/N1 beads
+        ni, nj = n[:, :-1, :], n[:, 1:, :]
+        nb_i, nb_j = nb[:, :-1, :], nb[:, 1:, :]
+        # SIGN-ALIGNED, because the map's own convention fixes each normal's sign but a stacked pair's
+        # two normals can still come out opposed when the two residues' rigid frames are rotated
+        # relative to one another; the angle we want is the folded one.
+        flip = (ni * nj).sum(-1, keepdim=True) < 0
+        nj = torch.where(flip, -nj, nj)
+        nm = ni + nj
+        nrm = torch.linalg.norm(nm, dim=-1, keepdim=True)
+        nm = torch.where(nrm > 1e-9, nm / nrm.clamp_min(1e-12), ni)
+        dc = nb_j - nb_i
+        if name == "base_dist":
+            return torch.linalg.norm(dc, dim=-1)
+        if name == "base_rise":
+            return (dc * nm).sum(-1)
+        return (ni * nj).sum(-1).clamp(-1.0, 1.0)
     raise KeyError(name)
 
 

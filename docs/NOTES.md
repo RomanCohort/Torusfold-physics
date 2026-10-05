@@ -573,6 +573,34 @@ dihedral 0.042), the dihedral's update falls from 4.19 and 5.30 kJ/mol to **0.99
 0.0502, and the per-chain J median returns to 0.1477 -- the level the nine-round campaign had at its own second
 round. So a base-level term does not stop the trace tables from reaching their reference marginals.
 
+## 2026-10-05 (7) — The loop scores the base level now, and it immediately falsified the strength
+
+Wired, all opt-in and bit-identical without the flags: the three base-level coordinates in
+`boltzmann_bonded.coords_of` (through the same rigid map the term uses; kept OUT of `COORDS` because
+growing that tuple makes results/refit_smooth5.npz unloadable -- `load_tables` raises "missing 18 key(s)"
+-- so `scored_coords()` gates them on `IBI_SCORE_BASE=1`); their crystal targets in
+`scripts/build_base_level_ref.py`, measured by calling the sampler's OWN `coords_of` on 40 fragments
+(2991 consecutive pairs: base_dist 0.5626 +- 0.1836 nm, base_rise 0.3286 +- 0.1770, base_cos 0.8534 +-
+0.2394) and merged into a reference file; and a third residual, `joint_J_base`, beside the trace J.
+
+Two-round, seven-chain arm with the term at the strength Part 19 chose (35 kJ/mol per pair, 0.3/1/1):
+
+| round | joint_J (trace) | joint_J_base | base_dist sim/ref | base_rise sim/ref | base_cos sim/ref |
+| --: | --: | --: | --: | --: | --: |
+| 0 | 0.2280 | 1.0937 | 0.664 | **0.249** | **0.266** |
+| 1 | 0.0784 | 0.9178 | 0.805 | **0.246** | **0.254** |
+
+sim/ref is sigma_sim/sigma_ref, so **the term pins the rise and the orientation to a quarter of their
+crystal widths -- it is 3-4 times too strong**. The 5000-step scan that chose 35 could not see this: a
+2.5 ps window's pooled statistics are not the equilibrium width, while the loop samples 65 ps and scores
+sigma.
+
+And the right strength is derivable: a penalty of curvature 2*eps/sigma^2 pins the width as
+sqrt(kBT*sigma^2/(2*eps)), so matching the target needs **eps = eps_scan * (sim/ref)^2** -- base_rise
+35*0.246^2 = **2.1 kJ/mol**, base_cos 2.3, base_dist 22.7. Eleven-fold apart, which is the same "the three
+penalties should not carry equal weight" finding, now with a number. Next run: two rounds at 2 kJ/mol with
+the distance weight raised.
+
 What the loop cannot see yet, and it is the next wiring step: it bins the six coordinates of
 `boltzmann_bonded.COORDS` and none is a base-level quantity, so this arm can report the trace but cannot
 measure or fit the base-level marginals. `base_dist`, `base_rise` and `base_theta` have to become

@@ -1243,6 +1243,52 @@ coordinates of the sampler's own binning loop (their bead-only definitions and t
 Parts 15-18) before the loop can close on them the way it closes on the trace. That is a table, a target
 measurement, and three lines in the binning loop -- the same shape as every other coordinate in this field.
 
+## Part 20 — The loop scores the base level now, and immediately falsifies the strength I had chosen (2026-10-05)
+
+THE WIRING. Three things, all opt-in, and the shipped path is bit-identical without them:
+
+* **The coordinates** (`boltzmann_bonded.coords_of`): `base_dist` = |N(i+1) - N(i)|, `base_rise` = that
+  vector's projection on the mean base-plane normal, `base_cos` = the folded cosine between the two
+  normals, all through the same rigid map the term uses. They are kept OUT of `COORDS` on purpose: `COORDS`
+  is what every table file must contain, and growing that tuple makes `results/refit_smooth5.npz`
+  unloadable -- measured, `load_tables` raises "missing 18 key(s)" the moment it does. Instead
+  `scored_coords()` returns `COORDS` plus `BASE_COORDS` when `IBI_SCORE_BASE=1`, and `ibi_core` asks for
+  the scored list rather than the constant in the eighteen places that used to read it directly.
+* **The targets** (`scripts/build_base_level_ref.py`): the crystal marginals for the three coordinates,
+  measured by calling the sampler's OWN `coords_of` on crystal beads -- there is no second implementation
+  to drift -- on fixed wide grids (the support has to cover what the SAMPLER does, not only what the
+  crystals do, or the out-of-support gate trips and the round reports a truncated view). 40 fragments,
+  2991 consecutive pairs: base_dist 0.5626 +- 0.1836 nm, base_rise 0.3286 +- 0.1770 nm, base_cos 0.8534 +-
+  0.2394. Output is a MERGED reference (every shipped entry copied verbatim plus the three), so an arm
+  points `IBI_LOOP_REF` at it and gets all nine.
+* **The scoreboard** (`ibi_loop`): the three are CARRIED -- measured and scored, never injected, because
+  their dynamics come from `base_stacking`'s term and not from a 1-D table -- and every structure now
+  carries a third joint residual, `joint_J_base`, beside `joint_J` (which stays the mean over the
+  CONTROLLED trace coordinates, so earlier runs remain comparable) and `joint_J_all`.
+
+THE ARM, seven chains, two rounds, production protocol, term on at the strength Part 19 chose (35 kJ/mol
+per pair, weights 0.3/1/1):
+
+| round | joint_J (trace) | **joint_J_base** | base_dist sim/ref | base_rise sim/ref | base_cos sim/ref |
+| --: | --: | --: | --: | --: | --: |
+| 0 | 0.2280 | **1.0937** | 0.664 | **0.249** | **0.266** |
+| 1 | **0.0784** | **0.9178** | 0.805 | **0.246** | **0.254** |
+
+**The term is 3-4 times too strong, and the loop's own measure is what says so.** sim/ref here is
+sigma_sim / sigma_ref, so base_rise and base_cos are pinned to a QUARTER of their crystal widths. The
+5000-step scan that chose 35 could not see this: over a short window the same term looked close to target,
+because the pooled statistics of a 2.5 ps window are not the equilibrium width. The loop samples 65 ps and
+scores sigma, and it is right.
+
+AND THE RIGHT STRENGTH IS DERIVABLE, not another scan: a penalty of curvature 2*eps/sigma^2 pins the
+coordinate to a width that scales as sqrt(kBT*sigma^2/(2*eps)), so sigma_sim = sqrt(eps_scan/eps)*sigma_scan
+and matching the target needs **eps = eps_scan * (sim/ref)^2**: for base_rise 35 * 0.246^2 = **2.1**, for
+base_cos 2.3, and for base_dist 22.7. So the rise and the orientation want ~2 kJ/mol per pair while the
+base-base distance wants ~23 -- a factor of eleven between them, which is the same "the three penalties
+should not carry equal weight" finding the scan saw on the other side, now with a number. The term's
+weights and strength are one calibration, and the loop is finally the instrument that can do it: a
+two-round arm at 2 kJ/mol with the distance weight raised is the next run, and it is 25 minutes.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

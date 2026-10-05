@@ -47,7 +47,7 @@ Three things about the loop itself are load-bearing:
 What is NOT updated, and why:
   * intra_pc, intra_cn -- rigid constraints (rigid_bonds.py). sigma_sim is exactly 0.0, so they
     have no marginal to invert; run_round excludes them from binning and from J.
-  * stack -- B.COORDS carries it and cg_potentials.COORDS does not, so its table cannot be
+  * stack -- B.scored_coords() carries it and cg_potentials.COORDS does not, so its table cannot be
     injected. It is copied forward unchanged and its J is still reported.
 
 RESUMING (--start-round=N). These are 21-hour sampling rounds on the 867-chain pool, and a
@@ -114,7 +114,15 @@ OUT_ROOT = Path(os.environ.get("IBI_LOOP_OUT", str(REPO / "results" / "ibi_loop"
 
 # The three coordinates cg_potentials can inject.
 UPDATED = ("bb_bond", "angle", "dihedral")
-CARRIED = ("stack",)
+# CARRIED: measured every round and scored in the joint J, but with no table injected as a potential.
+# `stack` has been here since it was found to be an algebraic function of the bond and the angle.
+#
+# The base-level coordinates joined it on 2026-10-05, and for the same reason in a different place: the
+# model's ACCESS to them is the bead-to-plane map, and their dynamics come from base_stacking's term
+# (IBI_LOOP_BASE_STACK), not from a 1-D table. What the loop adds by scoring them is the thing it has
+# never had -- a scoreboard that includes the coordinates stacking is actually about, so a run can say
+# whether the base level is at its target as well as whether the trace is.
+CARRIED = ("stack", "base_dist", "base_rise", "base_cos")
 
 # STACK IS NOT A COORDINATE THE LOOP CAN CONTROL, and that is a property of the MODEL, not a policy
 # choice. src/torusfold/scheme2/torch_cgsim.py (K_STACK = 0.0, around line 203) records it, and the
@@ -388,18 +396,19 @@ def longest_first(tasks, length_of):
 
 def save_task_result(done_dir, idx, r):
     """Write one chain-round's counts and scalars, and its entry/relax metadata beside them."""
-    counts = {f"counts__{c}": np.asarray(r["counts"][c], dtype=np.int64) for c in B.COORDS}
+    counts = {f"counts__{c}": np.asarray(r["counts"][c], dtype=np.int64) for c in B.scored_coords()}
     scalars = {}
-    for c in B.COORDS:
+    for c in B.scored_coords():
         scalars[f"n_outside__{c}"] = int(r["n_outside"][c])
         scalars[f"n_total__{c}"] = int(r["n_total"][c])
     np.savez(task_npz(done_dir, idx),
              joint_J=np.float64(np.nan if r["joint_J"] is None else r["joint_J"]),
              joint_J_all=np.float64(np.nan if r.get("joint_J_all") is None else r["joint_J_all"]),
+             joint_J_base=np.float64(np.nan if r.get("joint_J_base") is None else r["joint_J_base"]),
              joint_J_table=np.float64(np.nan if r.get("joint_J_table") is None
                                       else r["joint_J_table"]),
              sim_ref_table=np.asarray([np.nan if v is None else v
-                                       for v in (r.get("sim_ref_table") or [np.nan] * len(B.COORDS))],
+                                       for v in (r.get("sim_ref_table") or [np.nan] * len(B.scored_coords()))],
                                       dtype=float),
              residues=int(r["residues"]), seconds=float(r["seconds"]),
              j_coords=np.asarray(r["j_coords"], dtype=np.int64), **counts, **scalars)
@@ -422,13 +431,14 @@ def load_task_result(done_dir, idx):
     ja = float(z["joint_J_all"]) if "joint_J_all" in z.files else float("nan")
     jt = float(z["joint_J_table"]) if "joint_J_table" in z.files else float("nan")
     srt = (list(np.asarray(z["sim_ref_table"], dtype=float)) if "sim_ref_table" in z.files
-           else [float("nan")] * len(B.COORDS))
-    return {"counts": {c: z[f"counts__{c}"] for c in B.COORDS},
+           else [float("nan")] * len(B.scored_coords()))
+    return {"counts": {c: z[f"counts__{c}"] for c in B.scored_coords()},
             "joint_J_all": None if ja != ja else ja,
+            "joint_J_base": (float(z["joint_J_base"]) if "joint_J_base" in z.files else None),
             "joint_J_table": None if jt != jt else jt,
             "sim_ref_table": [None if v != v else float(v) for v in srt],
-            "n_outside": {c: int(z[f"n_outside__{c}"]) for c in B.COORDS},
-            "n_total": {c: int(z[f"n_total__{c}"]) for c in B.COORDS},
+            "n_outside": {c: int(z[f"n_outside__{c}"]) for c in B.scored_coords()},
+            "n_total": {c: int(z[f"n_total__{c}"]) for c in B.scored_coords()},
             "joint_J": None if j != j else j,
             "j_coords": [int(v) for v in z["j_coords"]],
             "residues": int(z["residues"]), "seconds": float(z["seconds"]),
@@ -645,6 +655,14 @@ def _sample_one(task):
     # the campaign. See UNCONTROLLED above for why stack is not in the first one.
     _wv, _wj = IC.simref(res.acc, tab, skip=res.skip, only=CONTROLLED)
     _av, _aj = IC.simref(res.acc, tab, skip=res.skip)
+    # A THIRD J, for the base level, when the run scores it (IBI_SCORE_BASE=1). joint_J stays the mean over
+    # the CONTROLLED trace coordinates, so every earlier run's J remains comparable; this one is the number
+    # the base-level work is about -- whether the coordinates stacking is actually made of are at their
+    # crystal targets, which the loop could not say before 2026-10-05.
+    if B.scored_coords() != B.COORDS:
+        _bv, _bj = IC.simref(res.acc, tab, skip=res.skip, only=B.BASE_COORDS)
+    else:
+        _bv, _bj = [], float("nan")
     _u, _o = IC.j_denominator(res.acc, tab, skip=res.skip)
     # THE SAME RESIDUAL AGAINST THE TABLE'S OWN DISTRIBUTION, reported beside the old one and read
     # by nothing in the update path (ibi_core.implied_sigma, Part 5 of the IBI findings). Both are
@@ -657,11 +675,12 @@ def _sample_one(task):
         "relax": res.relax,
         "sim_ref_table": [None if v != v else float(v) for v in _tv],
         "joint_J_table": None if _tj != _tj else float(_tj),
-        "counts": {c: np.asarray(res.counts[c], dtype=np.int64) for c in B.COORDS},
-        "n_outside": {c: int(res.n_outside[c]) for c in B.COORDS},
-        "n_total": {c: int(res.n_total[c]) for c in B.COORDS},
+        "counts": {c: np.asarray(res.counts[c], dtype=np.int64) for c in B.scored_coords()},
+        "n_outside": {c: int(res.n_outside[c]) for c in B.scored_coords()},
+        "n_total": {c: int(res.n_total[c]) for c in B.scored_coords()},
         "joint_J": None if _wj != _wj else float(_wj),
         "joint_J_all": None if _aj != _aj else float(_aj),
+        "joint_J_base": None if _bj != _bj else float(_bj),
         "j_coords": [_u, _o],
         "residues": L,
         "seconds": time.time() - t0,
@@ -676,7 +695,7 @@ def history_from_rounds(out_root, start_round, coords=UPDATED):
     of the same check, it is a different one: the rule needs PATIENCE+1 values before it can
     fire at all, so a resumed run would wave through exactly the first rounds after a rise.
     """
-    hist = {c: [] for c in B.COORDS}
+    hist = {c: [] for c in B.scored_coords()}
     for r in range(start_round):
         path = out_root / f"round{r}.json"
         if not path.exists():
@@ -981,10 +1000,10 @@ def main():
         print("  keep-awake: " + ("held (ES_SYSTEM_REQUIRED)" if keep_awake() else "NOT held"))
     print()
 
-    ref_tables = I.load_clean_tables(REF_NPZ)
+    ref_tables = I.load_clean_tables(REF_NPZ, coords=B.scored_coords())
     # The target is the reference file's, in a resume exactly as in a fresh run: what changed
     # during the rounds already done is the table that was sampled, not what it is aiming at.
-    p_ref = {c: I.probability_from_table(ref_tables[c]) for c in B.COORDS}
+    p_ref = {c: I.probability_from_table(ref_tables[c]) for c in B.scored_coords()}
     if start_round:
         resume_npz = OUT_ROOT / f"tables_r{start_round}.npz"
         if not resume_npz.exists():
@@ -993,7 +1012,7 @@ def main():
                 f"sample, {resume_npz}, and it is not there. That file is written at the end of "
                 f"round {start_round - 1}; without it there is nothing to resume from, and a "
                 f"fresh run is the honest option.")
-        tables = I.load_clean_tables(resume_npz)
+        tables = I.load_clean_tables(resume_npz, coords=B.scored_coords())
         check_bins_agree(tables, ref_tables, str(resume_npz))
         print(f"  resume: round {start_round} samples under {resume_npz.name}, "
               f"target {REF_NPZ.name}")
@@ -1002,7 +1021,7 @@ def main():
     hist_by_coord = history_from_rounds(OUT_ROOT, start_round)
     # The moment operator's divergence guard needs its own history: it is fed |d<T>|max rather than
     # max|dU|, and mixing the two units in one list would compare nothing to nothing.
-    hist_norm = {c: [] for c in B.COORDS}
+    hist_norm = {c: [] for c in B.scored_coords()}
 
     def write_round_file(path, tabs):
         """A file use_table_file and ibi_core.load_tables can BOTH read.
@@ -1163,7 +1182,7 @@ def main():
                 # (-59 per cent) against a sampler that followed only -16 per cent. So "do not touch
                 # it" is a control arm with evidence behind it, and no guard bookkeeping applies: a
                 # coordinate that never updates has no correction history to diverge.
-                _ci = list(B.COORDS).index(c)
+                _ci = list(B.scored_coords()).index(c)
                 _rt = [r["sim_ref_table"][_ci] for r in results
                        if r.get("sim_ref_table") and r["sim_ref_table"][_ci] is not None]
                 _meas = float(np.mean(_rt)) if _rt else float("nan")
