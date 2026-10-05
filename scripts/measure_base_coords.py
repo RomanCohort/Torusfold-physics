@@ -198,7 +198,8 @@ def sampled_frames(n_chains=8, nsteps=5000, burn=1000, stride=25, blocks=4, thre
     return out
 
 
-def sampled_frames_with_stack(eps, n_ch=2, nsteps=5000, burn=1000, stride=25, blocks=4, threads=4):
+def sampled_frames_with_stack(eps, n_ch=2, nsteps=5000, burn=1000, stride=25, blocks=4, threads=4,
+                              form="reward"):
     """Sample with the base-level stacking term installed. Returns (frames, trace joint J).
 
     Everything else is the same protocol as sampled_frames: production tables, the loader's 3-bead chains,
@@ -214,7 +215,7 @@ def sampled_frames_with_stack(eps, n_ch=2, nsteps=5000, burn=1000, stride=25, bl
     _pots, pot_kw = CP.build_potential_kwargs(str(PROD), wall_k=2000.0,
                                              coords=("bb_bond", "angle", "dihedral"))
     if eps != 0.0:
-        pot_kw = dict(pot_kw, base_stack_potential=BS.make_base_stack_potential(eps=eps))
+        pot_kw = dict(pot_kw, base_stack_potential=BS.make_base_stack_potential(eps=eps, form=form))
     else:
         pot_kw = dict(pot_kw, base_stack_potential=None)
     out = []
@@ -392,6 +393,31 @@ def main():
             print("%-10s %6.3f %12.4f %12.4f %12.4f %12.4f   (target all-pairs vs helical subset: TV %.3f)"
                   % (k, tv, np.nanmean(tgt[k]), np.nanstd(tgt[k]),
                      np.nanmean(smp[k]), np.nanstd(smp[k]), tv_ref), flush=True)
+        return
+
+    if len(sys.argv) > 2 and sys.argv[1] == "--stack-scan2":
+        # --stack-scan2 eps1,eps2,... [n_chains] [nsteps]  -- the PENALTY form, eps as the strength
+        from torusfold.scheme2 import base_stacking as BS
+        eps_list = [float(x) for x in sys.argv[2].split(",")]
+        n_ch = int(sys.argv[3]) if len(sys.argv) > 3 else 2
+        nst = int(sys.argv[4]) if len(sys.argv) > 4 else 5000
+        tz = np.load(OUT / "_base_coords_planes.npz")
+        tgt = {k: tz[f"impl_{k}"] for k in ("nb_dist", "rise", "theta", "twist")}
+        grid = {"nb_dist": (0.3, 1.6), "rise": (-1.0, 1.0), "theta": (0.0, 180.0), "twist": (0.0, 180.0)}
+        for eps in eps_list:
+            print("\n===== SUM form (independent penalties, broad orientation), eps = %.2f kJ/mol"
+                  " (%.2f kBT) per pair =====" % (eps, eps / 2.494), flush=True)
+            frame_list, jval = sampled_frames_with_stack(eps, n_ch=n_ch, nsteps=nst, form="sum")
+            smp = coords_from_frame_list(frame_list)
+            for k in ("nb_dist", "rise", "theta"):
+                v = smp[k][np.isfinite(smp[k])]
+                tv, _ha, _hb = tv_distance(tgt[k], v, *grid[k])
+                print("  %-8s mean %8.4f  sd %7.4f  p5 %8.4f   TV vs target %.3f  (target mean %.4f sd %.4f)"
+                      % (k, v.mean(), v.std(), np.percentile(v, 5), tv,
+                         np.nanmean(tgt[k]), np.nanstd(tgt[k])), flush=True)
+            print("  trace joint J = %.4f" % jval, flush=True)
+            np.savez(OUT / ("_base_coords_pen84_eps%g.npz" % eps),
+                     **{f"sampled_{k}": smp[k] for k in COORDS}, j=np.asarray([jval]))
         return
 
     if len(sys.argv) > 2 and sys.argv[1] == "--stack-scan":

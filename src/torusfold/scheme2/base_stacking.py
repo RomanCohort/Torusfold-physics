@@ -45,6 +45,7 @@ from .base_frames import pooled_coef
 D_REF, D_SIG = 0.570, 0.198
 RISE_REF, RISE_SIG = 0.328, 0.188
 THETA_C = 25.0
+THETA_C_BROAD = 60.0         # orientation scale for the "sum" form; a modelling choice, see below
 EPS_DEFAULT = 5.0            # kJ/mol; kBT = 2.494 kJ/mol at 300 K
 
 
@@ -98,20 +99,115 @@ def stack_energy(pos_nm: torch.Tensor, eps: float = EPS_DEFAULT,
     return -eps * (g_d * g_r * g_t).sum(dim=-1)
 
 
+def stack_energy_penalty(pos_nm: torch.Tensor, eps: float = EPS_DEFAULT,
+                         coef_nm: Optional[torch.Tensor] = None,
+                         d_ref: float = D_REF, d_sig: float = D_SIG,
+                         rise_ref: float = RISE_REF, rise_sig: float = RISE_SIG,
+                         theta_c: float = THETA_C) -> torch.Tensor:
+    """The same three measured wells, combined so that eps IS the strength: E = eps * (1 - Gd*Gr*Gt).
+
+    WHY THE COMBINATION HAD TO CHANGE, measured. The reward form above multiplies three factors that are
+    each <= 1, so its value collapses exactly where the system needs to be moved: at the sampled theta of
+    51.4 degrees the orientation factor with a 25 degree scale is 0.016, and a nominal eps of 10 kJ/mol
+    acted as 0.07 kJ/mol per pair -- against the ~6 kJ/mol a 20 degree base reorientation costs
+    (scripts/measure_base_rotation_cost.py). A scan at eps = 4 and 10 moved the base-level marginals by
+    10-20 percent of what was needed and left the rise one-sidedness untouched.
+
+    One minus the same product is a BOUNDED PENALTY: it is ~1 (i.e. eps, the whole strength) where the
+    geometry is unstacked, ~0 where it matches the target, and its gradient does not vanish anywhere in
+    between -- at d = 0.75 nm it is 0.56 with a slope of 0.8 per nm, against 0.44 and 0.4 for the reward.
+    The wells, their centres and their widths are unchanged: they are the measured target marginals, and
+    this function exists only to give them a scale that means what it says.
+    """
+    B, N, _ = pos_nm.shape
+    L = N // 3
+    if L < 2:
+        return torch.zeros(B, dtype=pos_nm.dtype, device=pos_nm.device)
+    n = base_normals(pos_nm, coef_nm)
+    nb = pos_nm[:, 2::3, :]
+    ni, nj = n[:, :-1, :], n[:, 1:, :]
+    nb_i, nb_j = nb[:, :-1, :], nb[:, 1:, :]
+    flip = (ni * nj).sum(-1, keepdim=True) < 0
+    nj = torch.where(flip, -nj, nj)
+    nm = ni + nj
+    nrm = torch.linalg.norm(nm, dim=-1, keepdim=True)
+    nm = torch.where(nrm > 1e-9, nm / nrm.clamp_min(1e-12), ni)
+    dc = nb_j - nb_i
+    d = torch.linalg.norm(dc, dim=-1)
+    rise = (dc * nm).sum(-1)
+    theta = torch.arccos((ni * nj).sum(-1).clamp(-1.0, 1.0))
+    f = (torch.exp(-((d - d_ref) / d_sig) ** 2)
+         * torch.exp(-((rise - rise_ref) / rise_sig) ** 2)
+         * torch.exp(-(theta / math.radians(theta_c)) ** 2))
+    return eps * (1.0 - f).sum(dim=-1)
+
+
+def stack_energy_sum(pos_nm: torch.Tensor, eps: float = EPS_DEFAULT,
+                     coef_nm: Optional[torch.Tensor] = None,
+                     d_ref: float = D_REF, d_sig: float = D_SIG,
+                     rise_ref: float = RISE_REF, rise_sig: float = RISE_SIG,
+                     theta_c: float = THETA_C_BROAD) -> torch.Tensor:
+    """SEPARATE penalties, one per coordinate: E = eps * SUM_i [ (1-Gd) + (1-Gr) + (1-Gt) ].
+
+    WHY THIS AND NOT "1 MINUS THE PRODUCT", measured the hard way. The previous attempt combined the same
+    three factors as eps * (1 - Gd*Gr*Gt) and was expected to act at scale eps; it is ALGEBRAICALLY THE SAME
+    FORCES as the reward form, because SUM(1 - f) = N - SUM(f) differs from -SUM(f) by a constant. Caught
+    by the sampler: the two forms produced bit-identical trajectories (same bead coordinates to five
+    decimals) while both differed from no term at all. Identical output is a measurement.
+
+    What actually limits the product form is the GRADIENT, not the value: with a 25 degree orientation
+    scale, f_theta at the sampled theta of 51 degrees is 0.016, and its slope is f*2*theta/theta_c^2, about
+    0.0026 per degree -- so the pull is ~1.5 percent of what a 20 degree reorientation needs, no matter
+    what eps is. A sum of independent penalties does not have that property: each coordinate's slope is
+    full-strength wherever its own well is missed, even when the other two are satisfied.
+
+    The theta scale is widened to THETA_C_BROAD = 60 degrees for the same reason: a factor that is 0.016 at
+    the configurations that need repair cannot pull them in. The wells' centres stay at the measured target
+    values; only the width of the orientation factor is a modelling choice, and it is recorded as one.
+    """
+    B, N, _ = pos_nm.shape
+    L = N // 3
+    if L < 2:
+        return torch.zeros(B, dtype=pos_nm.dtype, device=pos_nm.device)
+    n = base_normals(pos_nm, coef_nm)
+    nb = pos_nm[:, 2::3, :]
+    ni, nj = n[:, :-1, :], n[:, 1:, :]
+    nb_i, nb_j = nb[:, :-1, :], nb[:, 1:, :]
+    flip = (ni * nj).sum(-1, keepdim=True) < 0
+    nj = torch.where(flip, -nj, nj)
+    nm = ni + nj
+    nrm = torch.linalg.norm(nm, dim=-1, keepdim=True)
+    nm = torch.where(nrm > 1e-9, nm / nrm.clamp_min(1e-12), ni)
+    dc = nb_j - nb_i
+    d = torch.linalg.norm(dc, dim=-1)
+    rise = (dc * nm).sum(-1)
+    theta = torch.arccos((ni * nj).sum(-1).clamp(-1.0, 1.0))
+    g_d = torch.exp(-((d - d_ref) / d_sig) ** 2)
+    g_r = torch.exp(-((rise - rise_ref) / rise_sig) ** 2)
+    g_t = torch.exp(-(theta / math.radians(theta_c)) ** 2)
+    return eps * ((1.0 - g_d) + (1.0 - g_r) + (1.0 - g_t)).sum(dim=-1)
+
+
 def make_base_stack_potential(eps: float = EPS_DEFAULT, coef_nm: Optional[np.ndarray] = None,
-                              **kw) -> Callable[[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
+                              form: str = "reward", **kw) -> Callable[[torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
     """A cg_energy_forces injection: pos_nm -> (energy (B,), forces (B, 3L, 3)).
 
     Autograd, like the other injected potentials: the term is O(L) with a handful of elementwise ops, so
     the backward pass is cheap, and writing the analytic gradient by hand would be a second place for the
     term to be wrong.
+
+    form="reward" is the original eps * Gd * Gr * Gt; form="penalty" is eps * (1 - Gd * Gr * Gt), which is
+    the same three wells with eps as a scale that means what it says. Both are kept: the first one's failure
+    is a measurement, not a mistake to be erased.
     """
     coef = None if coef_nm is None else torch.tensor(np.asarray(coef_nm, dtype=np.float64))
+    _energy = {"reward": stack_energy, "penalty": stack_energy_penalty,
+               "sum": stack_energy_sum}[form]
 
     def _pot(pos_nm: torch.Tensor):
         with torch.enable_grad():
             p = pos_nm.detach().clone().requires_grad_(True)
-            e = stack_energy(p, eps=eps, coef_nm=coef, **kw)
+            e = _energy(p, eps=eps, coef_nm=coef, **kw)
             g, = torch.autograd.grad(e.sum(), p, create_graph=False)
         return e.detach(), (-g).detach()
 

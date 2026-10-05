@@ -525,6 +525,29 @@ and at the sampled theta of 51 degrees the orientation factor is exp(-(51.4/25)^
 10 kJ/mol acts as **0.07 kJ/mol per pair** against the ~6 kJ/mol a 20 degree reorientation costs. The reward
 vanishes exactly where repair is needed.
 
+**Correction and the result (same day).** The rewrite tried first -- `eps * (1 - Gd*Gr*Gt)` -- is
+dynamically IDENTICAL to the reward, because `SUM(1-f) = N - SUM(f)` differs by a constant; the sampler
+proved it by producing bit-identical trajectories for the two forms. The limiter is the gradient, not the
+value: at an unstacked configuration (mean neighbour-normal angle 59 deg, eps = 10) the reward and the
+penalty both give max|F| = 7.4 while `eps * [(1-Gd) + (1-Gr) + (1-Gt)]` gives **111.5**.
+
+With that sum form, two chains, eps = 0 / 5 / 20 kJ/mol per pair:
+
+| eps | d (nm) | rise mean, 5th pct | theta (deg) | trace J |
+| --: | --: | --: | --: | --: |
+| target | 0.570 | 0.328, **+0.06** | 24.5 | -- |
+| 0 | 0.750 | 0.332, -0.33 | 51.4 | 0.139 |
+| 5 | 0.657 | 0.302, -0.42 | 41.8 | 0.147 |
+| 20 | 0.621 | **0.317, +0.02** | 30.1 | 0.215 |
+
+**The one-sidedness appears** -- the rise's 5th percentile goes from -0.33 nm to +0.02 against a +0.06
+target, and the rise's TV halves. Two things are left open and both are in the table: the distance well
+over-constrains its WIDTH at eps = 20 (sd 0.122 against the target's 0.198, so d's TV gets worse while its
+mean gets better -- the three penalties should not carry equal weight), and the trace J rises with the
+strength (0.139 -> 0.215 on two chains) because the trace tables were fitted with no base-level term
+present. Together they are the next measurement: per-coordinate weights, and/or a trace refit with the term
+on -- which is what the loop exists for.
+
 Next: an additive / pairwise-attraction form whose scale IS eps and whose orientation factor is broad (oxRNA
 uses a distance attraction times an orientation factor, not a product of three narrow wells), then the same
 scan. The model can carry stacking; this term cannot reach it.

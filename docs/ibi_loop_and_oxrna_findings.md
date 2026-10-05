@@ -1098,6 +1098,60 @@ orientation factor, not a product of three narrow wells), after which the same s
 base frame is soft is what makes this worth doing rather than a dead end: the model can carry stacking, the
 current term cannot reach it.
 
+## Part 17 — The shape was the whole story: independent penalties create the stacking asymmetry (2026-10-05)
+
+Part 16's fix was wrong, and the way it was caught is worth recording. Rewriting the reward as
+`eps * (1 - Gd*Gr*Gt)` changes nothing dynamically, because `SUM(1 - f) = N - SUM(f)`: the two differ by a
+CONSTANT, so their gradients -- and therefore the forces -- are identical. The sampler said so before I
+noticed: the reward and "penalty" scans produced **bit-identical trajectories** (same bead coordinates to
+five decimals, same frame counts, same per-chain J) while both differed from no term at all. Identical
+output is a measurement.
+
+What actually limits the product form is the GRADIENT, not the value: with a 25 degree orientation scale,
+f_theta at the sampled theta of 51 degrees is 0.016 and its slope is `f * 2*theta/theta_c^2`, about 0.0026
+per degree. Measured directly at an unstacked configuration (every second residue rotated 70 degrees about
+its local axis, mean neighbour-normal angle 59 degrees), with eps = 10 kJ/mol:
+
+| form | E per pair | max\|F\| |
+| :-- | --: | --: |
+| reward (eps * Gd Gr Gt) | -0.010 kJ/mol | 7.4 |
+| penalty (eps * (1 - Gd Gr Gt)) | 9.990 | **7.4** (identical, as the algebra says) |
+| **sum (eps * [(1-Gd) + (1-Gr) + (1-Gt)])** | 20.599 | **111.5** |
+
+A sum of INDEPENDENT penalties has full-strength slope wherever any one coordinate misses its well, which
+the product cannot. The orientation scale is widened to 60 degrees for the same reason (a factor that is
+0.016 where repair is needed cannot pull anything in); that width is the one modelling choice in the term
+and it is recorded as one, while the wells' centres stay at the measured target values.
+
+THE SCAN, sum form, two chains, 5000 steps, production tables, everything else fixed:
+
+| eps (kJ/mol) | d (nm) | rise mean, 5th pct | theta (deg) | TV d / rise / theta | trace J |
+| --: | --: | --: | --: | --: | --: |
+| target | 0.570 ± 0.198 | 0.328, **+0.06** | 24.5 | -- | -- |
+| 0 | 0.750 | 0.332, -0.33 | 51.4 | 0.590 / 0.528 / 0.547 | 0.139 |
+| 5 | 0.657 | 0.302, -0.42 | 41.8 | 0.519 / 0.424 / 0.444 | 0.147 |
+| 20 | **0.621** | **0.317, +0.02** | **30.1** | 0.572 / **0.255** / **0.290** | 0.215 |
+
+**The stacking asymmetry is created.** The rise's 5th percentile moves from -0.33 nm to **+0.02 nm** against
+a target of +0.06 -- i.e. the model goes from having no preference for one base lying over its neighbour to
+having the right one-sided preference, and the rise's total-variation distance halves (0.528 -> 0.255). The
+base-base distance moves 0.750 -> 0.621 against a 0.570 target and the neighbour-normal angle 51.4 -> 30.1
+against 24.5, both in the right direction.
+
+Two things this run does NOT settle, both visible in the same table and both the next knobs:
+
+* **the distance well is over-constraining its WIDTH**: at eps = 20 the sampled d has sd 0.122 against the
+  target's 0.198, so the d distance's total variation gets WORSE (0.519 -> 0.572) even as its mean gets
+  better. The three penalties are summed with equal weight; the measurement says they should not be.
+* **the trace pays for it**: the joint J of the backbone coordinates rises 0.139 -> 0.147 -> 0.215 as the
+  base term strengthens. Two chains, so this is not a resolved comparison -- but it is the expected effect:
+  the trace tables were fitted with no base-level term present, so a stacking term pulls the trace away from
+  its own fitted marginals. Either the term is reweighted, or the trace tables are refit with the term
+  present, which is what the loop machinery exists for.
+
+So: the model can carry stacking, the term can be built from measurements, and the shape of the term -- not
+its strength -- was what stood in the way for two attempts.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 
