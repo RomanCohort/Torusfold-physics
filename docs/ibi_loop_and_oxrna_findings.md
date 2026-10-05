@@ -812,6 +812,18 @@ WHAT IS RUNNING, and what each one decides. Two arms, launched together, neither
   bb_bond FROZEN, the dihedral alone at B-spline m=16 and gain 0.5 with the gate at 0.03. This is the
   designed experiment for point 3: with nothing else moving, the dihedral's own transmission is
   measurable, and its edge gap either holds (a stable table exists) or does not.
+  **RESULT (2026-10-05, 33.5 min for all three rounds).** With the angle and bb_bond frozen the dihedral's
+  transmission is **0.802 (R2 0.937)** over the three rounds -- against arm A's 0.251, and near the
+  campaign's confounded 0.970. So arm A's "the dihedral does not respond" was the ANGLE cancelling it, and
+  the coupling of Parts 8-10 now has a number instead of an explanation. Two more readings from the same
+  arm: the step size falls monotonically (2.74 -> 2.06 -> 1.65 kJ/mol) and the implied-sigma ratio climbs
+  towards 1 (0.918 -> 0.954 -> 0.967), i.e. **a table-side fixed point exists once the finished
+  coordinates are frozen** -- which the full-pool campaign never had; and the pooled dihedral width came
+  down 0.7587 -> 0.7051 -> 0.6994 against a 0.6247 target, with the first step transmitting 1:1 and the
+  second only 0.22, so the response saturates before the target. The two frozen coordinates score FAIL on
+  the sampled criterion in this arm (bb_bond 0.0600 vs 0.0540, angle 0.3964 vs 0.3218): the seven-chain
+  pool samples different marginals from the full pool, which is Part 10's second lesson showing up as a
+  construction detail rather than a result.
 * `results/plan_c/run_ab2oiu10.cmd` -- the 2OIU A/B through the shipped GPU refiner, TEN draws per arm
   instead of one, so the dihedral effect (|ln(sd/target)| 0.635 analytic against 0.307 fitted in the
   single draw) becomes a paired mean +- sd with a win count. The arms share the input and the draw
