@@ -1017,6 +1017,32 @@ functions of the P trace alone) against the fit target:
    observation of a real effect (the dihedral is far outside any draw-to-draw scatter this pipeline has
    shown) rather than as an effect size.
 
+CORRECTION (2026-10-05, ten draws per arm). The assumption in point 3 -- "the dihedral is far outside any
+draw-to-draw scatter this pipeline has shown" -- is false, and ten draws say so. The same two arms, same
+protocol, run ten times each (`--draws=10`), analysed as a PAIRED difference because the arms share the
+input geometry and the draw index:
+
+| coordinate | target sd | analytic mean +- sd | tables mean +- sd | paired ln(tab/an) | draws closer |
+| :-- | --: | --: | --: | --: | --: |
+| bb_bond | 0.0633 | 0.00428 +- 0.00071 | 0.00456 +- 0.00060 | +0.0683 +- 0.2245 | 6/10 |
+| angle | 0.3203 | 0.43247 +- 0.04528 | 0.42623 +- 0.04748 | -0.0151 +- 0.1415 | 4/10 |
+| dihedral | 0.6299 | 0.38285 +- 0.03188 | 0.38561 +- 0.03967 | **+0.0057 +- 0.1318** | **6/10** |
+| stack | 0.1390 | 0.18085 +- 0.02457 | 0.17436 +- 0.02371 | -0.0365 +- 0.1706 | 5/10 |
+
+The dihedral effect that the single draw measured (0.3337 -> 0.4634, |ln(sd/target)| 0.635 -> 0.307) is
+**+0.0057 +- 0.1318, six draws out of ten**: indistinguishable from zero, with the draw-to-draw scatter
+(sd 0.032-0.040 nm on a 0.38 nm width, i.e. 8-10 percent) an order of magnitude larger than the paired
+mean. The single draw was one sample, and the honest reading of Part 11's point 1 is that the fitted field
+has NOT been shown to change this stage's geometry at all.
+
+What the ten draws ALSO show, and it is a statement about the stage rather than the field: these products
+sit far from the marginals the tables were fitted to -- angle 0.426 against 0.320, dihedral 0.386 against
+0.630 (40 percent narrow), stack 0.174 against 0.139, bb_bond 0.0046 against 0.063 (the refiner's own bond
+restraints, as Part 11 said). A short, free, restraint-dominated refinement is not an equilibrium sampler
+for those marginals; Part 12's pooled pass is where the tables are validated, and this stage is not a
+second measurement of it. That distinction was missing from Part 11 and is the reason its one-draw claim
+looked like a field result.
+
 Chebyshev was a seven-chain number), and there is no arm-level evidence for K=16 or K=32.
 
 

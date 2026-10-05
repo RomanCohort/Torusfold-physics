@@ -385,6 +385,15 @@ of one coordinate's own transmission. And the record itself moved — the campai
 `results/ibi_relax` for nine rounds and was parked elsewhere on 2026-10-01; `ibi_core.campaign_root()`
 resolves it now, and eight scripts still hard-code the old path.
 
+**Correction (added the same day).** The 2OIU A/B was reported above from ONE draw per arm. Ten
+draws per arm, analysed as a paired difference, give the dihedral effect as **+0.006 +- 0.132 with 6 of 10
+draws closer to target** -- indistinguishable from zero, against a draw-to-draw scatter of 8-10 percent.
+The single draw was one sample, and the fitted field has NOT been shown to change this stage's geometry.
+The same ten draws also show that these products sit far from the fitted marginals (dihedral 0.386 against
+a 0.630 target, angle 0.426 against 0.320) because a short free refinement with bond restraints is not an
+equilibrium sampler for them -- the tables are validated at the loop's pooled level (the entry above),
+not here.
+
 ---
 
 ## 2026-10-05 — Stacking, measured: the bottleneck is base placement, not the force field
