@@ -12,25 +12,25 @@ for two reasons:
 
 1. **Scale mismatch / conflict.** TriRNASP is a *log-odds statistical potential*,
    not a physical energy. At `trirnasp_scale = 0.002` it still contributed
-   ~11 % of the total energy 閳?i.e. its raw magnitude was ~50鑴?the CG terms.
+   ~11 % of the total energy 闁?i.e. its raw magnitude was ~50閼?the CG terms.
    The two potentials disagreed in their minima (idealized CG geometry vs.
    PDB statistics), producing a frustrated landscape that made the composite
    hard to anneal and hypersensitive to the coupling scale.
 2. **Resolution mismatch.** TriRNASP triplets are defined near all-atom
-   resolution; our CG beads are P / C4閳?/ N. Mapping one onto the other is
+   resolution; our CG beads are P / C4闁?/ N. Mapping one onto the other is
    fragile and, if wrong by one atom order, yields spurious forces.
 
 Lesson: **keep physics potentials in the force field and statistical potentials
 as post-hoc scorers** (rsRNASP is already used only as a score, not a force).
 
-Note: `trirnasp_scorer.py` had a broken duplicated method 閳?`score_from_pdb`
+Note: `trirnasp_scorer.py` had a broken duplicated method 闁?`score_from_pdb`
 contained dead code copied from `full_scoring` that referenced out-of-scope
 `n_atoms` / `atom_coords` (would `NameError`). Fixed by delegating it to the
 correct `score_pdb()` implementation (it was never called in-tree).
 
 ### Direction we converged on (for a future pass)
 
-- Apply statistical corrections **sparsely in space** 閳?only on loop / BSJ /
+- Apply statistical corrections **sparsely in space** 闁?only on loop / BSJ /
   non-canonical (NCM) regions, and zero in A-form stems where the CG + A-form
   template already encodes the answer.
 - The high-value novelty is **running many REMD/REST2 replicas as a batched
@@ -43,19 +43,19 @@ correct `score_pdb()` implementation (it was never called in-tree).
   a structure within RMSD of the crystal? If `E_stat` is not minimized near the
   native structure, the potential mapping/reference state is broken.
 - **Replica-exchange correctness under tensor batching**: acceptance rates
-  (~10閳?0 %), replica round-trips, and no bias introduced by the batched
+  (~10闁?0 %), replica round-trips, and no bias introduced by the batched
   exchange.
 
 ## Far / long-range pair closure is still imperfect
 
 Distal (topologically far) pairing distances come out too large in early runs;
-RL MCTS + steering forces were added to pull them toward Watson閳ユ弲rick
-geometry (C1閳ユ祴鈧弲1閳?~10.5 鑴? but this remains the main accuracy bottleneck for
+RL MCTS + steering forces were added to pull them toward Watson闁炽儲寮瞨ick
+geometry (C1闁炽儲绁撮埀顒佸疾1闁?~10.5 閼? but this remains the main accuracy bottleneck for
 long sequences. Not fully solved.
 
 ## CG planar collapse (fixed)
 
-Initialization collapsed to a flat disc (`z 閳?0.6 鑴渀) because CG started with
+Initialization collapsed to a flat disc (`z 闁?0.6 閼存竴) because CG started with
 `z = 0` and the energy surface flattened it. Fixed by injecting helical `z`
 into the CG initialization and a `CustomExternalForce` `z`-restraint during
 refinement. Keep the restraint on; do not "clean up" the `z` patch.
@@ -65,7 +65,7 @@ refinement. Keep the restraint on; do not "clean up" the `z` patch.
 In the all-atom amber path, the `alpha`/`zeta` dihedrals were computed with
 cross-residue atoms of the *same* residue instead of the *neighboring*
 residue, causing 18/20 outlier dihedrals. Fixed; verify per-residue dihedral
-deviations stay within ~5鎺?of ideal.
+deviations stay within ~5閹?of ideal.
 
 ## Modules referenced but not published yet
 
@@ -88,41 +88,41 @@ consistency + a handful of published-sequence tests. Treat predicted
 structures as hypotheses until the 2OIU recovery and replica-exchange checks
 above are completed.
 
-## 2026-09-09 閳?GPU platform notes (internal)
+## 2026-09-09 闁?GPU platform notes (internal)
 
 Measured on an AMD Ryzen AI MAX 395 (Radeon 8060S iGPU): ROCm compatibility
 was poor and required extensive patching (a large time cost); iGPU throughput
 measured far below an RTX 3080. The CPU path is therefore the reference for
 all measured runs. GPU full-configuration wall time (~14 d estimated on this
-APU; 閳? d on an NVIDIA A100 at the 閳?鑴?estimate) is not yet measured.
+APU; 闁? d on an NVIDIA A100 at the 闁?閼?estimate) is not yet measured.
 
-## 2026-09-09 閳?2OIU force-field integrity test (update)
+## 2026-09-09 闁?2OIU force-field integrity test (update)
 
 Completed: starting from the 2OIU X-ray structure, the Level-2 relaxation
-(CPU) took 17 min and ended at RMSD 1.83 鑴?vs the crystal 閳?the force field
+(CPU) took 17 min and ended at RMSD 1.83 閼?vs the crystal 闁?the force field
 does not distort known structures. Note this is a force-field integrity test
 from the X-ray structure, not a from-sequence "recovery" benchmark; the
 from-sequence recovery question above remains open.
 
-## 2026-09-09 閳?verification backlog & status update
+## 2026-09-09 闁?verification backlog & status update
 
-- **Replica-exchange acceptance (measured):** 30閳?0% on recent runs (the
-  "~10閳?0 %" figure above is outdated). Dated update 閳?retest after any
+- **Replica-exchange acceptance (measured):** 30闁?0% on recent runs (the
+  "~10闁?0 %" figure above is outdated). Dated update 闁?retest after any
   exchange-criterion change.
 - **Explicit-force vs autograd cross-check (TODO):** the autograd
   implementation (`cg_forces_autograd`) is the free ground truth; add a
   short-trajectory force comparison (max relative error) before claiming the
   no-autograd forces are verified. "Runs fine" is not a gradient check.
 - **Async CPU force injection latency (scoped):** only active with
-  `use_trirnasp_force=True` (preview, off by default) 閳?no stale-force risk
+  `use_trirnasp_force=True` (preview, off by default) 闁?no stale-force risk
   on the default path. No timing claim is made in public docs.
 - **RL scheduling evidence (roadmap):** the RL controller is deliberately
   conservative (design choice, see README implementation notes); its benefit
-  over rule-based scheduling / fixed budgets is not yet quantified 閳?plan a
+  over rule-based scheduling / fixed budgets is not yet quantified 闁?plan a
   short-sequence energy-vs-time comparison.
 
 
-## 2026-10-01 閳?All-atom path: three wiring defects, and what the CG level owes stacking
+## 2026-10-01 闁?All-atom path: three wiring defects, and what the CG level owes stacking
 
 Found while taking **2OIU** (the only resolved circular RNA this project has: 71 nt, BSJ P0-P71 =
 5.9 A) through "crystal P trace -> reconstruction -> amber14-OL3". Three separate things stop that
@@ -131,13 +131,13 @@ chain. All three are cheap to fix, and all three are silent until they are hit:
 1. **`aform_from_template` gives EVERY residue a third phosphate oxygen (OP3).** A phosphodiester
    phosphate has two non-bridging oxygens (OP1/OP2) plus the two bridging ones (O5' of its own
    residue, O3' of the previous one), so the exported structure carries one oxygen too many per
-   residue. The force field reports it ONE RESIDUE AT A TIME 閳?"No template found for residue N (G).
-   The set of atoms is similar to G, but has 1 O atom too many" 閳?which reads like a terminal problem
+   residue. The force field reports it ONE RESIDUE AT A TIME 闁?"No template found for residue N (G).
+   The set of atoms is similar to G, but has 1 O atom too many" 闁?which reads like a terminal problem
    and is not: on 2OIU it is 23 extra atoms over 71 residues, and filtering OP3 fixes the whole chain
    (1550 -> 1527 atoms). **As it stands, `aform_from_template` output cannot be fed to
    `amber_refine` without that filter.** The fix belongs upstream, in the reconstruction.
 2. **amber14's `G5`/`A3` are the DEPHOSPHORYLATED termini.** A phosphorylated 5' end is an internal
-   residue as far as the templates are concerned 閳?OpenMM's own matcher says so ("the set of atoms is
+   residue as far as the templates are concerned 闁?OpenMM's own matcher says so ("the set of atoms is
    similar to G") once OP3 is gone. Renaming the ends `G5`/`A3` therefore makes matching fail, and so
    does writing them into a file and reading it back, because `PDBFile` normalises "G5" to "G". The
    combination that works is plain internal names plus
@@ -159,16 +159,16 @@ this wiring and an all-atom marginal on the product's topology.
 scored coordinates are local P-trace quantities, and `stack` is an exact function of `bb_bond` and
 the P-P-P angle. On the 867 fragments the local marginals are length-independent to 4-13 percent over
 a 7x length range, the end effect is 4-5 percent of the sd below L=60 (under 0.2 percent past L=400),
-and **forcing the end-to-end distance to zero 閳?the closure a circle imposes 閳?moves them by under 0.5
+and **forcing the end-to-end distance to zero 闁?the closure a circle imposes 闁?moves them by under 0.5
 percent**. Fitting on linear fragments and applying the field to circular RNA is therefore sound, and
 the only topology-dependent part is the two terminal residues a circle does not have. The same
 measurement shows the all-atom level carries the base-plane physics but INHERITS the trace: a 1.5 A
 error in the CG P trace halves the reconstructed stacking fraction (0.59 -> 0.29 on 1ET4). Lesson:
 **the CG owes a correct P trace; stacking is the all-atom level's job, and `stack` should not be a CG
-scoring target** 閳?which is also why `torch_cgsim` sets its spring to zero.
+scoring target** 闁?which is also why `torch_cgsim` sets its spring to zero.
 
 
-## 2026-10-01 閳?Hand-building the coarse-grained field: the whole arc in one place
+## 2026-10-01 闁?Hand-building the coarse-grained field: the whole arc in one place
 
 *Written because the process is spread over a timeline, four topic documents and a hundred code
 comments, and the next person needs the story in one read. The topic docs remain the detailed record:
@@ -296,11 +296,11 @@ it produced, with the numbers that matter:
    byte layout -- each cost real time and each is now a paragraph instead of a rediscovery.
 
 
-## 2026-10-01 閳?The fitted field reaches the pipeline, and it runs on the GPU
+## 2026-10-01 闁?The fitted field reaches the pipeline, and it runs on the GPU
 
 The tables the loop fitted were **never what the production pipeline sampled**: `torch_gpu_refine.py`
-called `cg_energy_forces(pos, pairs, pw)` with no potentials at all 閳?the analytic field inside
-`torch_cgsim` 閳?while everything Boltzmann-inverted lived in the calibration harness. The table
+called `cg_energy_forces(pos, pairs, pw)` with no potentials at all 闁?the analytic field inside
+`torch_cgsim` 闁?while everything Boltzmann-inverted lived in the calibration harness. The table
 potentials were moreover cpu-only by an explicit deferral in `cg_potentials.make_potential`:
 *"supporting cuda means moving the table tensors and the interpolation together, not just this call, so
 it is left until something needs it"*.
@@ -321,7 +321,7 @@ share `lo`/`binw`, so the mix cannot silently combine different grids.
 
 **GPU verification, on this machine**, with the ROCm torch build (`2.12.0a0+rocm7.13.0a20260313`,
 AMD Radeon 8060S): `scripts/verify_cg_gpu.py` evaluates the tabulated field on one structure on cpu
-and on cuda 閳?**E identical to the last bit, forces agreeing to 3.7e-16 relative**. The cpu build of
+and on cuda 闁?**E identical to the last bit, forces agreeing to 3.7e-16 relative**. The cpu build of
 torch (circrna3d env) has no CUDA and skips that half.
 
 **What this does not settle**: the shipped dihedral table is the campaign's, so it carries the
@@ -331,7 +331,7 @@ object. Both would be refit by the per-coordinate rules that work argues for.
 
 ---
 
-## 2026-10-04 閳?The criterion was the defect: what the field delivers, and what the loop was chasing
+## 2026-10-04 闁?The criterion was the defect: what the field delivers, and what the loop was chasing
 
 Two more arms ran, both failed their stated criteria, and the failure turned out to be the criteria.
 The full account is Part 12 of `docs/ibi_loop_and_oxrna_findings.md`; this is the part a reader of the
@@ -349,37 +349,37 @@ implied sigma):
 | dihedral | 0.970 (campaign) / 0.251 (arm A) | 0.82 | 0.159 | 0.625 |
 | stack | 0.019 | 0.00 | 0.146 | 0.127 |
 
-The angle's line says its pooled width cannot fall below 0.3253 閳?**one percent above its target**. The
+The angle's line says its pooled width cannot fall below 0.3253 闁?**one percent above its target**. The
 campaign drove its implied sigma 0.3218 -> 0.1307 while the ensemble followed a third of the way; that
 coordinate was finished and the loop could not tell. The dihedral's two slopes disagree because the two
 runs moved the ANGLE in opposite directions: a coordinate whose marginal is not its own table's
 Boltzmann distribution cannot be measured with another coordinate moving.
 
 **The verdict on the shipped field** (`scripts/ibi_verdict.py`, criteria |ln(sigma_sampled/sigma_target)|
-<= 0.10 and |edge gap| <= 0.05): bb_bond, angle and dihedral all PASS at the campaign's round 8 閳?sampled 0.05405 / 0.34930 / 0.61074 against targets 0.05402 / 0.32176 / 0.62471, with edge gaps of
+<= 0.10 and |edge gap| <= 0.05): bb_bond, angle and dihedral all PASS at the campaign's round 8 闁?sampled 0.05405 / 0.34930 / 0.61074 against targets 0.05402 / 0.32176 / 0.62471, with edge gaps of
 +0.0000 / -0.0034 / -0.0015. bb_bond and the dihedral passed at round 1; the angle from round 7. `stack`
 is DERIVED (no table, algebraic in the other two) and is excluded rather than judged. **So the tables in
 `results/production_tables.npz` reproduce the target's pooled local-geometry marginals to within 8
-percent in width and 0.003 in edge mass 閳?and the nine rounds of table churn after round 1 bought the
+percent in width and 0.003 in edge mass 闁?and the nine rounds of table churn after round 1 bought the
 ensemble almost nothing.**
 
 **What that does not mean.** The pass is at the *pooled equilibrium* marginal, which is what the tables
 were fitted to. It is not a statement about any single structure's geometry: that is what the 2OIU A/B
 measures, and its single draw showed the fitted dihedral field halving the log width error
-(|ln(sd/target)| 0.635 -> 0.307) while the two products differed by 13.5 鑴?from REMD's unseeded start.
+(|ln(sd/target)| 0.635 -> 0.307) while the two products differed by 13.5 閼?from REMD's unseeded start.
 Ten draws per arm are running now, analysed as a PAIRED difference so the scatter cancels.
 
 **Which of the failures were real.** Three, and all three are now handled in code rather than by taste:
 the support gate (arm A refused bb_bond, the one coordinate with unit gain, at 1.02 percent against a
-1 percent gate 閳?now `IBI_LOOP_SUPPORT_GATE`, printed in the header, with the out-of-support fraction
+1 percent gate 闁?now `IBI_LOOP_SUPPORT_GATE`, printed in the header, with the out-of-support fraction
 recorded for refused and frozen coordinates too); the undamped replacement step (the angle's
 self-consistent refit overshoots its own target by 1.64x at gain 1 and is neutral at 0.3, measured in
 `scripts/ibi_step_gain_scan.py`; the dihedral's edge loss is monotone in gain, -0.016 at 0.1 against
--0.137 at 1.0); and the missing per-round record (every round json now carries a `marginals` block 閳?sampled and implied sigma and edge, before and after, with the edge gaps).
+-0.137 at 1.0); and the missing per-round record (every round json now carries a `marginals` block 闁?sampled and implied sigma and edge, before and after, with the edge gaps).
 
 **Still open.** Whether a table-side fixed point exists at all: an arm with the angle and bb_bond frozen
 and only the dihedral stepping is running (seven chains, gain 0.5), which is the first clean measurement
-of one coordinate's own transmission. And the record itself moved 閳?the campaign's 0.44 GB sat at
+of one coordinate's own transmission. And the record itself moved 闁?the campaign's 0.44 GB sat at
 `results/ibi_relax` for nine rounds and was parked elsewhere on 2026-10-01; `ibi_core.campaign_root()`
 resolves it now, and eight scripts still hard-code the old path.
 
@@ -387,7 +387,7 @@ resolves it now, and eight scripts still hard-code the old path.
 draws per arm, analysed as a paired difference, give the dihedral effect as **+0.006 +- 0.132 with 6 of 10
 draws closer to target** -- indistinguishable from zero, against a draw-to-draw scatter of 8-10 percent.
 The single draw was one sample, and the fitted field has NOT been shown to change this stage's geometry.
-## 2026-10-05 (3) 閳?The base-level marginals, on both sides, measured
+## 2026-10-05 (3) 闁?The base-level marginals, on both sides, measured
 
 `scripts/measure_base_coords.py` measures the same bead-only coordinates on the crystals and on the
 field's own sampler (production tables, the loader's 3-bead chains, 5000 steps each). Every coordinate is
@@ -424,7 +424,7 @@ not here.
 
 ---
 
-## 2026-10-05 閳?Stacking, measured: the bottleneck is base placement, not the force field
+## 2026-10-05 闁?Stacking, measured: the bottleneck is base placement, not the force field
 
 We argued for months about whether the CG field is too simple to carry stacking. It was measurable, so we
 measured it (`scripts/measure_base_stacking.py`; full tables in Part 13 of
@@ -435,8 +435,8 @@ degrees. The instrument passes its own calibration: over 20 crystal fragments fr
 
 Three results, and the first is the one that changes the plan:
 
-* **The template loses more than the trace does.** Take the P trace from the crystal itself 閳?zero trace
-  error 閳?and `reconstruct_all_atom` still loses **57 percent of the stacking** (98.8 -> 43.1 percent),
+* **The template loses more than the trace does.** Take the P trace from the crystal itself 闁?zero trace
+  error 闁?and `reconstruct_all_atom` still loses **57 percent of the stacking** (98.8 -> 43.1 percent),
   puts the bases **0.9 A too close** (rise 3.35 -> 2.50 A), and keeps only **10-20 percent of the WC
   contacts** (2OIU 0/12, 4QK9 2/22). The shipped CG-to-all-atom step reproduces neither the rise nor the
   pairing geometry of the structure it is given.
@@ -445,14 +445,14 @@ Three results, and the first is the one that changes the plan:
   optimistic in the middle of the range.
 * **Our own products are past that point anyway**: the ten-draw 2OIU A/B traces sit **8.95-11.19 A** from
   the deposit (they keep their circular closure, BSJ 0.64-0.72 nm against 0.59) and reconstruct to 0-25
-  percent stacked. That is expected of a free 300 K sampler stage, not a defect 閳?but nothing downstream
+  percent stacked. That is expected of a free 300 K sampler stage, not a defect 闁?but nothing downstream
   can put the stacking back.
 
 **What this decides.** The next month should not start with a new CG energy term. It should start with
 **base placement**: superpose the template on the SAMPLED per-residue frame (P, C4', base site) instead of
 on the P trace plus an axis heuristic, and optionally solve the base orientation against the pair list.
 The three beads already exist in the model and `real_cg_beads` already reads them out of this very
-reconstruction 閳?whose own docstring says fabricated beads "carry no base identity, so no base-specific
+reconstruction 闁?whose own docstring says fabricated beads "carry no base identity, so no base-specific
 quantity can be expressed on them". A base-level stacking term (oxRNA does it at the same three sites per
 nucleotide, on a dedicated stacking site, with orientation from the rigid body) is the step AFTER that
 one, because today nothing the CG base beads do can reach the product.
@@ -463,7 +463,7 @@ And a restrained refinement protocol is a different experiment from the free sam
 
 ---
 
-## 2026-10-05 (2) 閳?The reconstruction fix works on ideal input and stops on real input, which is the useful answer
+## 2026-10-05 (2) 闁?The reconstruction fix works on ideal input and stops on real input, which is the useful answer
 
 Acting on the entry above: `aform_from_template.reconstruct_all_atom_from_beads` now fits the 1EHZ
 template onto the three beads the model already carries (P, C4', N9/N1) instead of guessing the base roll
@@ -497,7 +497,7 @@ from the crystal database with `scripts/measure_base_stacking.py`, and what the 
 from the bead sink on a real run. That is the next thing to do, and it is a measurement rather than a
 parameterisation.
 
-## 2026-10-05 (4) 閳?A stacking term from the measured target: the model can move, the term cannot reach it
+## 2026-10-05 (4) 闁?A stacking term from the measured target: the model can move, the term cannot reach it
 
 Built one, from measurements rather than taste: `base_frames.py` (the base plane as a FIXED linear
 combination of the three bead vectors, 0.000 deg exact per base, 6.573 deg with one pooled triple, no
@@ -523,7 +523,7 @@ and at the sampled theta of 51 degrees the orientation factor is exp(-(51.4/25)^
 10 kJ/mol acts as **0.07 kJ/mol per pair** against the ~6 kJ/mol a 20 degree reorientation costs. The reward
 vanishes exactly where repair is needed.
 
-## 2026-10-05 (5) 閳?Ten chains, paired: the term works and the trace does not pay for it
+## 2026-10-05 (5) 闁?Ten chains, paired: the term works and the trace does not pay for it
 
 The two open items from the entry above were both weight problems. Discounting the distance penalty to 0.3
 (the rise and the orientation are the coordinates the model cannot express at all today; the base-base
@@ -548,7 +548,7 @@ stacking term's (at full weight it was fighting the backbone's own pair and link
 strength is slightly past optimal**, visible as overshoot rather than damage: theta lands at 18.7 against a
 24.5 target, the rise's 5th percentile at +0.16 against +0.06.
 
-## 2026-10-05 (6) 閳?The strength lands on the target at 35 kJ/mol, and a loop arm holds the trace with the term on
+## 2026-10-05 (6) 闁?The strength lands on the target at 35 kJ/mol, and a loop arm holds the trace with the term on
 
 Ten chains each, same chains and seeds as the baseline, so every number is paired:
 
@@ -571,7 +571,7 @@ dihedral 0.042), the dihedral's update falls from 4.19 and 5.30 kJ/mol to **0.99
 0.0502, and the per-chain J median returns to 0.1477 -- the level the nine-round campaign had at its own second
 round. So a base-level term does not stop the trace tables from reaching their reference marginals.
 
-## 2026-10-05 (7) 閳?The loop scores the base level now, and it immediately falsified the strength
+## 2026-10-05 (7) 闁?The loop scores the base level now, and it immediately falsified the strength
 
 Wired, all opt-in and bit-identical without the flags: the three base-level coordinates in
 `boltzmann_bonded.coords_of` (through the same rigid map the term uses; kept OUT of `COORDS` because
@@ -641,7 +641,7 @@ spread -- a demonstration, not a converged measurement; the ten-draw 2OIU produc
 carry no beads; and 75.7 percent is a reconstruction validation on ideal input, not a product claim.
 \n**Second and third strength (same day).** eps = 2.3 kJ/mol with the same weights cut joint_J_base from 0.92\nto **0.30** and changed the error's shape: base_rise is now 1.8-1.9x too WIDE, base_cos 1.15-1.19x, base_dist\nstill slightly narrow (0.88-0.93). Applying sigma ~ 1/sqrt(eps) per coordinate gives the rise 7.9, the\norientation 3.1 and the distance 0.56 kJ/mol of effective strength, i.e. **eps = 7.9 with weights\n(0.07, 1, 0.39)** -- the per-coordinate weighting the scans kept asking for, now derived rather than\nsearched. Third arm is running. The loop's sigma scoreboard is the calibration instrument now: the first\nstrength came from a 5000-step scan and was wrong by 15x, the second and third come from two-round\nseven-chain arms that take 25 minutes each.\n
 
-## 2026-10-05 (8) 鈥?The stacking term costs nothing on retention
+## 2026-10-05 (8) 閳?The stacking term costs nothing on retention
 
 The fourth calibration (eps 16.6, weights 0/1/0.19 -- the rise's derived lever, the distance term dropped)
 brings joint_J_base to **0.190** from 0.918 at the first strength, with base_rise 1.21x the crystal width
@@ -661,7 +661,7 @@ The distance term stays dropped: taking it from 0.07 to 0.0 moved base_dist's si
 0.738 -- the wrong way for a term being removed, which is what "this coordinate's width is the backbone's"
 looks like when it is tested rather than argued.
 
-## 2026-10-05 (9) 鈥?The product step: infrastructure fixed, and a negative result that bounds the reconstruction
+## 2026-10-05 (9) 閳?The product step: infrastructure fixed, and a negative result that bounds the reconstruction
 
 Two infrastructure pieces, one of them broken: `write_allatom_pdb` did not exist anywhere (the
 `cg_frame_allatom` branch imported it from a module that never had it and fell back SILENTLY), and the
@@ -693,3 +693,25 @@ is the case this path is good at.
 So: threading the sampled beads in is worth doing for a GOOD trace (the refinement use case), and it is not
 the fix for a drifted one. The fix for that is a model whose base frame is its own -- beads defining the
 plane, or a fifth bead carrying a normal -- which is now the measured bottleneck rather than a suspicion.
+
+## 2026-10-05 (10) 鈥?Refinement protocols: the drift is a startup effect, and one number does not reproduce
+
+Sweep over one 2OIU chain, recording every frame's Kabsch RMSD against the deposit (findings Part 24):
+
+| protocol | RMSD at 25% / end | beads d / rise (p5) / cos |
+| :-- | :-- | :-- |
+| straight to 300 K, 1000 steps | 0.54 / **1.58 A** | 0.532 / +0.327 (+0.235) / 0.896 |
+| relax, 300 K, 5000 steps | 1.81 / 3.42 A | 0.548 / +0.324 (+0.207) / 0.854 |
+| relax, 150 K, 5000 steps | 1.39 / 2.45 A | 0.521 / +0.329 (+0.254) / 0.928 |
+| (crystal reference) | -- | 0.531 / +0.319 (+0.211) / 0.901 |
+
+The drift is a STARTUP effect (increments shrink), the pre-sampling descent dominates it (the 5000-step
+relaxation alone moves the deposit 3 A, because a deposit is not at the field's minimum), and colder
+thermostats help only modestly. **Every protocol keeps the base level on target**, so the term is robust
+across the whole grid.
+
+And a broken instrument: the product comparison run (1000 steps, 300 K, no relaxation) reports its trace
+**21.53 A** from the deposit while the sweep's nominally identical row reports **1.58 A** -- same field,
+tables, term, seed, chain, initial state and step count. Until that difference is found no product-level
+claim built on this comparison is readable; the two products it built are both unstacked and say nothing
+about the reconstruction. Settling it is a line-by-line A/B of the two run_round calls, not another run.

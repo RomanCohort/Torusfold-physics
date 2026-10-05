@@ -97,17 +97,22 @@ def main():
                                               coords=("bb_bond", "angle", "dihedral"),
                                               base_stack={"eps": EPS, "form": "sum",
                                                           "w_d": W[0], "w_r": W[1], "w_t": W[2]})
+    # argv: [nsteps] [temperature] [relax] -- the protocol axes measured by
+    # scripts/measure_refinement_protocol.py, so the product comparison can be run on the protocol that
+    # actually keeps the trace where it started (which is what the reconstruction's payoff depends on).
+    nsteps = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
+    temp = float(sys.argv[2]) if len(sys.argv) > 2 else 300.0
+    relax = int(sys.argv[3]) if len(sys.argv) > 3 else 1000
     pos0 = torch.tensor((beads_crystal / 10.0).reshape(1, 3 * L, 3), dtype=torch.float64)
     ij = torch.tensor(spec_pairs, dtype=torch.long).reshape(-1, 2)
     t0 = time.time()
     res = IC.run_round(pos=pos0, vel=torch.zeros_like(pos0), ij=ij,
                        pw=torch.ones(len(ij), dtype=torch.float32),
-                       temps=torch.full((1,), 300.0, dtype=torch.float64), tab=tab,
-                       nsteps=int(sys.argv[1]) if len(sys.argv) > 1 else 5000,
-                       burn=1000, stride=25, blocks=4, friction=1.0, force_cap=5000.0,
+                       temps=torch.full((1,), temp, dtype=torch.float64), tab=tab,
+                       nsteps=nsteps, burn=0, stride=25, blocks=4, friction=1.0, force_cap=5000.0,
                        pot_kw=pot_kw, seed=20261005, nrep=1, progress=False,
-                       constraints=C.make_intra_constraints(L), collect_positions=True,
-                       log=lambda *a, **k: None)
+                       constraints=C.make_intra_constraints(L), relax=relax,
+                       collect_positions=True, log=lambda *a, **k: None)
     frames = res.positions.numpy()[:, 0].reshape(-1, 3 * L, 3)          # (F, 3L, 3) nm
     p_final = frames[-1][0::3]
     print("\nCG sampling: %d frames in %.0f s | trace vs crystal %.2f A (Kabsch)"
@@ -128,8 +133,9 @@ def main():
     metrics("PRODUCT B: sampled bead frame", seq, M.structure_to_residues(st_b, seq), pairs)
 
     print("\nwrote %s and %s" % (pa.name, pb.name), flush=True)
-    print("(one draw, 5000 steps, production tables WITH the term at eps=%.1f w=%s -- a reconstruction"
-          " comparison, not a convergence claim)" % (EPS, W), flush=True)
+    print("(one draw, %d steps at %.0f K with %d relaxation steps, production tables WITH the term at"
+          " eps=%.1f w=%s -- a reconstruction comparison, not a convergence claim)"
+          % (nsteps, temp, relax, EPS, W), flush=True)
 
 
 if __name__ == "__main__":

@@ -1447,6 +1447,48 @@ drifted. The fix for that is a model whose base frame is the model's OWN -- the 
 plane, or a fifth bead that carries a normal -- which is the architectural question from the stacking
 discussion, and it is now the measured bottleneck rather than a suspicion.
 
+## Part 24 — What keeps a trace where it started, and one number that does not reproduce (2026-10-05)
+
+THE PROTOCOL SWEEP (`scripts/measure_refinement_protocol.py`), one 2OIU chain, every frame's Kabsch RMSD
+against the deposit rather than only the last:
+
+| protocol | RMSD at 0% / 25% / 50% / 75% / end | beads d / rise (5th pct) / cos |
+| :-- | :-- | :-- |
+| straight to 300 K, 1000 steps | 0.07 / 0.54 / 1.03 / 1.39 / **1.58 A** | 0.532 / +0.327 (+0.235) / 0.896 |
+| relax, 300 K, 5000 steps | 0.12 / 1.81 / 2.59 / 3.18 / **3.42 A** | 0.548 / +0.324 (+0.207) / 0.854 |
+| relax, 250 K, 5000 steps | 0.12 / 1.69 / 2.39 / 2.98 / **3.30 A** | 0.542 / +0.330 (+0.220) / 0.898 |
+| relax, 200 K, 5000 steps | 0.12 / 1.53 / 2.19 / 2.61 / **2.87 A** | 0.534 / +0.326 (+0.238) / 0.908 |
+| relax, 150 K, 5000 steps | 0.12 / 1.39 / 1.97 / 2.37 / **2.45 A** | 0.521 / +0.329 (+0.254) / 0.928 |
+| (reference) crystal beads | -- | 0.531 / +0.319 (+0.211) / 0.901 |
+
+THREE READINGS.
+
+1. **The drift is a startup phenomenon, not diffusion.** The increments shrink (at 150 K: +1.27, +0.58, +0.40,
+   +0.08 A), so the chain leaves the deposit once and then sits -- the shape a relaxation fixes and a
+   restraint does not have to.
+2. **The pre-sampling relaxation dominates it**: 1.58 A without one, 3.42 A with the 5000-step descent, i.e.
+   the descent itself moves the structure 3 A because a deposit is not at the CG field's minimum. Colder
+   thermostats help only modestly (3.42 -> 2.45 A from 300 to 150 K), consistent with the drift being a
+   descent rather than a diffusion.
+3. **Every protocol keeps the BASE LEVEL on target** (d 0.52-0.55 against 0.531, rise +0.32-0.33 against
+   +0.319, cos 0.85-0.93 against 0.901). The term is robust across the whole grid, which is a stronger
+   statement than any single arm's number.
+
+AND ONE NUMBER THAT DOES NOT REPRODUCE. The product comparison run (`benchmark_bead_frame_product.py`,
+1000 steps, 300 K, no relaxation -- nominally the sweep's first row) reports a final trace **21.53 A** from the
+deposit, while the sweep's first row reports **1.58 A** for the same settings: same field, tables, term, seed,
+chain, initial state and step count, two scripts disagreeing by 20 A. The two products built from that state
+are consequently both unstacked (0.0 percent; rise 1.94 A for the P trace and 0.85 A for the bead frame,
+against 3.40 A in the crystal) and say nothing about the reconstruction, because the state they were built
+from is not the state the sweep measured.
+
+This is not a result, it is a broken instrument, and it is recorded as one: two runs that should be the same
+experiment coming out 20 A apart means any product-level claim built on this comparison is unreadable until
+the difference is found. The suspicion is a difference between the two scripts' setups -- a parameter one
+passes and the other does not, or a default that differs -- and the way to settle it is a line-by-line A/B of
+the two `run_round` calls rather than another run. It is also why the sweep's numbers should be read relative
+to EACH OTHER (they were produced in one process with one setup) and not as absolute drift values.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 
