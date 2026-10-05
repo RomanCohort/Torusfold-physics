@@ -968,6 +968,121 @@
      the branch that decides whether the panel reloads or says "unchanged". */
   TF.App.showStructure = showStructure;
 
+  /* ── Manual refresh for the two panels that are filled from the server ──
+
+     WHY THE BUTTONS EXIST, given the page already updates itself.
+
+     Neither panel is on a timer, and that is deliberate — but it leaves two gaps:
+
+       1. The 3D panel follows a run on the server's heartbeat, and the heartbeat sends
+          only when the stage CHANGES. During a long stage nothing is pushed, so a
+          checkpoint written in between is not shown until the next boundary.
+
+       2. The Scoring panel's measurements arrive after the structure does, and the
+          retry that waits for them has a BUDGET (scheduleMetricsRetry). When the budget
+          is spent it stops for good, and the panel keeps whatever it last had. Before
+          this button the only way to re-measure was a page reload.
+
+     Both refresh paths therefore FORCE the read rather than re-entering the code that
+     decides whether to read, and both keep what the user is looking at:
+
+       - the structure refresh calls updateStructure(), not mount(), so the camera,
+         the representation and the colour scheme survive (the viewer's own note says a
+         moving camera makes the same molecule look like a different one);
+       - the score refresh re-arms the retry budget first, so the automatic path takes
+         over again if the measurement is still running on the server. */
+
+  function _busy(btn, on) {
+    if (!btn) return;
+    btn.disabled = !!on;
+    btn.classList.toggle('is-busy', !!on);
+    btn.setAttribute('aria-busy', on ? 'true' : 'false');
+  }
+
+  function _flashDone(btn) {
+    if (!btn) return;
+    btn.classList.remove('is-busy');
+    btn.classList.add('is-done');
+    setTimeout(function () { btn.classList.remove('is-done'); }, 1000);
+  }
+
+  function refreshStructure(btn) {
+    _busy(btn, true);
+    return fetch('/api/structure')
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (!s || !s.available) {
+          showToast('No structure on disk yet.', 'info');
+          return;
+        }
+        // Two identifiers, because two different guards stand between the request and
+        // the screen: showStructure returns early when the file key (name|mtime) is
+        // unchanged, and again when the CONTENT digest is unchanged. Asking both here
+        // is what lets this report "already current" honestly instead of claiming a
+        // refresh that the guards then swallowed.
+        var sameFile = (s.name + '|' + s.mtime) === shownStructure;
+        var sameBody = !!(s.digest && s.digest === shownDigest);
+        if (sameFile || sameBody) {
+          showToast('Already showing the newest structure (' + (s.desc || s.level) + ').',
+                    'info');
+          return;
+        }
+        // Force the read: clear both caches so neither guard can return early, and
+        // pass runIsActive = true so the demo guard does not either. Reaching here
+        // means the file on disk really is a different one — and if its contents
+        // happen to match what is already drawn, updateStructure() re-adds the same
+        // model and the camera does not move, so a pointless reload costs a redraw
+        // rather than a jump.
+        shownStructure = null;
+        shownDigest = null;
+        showStructure(s, true);
+        _flashDone(btn);
+      })
+      .catch(function (e) {
+        showToast('Could not read the structure: ' + e.message, 'error');
+      })
+      .then(function () { _busy(btn, false); });
+  }
+
+  function refreshScores(btn) {
+    _busy(btn, true);
+    return fetch('/api/current')
+      .then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (!s || !s.metrics) {
+          // Nothing measured yet. The server measures on a worker thread, so this is
+          // the normal first answer rather than a failure.
+          showToast('No measurements yet — the server is still working.', 'info');
+          return;
+        }
+        var before = lastMetrics;
+        // Re-arm the budget: the server may still be measuring, and the automatic
+        // retry is what carries the result the rest of the way.
+        resetMetricsRetry();
+        scheduleMetricsRetry(s.metrics.source && s.metrics.source.digest);
+        renderLiveMetrics(s.metrics);
+        _flashDone(btn);
+        // The digest lives at metrics.source.digest, NOT on the payload — measured
+        // against the running server, which returns source={"level","name","atoms",
+        // "delivered","digest"} and no top-level digest. Comparing a field that does
+        // not exist made this branch unreachable the first time it was written:
+        // undefined !== undefined is false, so the toast never appeared.
+        var was = before && before.source && before.source.digest;
+        var now = s.metrics.source && s.metrics.source.digest;
+        if (was && now && was !== now) {
+          showToast('Re-measured: the structure changed, so these are new numbers.',
+                    'success');
+        }
+      })
+      .catch(function (e) {
+        showToast('Could not read the scores: ' + e.message, 'error');
+      })
+      .then(function () { _busy(btn, false); });
+  }
+
+  TF.App.refreshStructure = refreshStructure;
+  TF.App.refreshScores = refreshScores;
+
   /* The idle path into the 3D panel: ask which structure is the newest one on
      disk and show it. Reached on load when the server has no job, so a finished
      prediction is still on screen after a refresh instead of an empty panel that
@@ -1697,6 +1812,37 @@
       }
     });
   }
+
+  /* The two manual-refresh buttons. Wired here rather than where the panels are built,
+     because the handlers are only ever invoked after init has run — the caches they
+     clear (shownStructure, shownDigest) are populated by the first render, not at
+     wiring time. */
+  var refreshStructBtn = $('btn-refresh-structure');
+  if (refreshStructBtn) {
+    refreshStructBtn.addEventListener('click', function () {
+      refreshStructure(refreshStructBtn);
+    });
+  }
+  var refreshScoresBtn = $('btn-refresh-scores');
+  if (refreshScoresBtn) {
+    refreshScoresBtn.addEventListener('click', function () {
+      refreshScores(refreshScoresBtn);
+    });
+  }
+
+  /* Shift+R does the same thing without reaching for the mouse, which matters while
+     watching a run: the panel is on the far side of a wide window. */
+  document.addEventListener('keydown', function (e) {
+    if (!e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+    if ((e.key || '').toLowerCase() !== 'r') return;
+    var t = e.target || {};
+    // Not while typing: a sequence box or a parameter field owns the key there.
+    if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;
+    e.preventDefault();
+    refreshStructure(refreshStructBtn);
+    refreshScores(refreshScoresBtn);
+  });
+
   setTimeout(reconnectToRunningJob, 0);
 
 })();

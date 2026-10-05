@@ -807,6 +807,29 @@ input[type="range"]::-moz-range-thumb{
   text-transform:uppercase;letter-spacing:.09em;font-weight:400;
 }
 
+/* ── Panel header with a refresh button ──
+   A panel whose contents are measured elsewhere and can be re-read on demand. The title
+   keeps its own bottom margin when it stands alone; inside this header the header owns
+   the spacing, so the title's margin is reset rather than fought with a negative one. */
+.panel-head{
+  display:flex;align-items:center;justify-content:space-between;
+  gap:var(--sp-2);margin-bottom:var(--sp-3);
+}
+.panel-head > .panel-title{margin-bottom:0}
+.btn-panel-refresh{
+  display:inline-flex;align-items:center;gap:5px;
+  color:var(--ink-3);background:transparent;border-color:transparent;
+}
+.btn-panel-refresh:hover:not(:disabled){background:var(--raised);color:var(--accent);border-color:var(--hair)}
+.btn-panel-refresh.is-busy svg{animation:tf-spin .9s linear infinite}
+/* Two turns on success, so the button reads as having done something without a toast
+   for the quiet case. The toast still fires when the numbers actually change. */
+.btn-panel-refresh.is-done svg{animation:tf-spin .45s linear 2}
+@keyframes tf-spin{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){
+  .btn-panel-refresh.is-busy svg,.btn-panel-refresh.is-done svg{animation:none}
+}
+
 /* ── Scoring ── */
 .scoring-grid{display:flex;flex-direction:column;gap:1px;background:var(--hair);
   border:1px solid var(--hair);border-radius:5px;overflow:hidden}

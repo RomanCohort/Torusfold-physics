@@ -375,6 +375,18 @@ try{
                 title="Load the delivered 2,013 nt model (42,831 atoms) — not from your run">
           Demo structure
         </button>
+        <span class="chip-sep" aria-hidden="true"></span>
+        <!-- Re-read whichever checkpoint is newest on disk right now.
+             The panel already follows a run on the server's heartbeat, but the heartbeat
+             pushes only when the STAGE changes, and it stops entirely when the page is
+             not attached to a job. That leaves two cases this covers: a run that is still
+             writing and you do not want to wait for the next push, and an idle page where
+             nothing is pushing at all. -->
+        <button class="btn btn-quiet btn-xs btn-icon btn-panel-refresh" id="btn-refresh-structure"
+                title="Re-read the newest structure from disk"
+                aria-label="Refresh the structure panel">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        </button>
       </div>
 
       <div id="minigame-toolbar" class="minigame-toolbar">
@@ -425,7 +437,20 @@ try{
         <!-- Tab: Overview -->
         <section class="tab-content" data-tab="overview">
           <div class="panel">
-            <h2 class="panel-title">Scoring</h2>
+            <div class="panel-head">
+              <h2 class="panel-title">Scoring</h2>
+              <!-- The measurements are taken by the server on a worker thread and cost
+                   seconds on a large structure, so the panel fills in behind the fetch.
+                   The automatic retry that follows a new structure has a BUDGET and
+                   stops when it is spent; this button re-arms it, and is also the only
+                   way to re-measure without a page reload once the budget is gone. -->
+              <button class="btn btn-quiet btn-xs btn-panel-refresh" id="btn-refresh-scores"
+                      title="Re-measure the structure on screen"
+                      aria-label="Refresh the scores">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                Refresh
+              </button>
+            </div>
             <div class="scoring-grid" id="scoring-grid">
               <div class="score-item" id="score-rsrnasp">
                 <span class="score-label">rsRNASP1</span>
