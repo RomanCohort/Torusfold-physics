@@ -198,17 +198,93 @@ def sampled_frames(n_chains=8, nsteps=5000, burn=1000, stride=25, blocks=4, thre
     return out
 
 
+def sampled_frames_with_stack(eps, n_ch=2, nsteps=5000, burn=1000, stride=25, blocks=4, threads=4):
+    """Sample with the base-level stacking term installed. Returns (frames, trace joint J).
+
+    Everything else is the same protocol as sampled_frames: production tables, the loader's 3-bead chains,
+    the loop's own run_round. The only difference is the extra potential in pot_kw.
+    """
+    from torusfold.scheme2 import base_stacking as BS
+    torch.set_num_threads(threads)
+    pool = small_pool()[:n_ch]
+    tab = IC.load_tables(str(REF))
+    with np.load(PROD) as z:
+        for c in ("bb_bond", "angle", "dihedral"):
+            tab[c] = dict(tab[c], U=np.asarray(z[f"{c}__U"], dtype=float))
+    _pots, pot_kw = CP.build_potential_kwargs(str(PROD), wall_k=2000.0,
+                                             coords=("bb_bond", "angle", "dihedral"))
+    if eps != 0.0:
+        pot_kw = dict(pot_kw, base_stack_potential=BS.make_base_stack_potential(eps=eps))
+    else:
+        pot_kw = dict(pot_kw, base_stack_potential=None)
+    out = []
+    js = []
+    for k, s in enumerate(pool):
+        pos_np = np.asarray(s["pos"], dtype=np.float64)
+        L = pos_np.shape[0]
+        pos = torch.tensor(pos_np.reshape(1, 3 * L, 3), dtype=torch.float64)
+        vel = torch.zeros_like(pos)
+        temps = torch.full((1,), 300.0, dtype=torch.float64)
+        pairs = list(s["pairs"])
+        ij = torch.tensor(pairs, dtype=torch.long).reshape(-1, 2)
+        pw = torch.ones(len(pairs), dtype=torch.float32)
+        con = C.make_intra_constraints(L)
+        t0 = time.time()
+        res = IC.run_round(pos=pos, vel=vel, ij=ij, pw=pw, temps=temps, tab=tab,
+                           nsteps=nsteps, burn=burn, stride=stride, blocks=blocks,
+                           friction=1.0, force_cap=5000.0, pot_kw=pot_kw, seed=20261005 + k,
+                           nrep=1, progress=False, constraints=con,
+                           collect_positions=True, log=lambda *a, **kk: None)
+        skip = B.CONSTRAINED
+        vals, j = IC.simref(res.acc, tab, skip)
+        js.append(float(j))
+        print("  chain %-9s L=%2d  %4d frames in %.0f s  J %.4f"
+              % (s["name"], L, res.positions.shape[0], time.time() - t0, float(j)), flush=True)
+        for fr in range(res.positions.shape[0]):
+            out.append(res.positions[fr][0].reshape(L, 3, 3).numpy())
+    return out, float(np.mean(js))
+
+
 def coords_from_frame_list(frame_list):
+    """Bead-only coordinates for each sampled frame, with the base plane taken from the RIGID TEMPLATE
+    MAP (`base_frames`) rather than from the raw P-C4'-N triangle.
+
+    The triangle normal is 20.2 deg (median 16.2) off the true base-plane normal, so a table built on it
+    measures a different quantity from the one a term can target: the map is what the model can express
+    (17.6 deg off the ring planes on crystals, 6.6 deg on the template itself), and both sides of the
+    comparison now use it.
+    """
+    from torusfold.scheme2 import base_frames as BF
+    coef_A = BF.pooled_coef(1.0)                 # beads below are Angstrom, as base_frames expects
     rows = {k: [] for k in COORDS}
     for p in frame_list:
-        frames = frames_from_beads(p)
+        beads_A = np.asarray(p, dtype=float) * 10.0
+        n = BF.normals_np(beads_A, coef_A)       # (L, 3)
         for i in range(p.shape[0] - 1):
-            a, b, th, tw = pair_coords(frames, i, i + 1)
-            rows["nb_dist"].append(a)
-            rows["cc_dist"].append(float(np.linalg.norm(p[i + 1, 1] - p[i, 1])))
-            rows["rise"].append(b)
-            rows["theta"].append(th)
-            rows["twist"].append(tw)
+            a, b = n[i].copy(), n[i + 1].copy()
+            if float(a @ b) < 0.0:
+                b = -b
+            nm = a + b
+            nn = np.linalg.norm(nm)
+            nm = nm / nn if nn > 1e-9 else a
+            dc = (beads_A[i + 1, 2] - beads_A[i, 2]) / 10.0
+            rows["nb_dist"].append(float(np.linalg.norm(dc)))
+            rows["cc_dist"].append(float(np.linalg.norm(beads_A[i + 1, 1] - beads_A[i, 1]) / 10.0))
+            rows["rise"].append(float(dc @ nm))
+            rows["theta"].append(float(np.degrees(np.arccos(max(-1.0, min(1.0, float(a @ b)))))))
+            # wj must use the SIGN-ALIGNED normal (b), not n[i+1]: with the raw one, every pair whose
+            # map-normal was flipped contributes ~180 degrees and the twist column reads 122 +- 84 deg
+            # with a 5th percentile of 0. Found in the first scan, where the other three columns were fine
+            # -- which is exactly how a one-line error in one coordinate announces itself.
+            wi = a - nm * float(a @ nm)
+            wj = b - nm * float(b @ nm)
+            nwi, nwj = np.linalg.norm(wi), np.linalg.norm(wj)
+            if nwi < 1e-9 or nwj < 1e-9:
+                continue
+            wi, wj = wi / nwi, wj / nwj
+            _cr = float(np.cross(wi, wj) @ nm)
+            _dt = max(-1.0, min(1.0, float(wi @ wj)))
+            rows["twist"].append(abs(float(np.degrees(np.arctan2(_cr, _dt)))))
     return {k: np.asarray(v, dtype=float) for k, v in rows.items()}
 
 
@@ -316,6 +392,118 @@ def main():
             print("%-10s %6.3f %12.4f %12.4f %12.4f %12.4f   (target all-pairs vs helical subset: TV %.3f)"
                   % (k, tv, np.nanmean(tgt[k]), np.nanstd(tgt[k]),
                      np.nanmean(smp[k]), np.nanstd(smp[k]), tv_ref), flush=True)
+        return
+
+    if len(sys.argv) > 2 and sys.argv[1] == "--stack-scan":
+        # --stack-scan eps1,eps2,... [n_chains] [nsteps]
+        # The base-level term, scanned in strength, measured against the expressible target and against
+        # the TRACE marginals at the same time: a base-level term that fixes stacking while pushing the
+        # backbone out of its own fitted marginals would be a trade, and this is where that shows up.
+        from torusfold.scheme2 import base_stacking as BS
+        eps_list = [float(x) for x in sys.argv[2].split(",")]
+        n_ch = int(sys.argv[3]) if len(sys.argv) > 3 else 2
+        nst = int(sys.argv[4]) if len(sys.argv) > 4 else 5000
+        tz = np.load(OUT / "_base_coords_planes.npz")
+        tgt = {k: tz[f"impl_{k}"] for k in ("nb_dist", "rise", "theta", "twist")}
+        grid = {"nb_dist": (0.3, 1.6), "rise": (-1.0, 1.0), "theta": (0.0, 180.0), "twist": (0.0, 180.0)}
+        for eps in eps_list:
+            print("\n===== stacking strength eps = %.2f kJ/mol (%.2f kBT) =====" % (eps, eps / 2.494),
+                  flush=True)
+            frame_list, jval = sampled_frames_with_stack(eps, n_ch=n_ch, nsteps=nst)
+            smp = coords_from_frame_list(frame_list)
+            rows = {}
+            for k in ("nb_dist", "rise", "theta", "twist"):
+                v = smp[k][np.isfinite(smp[k])]
+                tv, _ha, _hb = tv_distance(tgt[k], v, *grid[k])
+                rows[k] = tv
+                print("  %-8s mean %8.4f  sd %7.4f  p5 %8.4f   TV vs target %.3f"
+                      % (k, v.mean(), v.std(), np.percentile(v, 5), tv), flush=True)
+            print("  trace joint J = %.4f  (the field's own scoreboard, unchanged coordinates)"
+                  % jval, flush=True)
+            np.savez(OUT / ("_base_coords_stack_eps%g.npz" % eps),
+                     **{f"sampled_{k}": smp[k] for k in COORDS}, j=np.asarray([jval]))
+        return
+
+    if len(sys.argv) > 2 and sys.argv[1] == "--planes":
+        # The TARGET a bead-based term can actually express: the same coordinates, but with the plane taken
+        # from the beads through the rigid template (base_frames.normals_np) instead of from the ring atoms.
+        # Reported beside the ring-atom version, so the cost of the three-bead representation is visible.
+        from torusfold.scheme2 import base_frames as BF
+        n_frag = int(sys.argv[2])
+        coef = BF.pooled_coef(1.0)      # beads below are Angstrom
+        true_rows = {k: [] for k in ("rise", "theta", "twist", "nb_dist")}
+        impl_rows = {k: [] for k in ("rise", "theta", "twist", "nb_dist")}
+        ang = []
+        files = sorted((REPO / "_cgdata" / "combined").glob("*.pdb"))
+        done = 0
+        for f in files:
+            if done >= n_frag:
+                break
+            seq, residues, _pP, _ch = M.parse_pdb(f)
+            if seq is None or len(seq) > 300 or len(seq) < 8:
+                continue
+            try:
+                beads = np.stack([[r["atoms"]["P"], r["atoms"]["C4'"], r["atoms"][GLY[r["base"]]]]
+                                  for r in residues])
+            except KeyError:
+                continue
+            planes = [M.plane(r) for r in residues]
+            if any(q is None for q in planes):
+                continue
+            # SAME SIGN CONVENTION ON BOTH SIDES, or the rise is meaningless: M.plane returns an SVD
+            # normal whose sign is arbitrary, so the ring-atom normals are flipped to point along
+            # +e3 = (C4'-P) x (N-P) exactly as base_frames does for the bead ones. Measured before this
+            # line existed: ring rise -0.349 A against bead rise +3.28 A for the same pairs, i.e. the two
+            # columns disagreed in sign because the normals did.
+            planes = []
+            for _i, _r in enumerate(residues):
+                _c, _n, _v = M.plane(_r)
+                _e3 = np.cross(beads[_i, 1] - beads[_i, 0], beads[_i, 2] - beads[_i, 0])
+                if float(_n @ _e3) < 0:
+                    _n = -_n
+                planes.append((_c, _n, _v))
+            # The map is fed ANGSBROM (the template's unit) and the reported distances are nm, because
+            # the coefficients are scale-sensitive: a cross product scales with length squared.
+            n_impl = BF.normals_np(beads, coef)
+            beads = beads / 10.0                      # A -> nm for the reported table
+            for i in range(len(seq) - 1):
+                ci, ni_t, vi = planes[i]
+                cj, nj_t, vj = planes[i + 1]
+                ang.append(float(np.degrees(np.arccos(max(-1.0, min(1.0,
+                           abs(float(n_impl[i] @ ni_t))))))))
+                for tag, rows, (na, nb) in (("true", true_rows, (ni_t, nj_t)),
+                                            ("impl", impl_rows, (n_impl[i], n_impl[i + 1]))):
+                    a, b = na.copy(), nb.copy()
+                    if float(a @ b) < 0:
+                        b = -b
+                    nm = a + b
+                    nm = nm / np.linalg.norm(nm) if np.linalg.norm(nm) > 1e-9 else a
+                    dc = beads[i + 1, 2] - beads[i, 2]
+                    rows["nb_dist"].append(float(np.linalg.norm(dc)))
+                    rows["rise"].append(float(dc @ nm))
+                    rows["theta"].append(float(np.degrees(np.arccos(max(-1.0, min(1.0, float(a @ b)))))))
+                    wi = vi - nm * float(vi @ nm)
+                    wj = vj - nm * float(vj @ nm)
+                    wi = wi / np.linalg.norm(wi) if np.linalg.norm(wi) > 1e-9 else wi
+                    wj = wj / np.linalg.norm(wj) if np.linalg.norm(wj) > 1e-9 else wj
+                    _cr = float(np.cross(wi, wj) @ nm)
+                    _dt = max(-1.0, min(1.0, float(wi @ wj)))
+                    rows["twist"].append(abs(float(np.degrees(np.arctan2(_cr, _dt)))))
+            done += 1
+        print("fragments: %d; implied-plane normal vs RING-plane normal: mean %.1f deg, median %.1f deg"
+              % (done, np.mean(ang), np.median(ang)), flush=True)
+        for tag, rows in (("ring atoms", true_rows), ("from beads", impl_rows)):
+            for k in ("nb_dist", "rise", "theta", "twist"):
+                v = np.asarray(rows[k], dtype=float)
+                v = v[np.isfinite(v)]
+                print("  %-10s %-8s n=%5d  mean %8.4f  sd %7.4f  p5 %8.4f  p50 %8.4f  p95 %8.4f"
+                      % (tag, k, v.size, v.mean(), v.std(), np.percentile(v, 5),
+                         np.percentile(v, 50), np.percentile(v, 95)), flush=True)
+        np.savez(OUT / "_base_coords_planes.npz",
+                 **{f"ring_{k}": np.asarray(true_rows[k]) for k in true_rows},
+                 **{f"impl_{k}": np.asarray(impl_rows[k]) for k in impl_rows},
+                 implied_vs_ring_angle=np.asarray(ang))
+        print("wrote results/plan_c/_base_coords_planes.npz", flush=True)
         return
 
     if len(sys.argv) > 2 and sys.argv[1] == "--target-only":

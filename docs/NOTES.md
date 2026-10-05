@@ -499,6 +499,36 @@ from the crystal database with `scripts/measure_base_stacking.py`, and what the 
 from the bead sink on a real run. That is the next thing to do, and it is a measurement rather than a
 parameterisation.
 
+## 2026-10-05 (4) — A stacking term from the measured target: the model can move, the term cannot reach it
+
+Built one, from measurements rather than taste: `base_frames.py` (the base plane as a FIXED linear
+combination of the three bead vectors, 0.000 deg exact per base, 6.573 deg with one pooled triple, no
+per-step reconstruction) and `base_stacking.py` (E = -eps * SUM Gd(d) Gr(rise) Gt(theta), each well at a
+measured target value with a measured width, wired into `cg_energy_forces` as an opt-in injection,
+gradient verified to 6 decimals). The target, through that same map: d = 0.570 +- 0.198 nm, rise =
+0.328 +- 0.188 nm with a 5th percentile at +0.06, theta = 24.5 +- 22.2 deg.
+
+Scanned at eps = 0, 4, 10 kJ/mol per pair, two chains, 5000 steps:
+
+| eps | d (nm) | rise 5th pct | theta (deg) | trace J |
+| --: | --: | --: | --: | --: |
+| target | 0.570 | +0.06 | 24.5 | -- |
+| 0 | 0.750 | -0.33 | 51.4 | 0.139 |
+| 4 | 0.727 | -0.43 | 50.9 | 0.189 |
+| 10 | 0.700 | -0.52 | 46.4 | 0.119 |
+
+It moves d and theta 10-20 percent of the way and does nothing for the one-sidedness. Two measurements say
+why, and the first is the good news: **rotating one residue's rigid unit about the local P-P axis costs only
+1.3 kJ/mol at 10 degrees, 6.2 at 20, 12.4 at 30** -- the roll is a SOFT coordinate, so the rigid-link
+network is not the obstacle. The obstacle is the term's shape: the three factors multiply and each is <= 1,
+and at the sampled theta of 51 degrees the orientation factor is exp(-(51.4/25)^2) = 0.016, so a nominal
+10 kJ/mol acts as **0.07 kJ/mol per pair** against the ~6 kJ/mol a 20 degree reorientation costs. The reward
+vanishes exactly where repair is needed.
+
+Next: an additive / pairwise-attraction form whose scale IS eps and whose orientation factor is broad (oxRNA
+uses a distance attraction times an orientation factor, not a product of three narrow wells), then the same
+scan. The model can carry stacking; this term cannot reach it.
+
 **Caveats, stated**: the real-run comparison is one short draw at 7.74 A drift with a +- 54 deg twist
 spread -- a demonstration, not a converged measurement; the ten-draw 2OIU products predate the sink and
 carry no beads; and 75.7 percent is a reconstruction validation on ideal input, not a product claim.

@@ -1250,7 +1250,8 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
                      lams=None,
                      relax_bond_k=None, relax_angle_k=None,
                      relax_pair_k=None, restraint_k=None, force_cap=5000.0,
-                     *, angle_potential=None, dihedral_potential=None, bond_potential=None):
+                     *, angle_potential=None, dihedral_potential=None, bond_potential=None,
+    base_stack_potential=None):
     """Unified energy+forces: all 15 terms computed in one function, removing REMD inconsistency.
 
     lams: (B,) per-replica λ, overriding the scalar lam (for the merged forward).
@@ -1268,6 +1269,9 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
     downstream can tell the two apart. None -- the default -- selects the shipped harmonic
     expression and is bit-identical to the behaviour before these parameters existed.
 
+    base_stack_potential: an optional base-level stacking term, pos_nm -> (energy (B,), forces
+        (B, 3L, 3)), e.g. base_stacking.make_base_stack_potential(eps=5.0). None adds nothing, and the
+        historical K_STACK term stays as it is either way.
     bond_potential wins over relax_bond_k: with an injected bond the harmonic's k is computed
     and discarded, because the injected U(r) does not have a single spring constant to scale.
     That matters because isrnaclong.py passes relax_bond_k into BatchedREMD2D and no call site
@@ -1375,6 +1379,16 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         f_st = -k_st*(dist_st-STACK_R0)*delta_st/dist_st  # F = -dE/dx
         total_F[:, P(st)] += f_st.squeeze(-1)
         total_F[:, P(st+2)] -= f_st.squeeze(-1)
+
+    # ── 7b. Base-level stacking: opt-in AND injected ──
+    # Section 7 above is the historical stack term: K_STACK = 0, written on |P(i) - P(i+2)|, which is
+    # algebraically the bond and the angle and therefore has no degrees of freedom of its own (verified to
+    # 8.5e-16; findings Parts 13-15). The base PLANE is what the crystals constrain, and the model can
+    # only reach it through the beads: base_stacking.make_base_stack_potential builds a three-well term
+    # whose parameters are the measured target marginals. Nothing is added unless a caller asks for it.
+    if base_stack_potential is not None:
+        e_bst, f_bst = base_stack_potential(pos_nm)
+        total_E = total_E + e_bst; total_F = total_F + f_bst
 
     # ── 8. Clash: O(K) cell-list ──
     if cell_list is not None:

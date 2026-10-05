@@ -1034,6 +1034,70 @@ TWO INCIDENTAL FINDINGS, both recorded because both cost a run:
   structural and now in place: one process per chain under a 420 s timeout, so a hang costs one chain. The
   chain itself is not identified, because the order was not stable enough to name it.
 
+## Part 16 — A base-level stacking term, built from the target: the model can move, the term as shaped cannot (2026-10-05)
+
+THE INGREDIENTS, each a measurement:
+
+* **A bead-to-plane map that is exact and cheap** (`base_frames.py`). A CG potential can only see the beads,
+  and the base PLANE is not determined by three points -- it takes the rigid template to say where the ring
+  sits. Because the template is rigid, the plane normal is a FIXED linear combination of the three template
+  vectors e1 = C4'-P, e2 = N-P, e3 = e1 x e2, so the map is a few cross products per residue, no per-step
+  reconstruction and no per-step SVD. It reproduces the template's own ring plane to 0.000 degrees per base,
+  and ONE pooled triple covers all four bases to 6.573 degrees -- base identity is not needed, which matters
+  because the sampler does not carry it (load_structures returns name, pairs, pos).
+  Two traps, both measured: the sign of an SVD plane normal is arbitrary, and without a convention
+  (normal along +e3) the pooled triple misses by 77.5 degrees; and the map is scale-sensitive, because the
+  cross-product term scales with length squared, so feeding nm beads to Angstrom coefficients reads 60.9
+  degrees instead of 17.6.
+* **The target, in the units the map gives** (`measure_base_coords.py --planes`, 20 fragments, 1625
+  consecutive pairs): d = 0.570 +- 0.198 nm, rise = 0.328 +- 0.188 nm with a 5th percentile at +0.06 (the
+  target is ONE-SIDED), theta = 24.5 +- 22.2 deg (median 15.9). Taken through the SAME map, so these are the
+  numbers a bead-level term can be held to; the ring-atom version is d = 0.570, rise = 0.334 +- 0.216,
+  theta = 18.5 +- 20.4, and the map itself is 17.6 degrees (median 11.2) off the ring planes on crystals.
+* **The term** (`base_stacking.py`, wired into `cg_energy_forces` as an opt-in injection, gradient verified
+  against a finite difference to 6 decimal places): E = -eps * SUM_i Gd(d) * Gr(rise) * Gt(theta), each
+  factor a Gaussian well at the measured target value with the measured spread as its width.
+
+THE SCAN, two chains, 5000 steps each, production tables, everything else fixed:
+
+| eps (kJ/mol) | d (nm) | rise (nm), 5th pct | theta (deg) | trace J |
+| --: | --: | --: | --: | --: |
+| target | 0.570 | 0.328, +0.06 | 24.5 | -- |
+| 0 | 0.750 | 0.332, -0.33 | 51.4 | 0.139 |
+| 4 | 0.727 | 0.279, -0.43 | 50.9 | 0.189 |
+| 10 | 0.700 | 0.266, -0.52 | 46.4 | 0.119 |
+
+It moves d and theta in the right direction and by 10-20 percent of what is needed, does nothing useful for
+the one-sidedness of the rise, and the trace J shows no systematic damage at this sample size. So the term
+"works" and is far too weak -- and the reason is not the one I expected.
+
+THE REASON, measured twice.
+
+1. **The model CAN reorient a base.** Rotating one residue's rigid unit about the local P-P axis, against the
+   four springs that hold it to its neighbours, costs (scripts/measure_base_rotation_cost.py, 1Q96):
+
+   | rotation | 5 deg | 10 deg | 20 deg | 30 deg | 45 deg |
+   | :-- | --: | --: | --: | --: | --: |
+   | cost | 0.0 | 1.3 | 6.2 | 12.4 | 20.4 kJ/mol |
+   | in kBT | 0.0 | 0.5 | 2.5 | 5.0 | 8.2 |
+
+   A 20-30 degree reorientation costs 2.5-5 kBT, which is affordable. The roll is a SOFT coordinate in this
+   parameterisation, so the obstacle is not the rigid-link network -- K_LINK_NP is 5477 kJ/mol/nm^2, but at
+   the equilibrium geometry a rotation about the local axis barely stretches anything, and the cost is
+   second order in the angle.
+2. **The term's effective strength is not eps.** The three factors MULTIPLY, and each is <= 1, so the
+   attraction is eps times a product that is small exactly where repair is needed: at the sampled theta of
+   51.4 degrees the orientation factor with a 25 degree scale is exp(-(51.4/25)^2) = 0.016. With the distance
+   factor 0.44 and the rise factor ~1, a nominal eps of 10 kJ/mol acts as **0.07 kJ/mol per pair** -- against
+   the ~6 kJ/mol that a 20 degree reorientation costs.
+
+So the shape is wrong, not the physics: a reward that vanishes in the configurations that need changing has
+almost no gradient there, and the scan confirms it. The fix is a form whose scale IS eps -- an additive or
+pairwise-attraction form with a broad orientation factor (oxRNA's stacking is a distance attraction times an
+orientation factor, not a product of three narrow wells), after which the same scan is the test. That the
+base frame is soft is what makes this worth doing rather than a dead end: the model can carry stacking, the
+current term cannot reach it.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 
