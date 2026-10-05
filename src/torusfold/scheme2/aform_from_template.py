@@ -391,6 +391,40 @@ def reconstruct_all_atom_from_beads(beads: np.ndarray, sequence: str) -> AllAtom
     return structure
 
 
+def write_allatom_pdb(structure: AllAtomStructure, path: str) -> str:
+    """AllAtomStructure -> PDB text, in the conventions the CG writer already established.
+
+    WHY THIS EXISTS. torch_gpu_refine's bead-frame branch (cg_frame_allatom) called a function of this
+    name that did not exist anywhere in the tree, so the branch raised ImportError, was caught, and fell
+    back silently to the P-trace path -- the feature was dead on arrival, and only a warning nothing
+    printed would have said so. The columns below are copied from _write_pdb_simple in torch_gpu_refine so
+    the two writers cannot disagree about what a PDB from this project looks like: three-letter residue
+    names (ADE/URA/GUA/CYT), serial in cols 7-11, atom name 13-16, resname 18-20, chain A, element in the
+    two columns before the line end, and a plain END record -- no REMARK lines, because the CG_to_allatom
+    binary rejected them.
+
+    Residue boundaries come from the structure's own residue_atom_spans, not from a re-guess of which
+    atoms belong together.
+    """
+    base_map = {"A": "ADE", "U": "URA", "G": "GUA", "C": "CYT"}
+    out = []
+    with open(path, "w", newline="\n") as fh:
+        for r, (start, end) in enumerate(structure.residue_atom_spans):
+            seq_letter = structure.sequence[r] if r < len(structure.sequence) else "A"
+            resname = base_map.get(seq_letter.upper(), "ADE")
+            for atom in structure.atoms[start:end]:
+                x, y, z = (float(v) for v in atom.xyz)
+                element = (atom.element or atom.atom_name[:1]).strip()[:2]
+                # PDB convention: a name shorter than four characters starts in column 14, which is what
+                # the leading space in this format does; full four-character names start in 13.
+                _nm = atom.atom_name if len(atom.atom_name) == 4 else " " + atom.atom_name
+                out.append("ATOM  %5d %-4s %3s A%4d    %8.3f%8.3f%8.3f  1.00  0.00          %2s\n"
+                           % (atom.serial, _nm, resname, r + 1, x, y, z, element))
+        out.append("END\n")
+        fh.writelines(out)
+    return path
+
+
 if __name__ == "__main__":
     seq = "AUGCAUGCAUGCAUGCAUGCAUGCAUGCAUGC"
     L = len(seq)

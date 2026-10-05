@@ -18,6 +18,56 @@ import numpy as np
 
 _CG_TABLE_KW = None
 
+# The environment variable that seeds a run without touching any call site.
+SEED_ENV = "TORUSFOLD_SEED"
+
+
+def _resolve_seed(seed: Optional[int], verbose: bool = True) -> Optional[int]:
+    """The seed for a stochastic run — and, when there is none, a line that says so.
+
+    WHAT WAS WRONG. Nothing seeded anything. `BatchedREMD2D` starts velocities at zero
+    (`torch_cgsim`, `_safe_zeros`) and the randomness enters through the Langevin noise drawn
+    inside the integrator, so every run of the same input took a different path. Measured on
+    2OIU, 71 nt, ten draws per arm, same input and same code
+    (`scripts/structure_spread.py` over `results/plan_c/ab_2oiu/`):
+
+        within-arm mean pairwise P-trace RMSD   7.561 A (analytic) / 7.898 A (tables)
+        worst within-arm pair                   9.709 A
+        every one of the 20 structures          8.0-10.5 A from the crystal they started from
+
+    The A/B script's own comment records the cause: "REMD velocities are not seeded".
+
+    WHAT SEEDING DOES NOT DO. It does not make a run accurate, and it does not remove the
+    7.6 A spread — a spread across seeds is sampling, and averaging it away is not the same as
+    being right. What it removes is the third thing: not being able to say which draw a figure
+    came from.
+
+    AND IT IS NOT SUFFICIENT. Seeding fixes the noise stream; it does not make the GPU kernels
+    deterministic. Any force kernel that accumulates with atomics can return a different
+    float for the same input. So a seeded run has to be CHECKED, not assumed: run the same
+    seed twice and compare — `scripts/structure_spread.py` computes exactly that number, and
+    it should be 0.000 A. If it is not, the kernels, not the seed, are the remaining problem.
+
+    Precedence: the `seed` argument, then `TORUSFOLD_SEED`, then nothing — and "nothing"
+    prints. A silent unseeded run is how this stayed unnoticed.
+
+    A caller that invokes this several times (per round, per candidate) and passes the same
+    seed gets the same noise stream every time. That is deterministic and it is also
+    correlated; pass `seed + round` when the streams should be independent.
+    """
+    if seed is None:
+        raw = os.environ.get(SEED_ENV)
+        if raw:
+            try:
+                seed = int(raw)
+            except ValueError:
+                raise SystemExit(f"{SEED_ENV}={raw!r} is not an integer")
+    if seed is None and verbose:
+        print("  [seed] NOT SEEDED: this run cannot be reproduced. Two runs of the same input "
+              "differ by ~7.6 A RMSD on 71 nt (scripts/structure_spread.py). "
+              f"Set {SEED_ENV} or pass seed= to fix that.")
+    return seed
+
 
 def _cg_potential_kwargs():
     """The tabulated CG potentials named by TORUSFOLD_CG_TABLES, or {} for the analytic field.
@@ -84,6 +134,7 @@ def torch_gpu_refine(
     on_report: Optional[Callable] = None,
     cg_bead_sink: Optional[list] = None,
     cg_frame_allatom: bool = False,
+    seed: Optional[int] = None,
 ) -> Tuple[str, float, dict]:
     """torch GPU-accelerated refinement (interface compatible with openmm_gpu_refine).
 
@@ -126,6 +177,19 @@ def torch_gpu_refine(
     t0 = time.time()
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
+
+    # Seed BEFORE anything stochastic runs. See _resolve_seed for the measurement that made
+    # this necessary (7.6 A of run-to-run scatter on a 71 nt target).
+    _seed = _resolve_seed(seed, verbose)
+    if _seed is not None:
+        import torch as _torch
+        _torch.manual_seed(_seed)
+        if verbose:
+            print(f"  [seed] torch RNG seeded with {_seed} "
+                  f"(from {'the seed argument' if seed is not None else SEED_ENV})")
+            print("  [seed] this fixes the noise stream, not the kernels: verify by running "
+                  "the same seed twice and comparing with scripts/structure_spread.py "
+                  "(expect 0.000 A)")
 
     # 1. Read P coordinates
     p_coords = _read_p_coords(input_pdb)
@@ -455,8 +519,10 @@ def torch_gpu_refine(
         # The base frames the sampler moved, instead of the axis heuristic that guesses them.
         aa_pdb = str(out_path / f"{name}.pdb")
         try:
-            from .isrnacirc_wrapper import write_allatom_pdb
-            from .aform_from_template import reconstruct_all_atom_from_beads
+            # write_allatom_pdb lives beside the reconstruction that produces an AllAtomStructure. It used
+            # to be imported from isrnacirc_wrapper, where it has never existed -- the branch was dead until
+            # 2026-10-05 and fell back to the P-trace path without saying so.
+            from .aform_from_template import reconstruct_all_atom_from_beads, write_allatom_pdb
             _st = reconstruct_all_atom_from_beads(beads_A, sequence)
             write_allatom_pdb(_st, aa_pdb)
             if verbose:

@@ -1393,6 +1393,60 @@ seven chains from a length-stratified sample rather than the full pool, 12 ps, a
 reference rather than the campaign's own `tables_r9` -- so the numbers compare the two arms to EACH OTHER,
 which is what the question needed, and not to the historical baseline directly.
 
+## Part 23 — The product step, and a negative result that bounds Parts 13-14 (2026-10-05)
+
+The step that was supposed to convert all of the above into a better PRODUCT: build the all-atom structure from
+the SAMPLED bead frame instead of from the P trace, and compare the two products on their own base planes.
+Two infrastructure pieces were needed first, and one of them was broken:
+
+* **`write_allatom_pdb` did not exist.** `torch_gpu_refine`'s bead-frame branch (`cg_frame_allatom`)
+  imported it from `isrnacirc_wrapper`, where it has never been, so the branch raised ImportError, was
+  caught, and fell back to the P-trace path WITHOUT SAYING SO -- the feature was dead on arrival and only a
+  warning that nothing printed would have told anyone. Written now, beside the reconstruction that produces
+  an AllAtomStructure, in the same PDB columns the CG writer uses.
+* **The shipped CG-to-all-atom step is an external binary, `CG_to_allatom.exe`, and it is NOT PRESENT on
+  this machine** (`_CG_TO_AA_EXE` is empty). `cg_to_allatom` therefore raises, the exception is caught,
+  and the "all-atom" product of the shipped path is the P trace itself. So the in-tree reconstruction is not
+  an alternative to the shipped path here -- it is the only all-atom path there is.
+
+THE COMPARISON, one 2OIU chain, 5000 steps under the production tables WITH the term at the Part 22 setting
+(eps 16.6, w 0/1/0.19), then both structures built from the SAME final state:
+
+| | base_dist | base_rise (mean, 5th pct) | base_cos |
+| :-- | --: | --: | --: |
+| crystal | 0.5306 nm | +0.3186 (+0.2110) nm | 0.9008 |
+| **sampled, term ON** | **0.5381** | **+0.3034 (+0.2074)** | **0.8599** |
+
+**The field's own beads sit on the crystal's base-level geometry almost exactly** -- which is the cleanest
+evidence yet that the term does what it was built to do, measured directly on the beads rather than through
+a reconstruction.
+
+| product (same state) | stacked | rise | normal angle | WC contacts kept |
+| :-- | --: | --: | --: | --: |
+| A: P trace (shipped in-tree path) | **0.0%** | 1.48 +- 0.66 A | 29.0 deg | 3/12 |
+| B: sampled bead frame (new) | **0.0%** | **0.73 +- 0.34 A** | 28.1 deg | 5/12 |
+| crystal | 100% | 3.40 +- 0.13 A | 7.8 deg | 12/12 |
+
+**Neither product is stacked, and the bead frame is WORSE than the P trace here** -- the opposite of what
+the ideal-input measurement in Part 14 found (43.9 -> 75.7 percent). The reason is in the same table: this
+run's trace ended **21.5 A** from the deposit, so its local backbone geometry is far from A-form.
+
+WHY THAT BREAKS THE BEAD-FRAME PATH, and it is a real bound on Parts 13-14. `reconstruct_all_atom_from_beads`
+fits a RIGID 1EHZ residue onto the three sampled beads. When those three beads form an A-form-like triangle,
+that fit reproduces the base plane; when the triangle is distorted, the best-fit rotation is set by the
+SHAPE MISMATCH between the template's triangle and the sampled one, and the base plane can end up far from
+where the beads say it should be. The field can therefore know the right base geometry (the beads above say
+it does) while the reconstruction cannot express it. The in-tree reconstruction is only as good as the local
+trace geometry it is handed -- which is exactly what Part 13 measured when it varied the trace RMSD and found
+stacking gone by 2.7 A.
+
+WHAT THIS MEANS FOR THE NEXT MOVE, and it is a change of plan rather than a failure: threading the sampled
+beads into the product is worth doing on a trace that is already good (which is the refinement use case, and
+where the ideal-input gain is 32 points of stacking), and it is NOT the fix for a field whose trace has
+drifted. The fix for that is a model whose base frame is the model's OWN -- the beads themselves defining the
+plane, or a fifth bead that carries a normal -- which is the architectural question from the stacking
+discussion, and it is now the measured bottleneck rather than a suspicion.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 
