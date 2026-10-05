@@ -86,6 +86,7 @@ def _cg_potential_kwargs():
     global _CG_TABLE_KW
     if _CG_TABLE_KW is None:
         path = os.environ.get("TORUSFOLD_CG_TABLES", "").strip()
+        spec = os.environ.get("TORUSFOLD_BASE_STACK", "").strip()
         kw = {}
         if path:
             import sys                      # this module does not import sys otherwise
@@ -94,9 +95,24 @@ def _cg_potential_kwargs():
             if scripts not in sys.path:
                 sys.path.insert(0, scripts)
             import cg_potentials as _P
-            pots, kw = _P.build_potential_kwargs(path)
+            # THE BASE-LEVEL STACKING TERM, opt-in (2026-10-05). Unset keeps the field this pipeline has
+            # always run. Set to "eps" or "eps:w_d,w_r,w_t" -- the calibrated setting is
+            # TORUSFOLD_BASE_STACK=16.6:0,1,0.19, the fourth calibration in findings Part 22 -- and the CG
+            # energy calls take the term as well, built through the same cg_potentials entry point the loop
+            # and the retention instrument use, so there is one object and not three.
+            base_stack = None
+            if spec:
+                parts = spec.split(":")
+                w = [float(x) for x in parts[1].split(",")] if len(parts) > 1 else [1.0, 1.0, 1.0]
+                base_stack = {"eps": float(parts[0]),
+                              "form": os.environ.get("TORUSFOLD_BASE_STACK_FORM", "sum"),
+                              "w_d": w[0], "w_r": w[1], "w_t": w[2]}
+            pots, kw = _P.build_potential_kwargs(path, base_stack=base_stack)
             print("  [torch_gpu_refine] CG tables from " + path + ": "
-                  + ", ".join(str(c) for c, _, _ in pots))
+                  + ", ".join(str(c) for c, _, _ in pots)
+                  + (" + base-level stacking eps %.3g kJ/mol (%s, w %s)"
+                     % (base_stack["eps"], base_stack["form"],
+                        ",".join("%g" % v for v in (w[0], w[1], w[2]))) if base_stack else ""))
         _CG_TABLE_KW = kw
     return _CG_TABLE_KW
 
@@ -134,6 +150,7 @@ def torch_gpu_refine(
     on_report: Optional[Callable] = None,
     cg_bead_sink: Optional[list] = None,
     cg_frame_allatom: bool = False,
+    bead_source_pdb: Optional[str] = None,
     seed: Optional[int] = None,
 ) -> Tuple[str, float, dict]:
     """torch GPU-accelerated refinement (interface compatible with openmm_gpu_refine).
@@ -244,8 +261,24 @@ def torch_gpu_refine(
             # P-only -> 3-bead (P, C4', N). The C4' and N beads come from the 1EHZ
             # template reconstruction: the previous backbone-direction offsets put both
             # on the backbone axis, where they carry no base information.
-            from .aform_from_template import real_cg_beads
-            _beads = real_cg_beads(np.asarray(final_p_coords, dtype=np.float64), sequence)
+            # START FROM THE DEPOSIT'S OWN BASE FRAMES WHEN THE FILE HAS THEM. The heuristic puts both
+            # non-backbone beads on the backbone axis and guesses the roll, and the base-level term then has
+            # to drag them into place over the run -- measured on 2OIU: fabricated beads have the right
+            # internal geometry and a base-frame cosine of 0.607 against the deposit's 0.901, and the product
+            # built from them is unstacked (findings Part 25).
+            from .aform_from_template import real_cg_beads, beads_from_pdb
+            # bead_source_pdb exists because a prepared P-only input has no C4'/N to read, while the
+            # deposit it came from does -- and _read_p_coords is not chain-aware, so pointing the whole
+            # refinement at a full-atom file would feed it every phosphorus atom in the structure (measured:
+            # 1527 P for a 71-nt chain).
+            _own = beads_from_pdb(bead_source_pdb or input_pdb)
+            if _own is not None and _own.shape[0] == len(sequence):
+                _beads = _own
+                print(f"  [Torch GPU] initial beads from {bead_source_pdb or input_pdb} "
+                      f"({_beads.shape[0]} residues)")
+            else:
+                _beads = real_cg_beads(np.asarray(final_p_coords, dtype=np.float64), sequence)
+                print("  [Torch GPU] initial beads FABRICATED from the P trace (no C4'/N available)")
             # interleaved order: (P0, C4'0, N0, P1, C4'1, N1, ...)
             pos_3bead = torch.tensor(
                 _beads.reshape(1, 3 * L, 3), dtype=torch.float64, device=dev) / 10.0
@@ -513,35 +546,60 @@ def torch_gpu_refine(
     cg_pdb = str(out_path / f"{name}_cg.pdb")
     _write_pdb_simple(cg_pdb, final_p_coords, sequence)
 
+    # THE PRECEDENCE, stated because it used to be accidental and silent. Until 2026-10-05 the order was
+    # "bead frame if asked for, else CG_to_allatom.exe, else the CG P trace" -- and the last of those was
+    # reported only under verbose, so on a machine without the third-party binary (this one: _CG_TO_AA_EXE
+    # is empty) the pipeline's "all-atom product" was a P trace and nothing said so. The order is now:
+    #
+    #   1. skip_cg_to_allatom            -> the CG P trace, said out loud
+    #   2. cg_frame_allatom, or no exe   -> the IN-TREE reconstruction on the SAMPLED bead frame
+    #   3. the exe exists                -> CG_to_allatom.exe
+    #   4. nothing worked                -> the CG P trace, with a warning instead of a silent success
+    #
+    # and whichever ran is printed unconditionally. The reconstruction is the better product when the exe is
+    # absent, not a consolation: measured on the same 2OIU state (trace 1.58 A from the deposit), 58.3 percent
+    # of helical steps stacked against 25.0 for the P-trace path (findings Part 25).
+    aa_pdb = cg_pdb
     if skip_cg_to_allatom:
-        aa_pdb = cg_pdb
-    elif cg_frame_allatom and beads_A is not None:
-        # The base frames the sampler moved, instead of the axis heuristic that guesses them.
+        print("  [Torch GPU] skip_cg_to_allatom: the product is the CG P trace, no all-atom structure")
+    else:
+        from .aform_from_template import reconstruct_all_atom_from_beads, write_allatom_pdb
         aa_pdb = str(out_path / f"{name}.pdb")
+        _exe_ok = False
         try:
-            # write_allatom_pdb lives beside the reconstruction that produces an AllAtomStructure. It used
-            # to be imported from isrnacirc_wrapper, where it has never existed -- the branch was dead until
-            # 2026-10-05 and fell back to the P-trace path without saying so.
-            from .aform_from_template import reconstruct_all_atom_from_beads, write_allatom_pdb
-            _st = reconstruct_all_atom_from_beads(beads_A, sequence)
-            write_allatom_pdb(_st, aa_pdb)
-            if verbose:
-                print(f"  [Torch GPU] CG -> all-atom on the SAMPLED bead frame: {aa_pdb}")
-        except Exception as e:
-            if verbose:
-                print(f"  [Torch GPU] bead-frame CG -> all-atom failed: {e}; falling back")
-            beads_A = None
-    if not skip_cg_to_allatom and beads_A is None:
-        aa_pdb = str(out_path / f"{name}.pdb")
-        try:
-            from .isrnacirc_wrapper import cg_to_allatom
-            cg_to_allatom(cg_pdb, aa_pdb, sequence)
-            if verbose:
-                print(f"  [Torch GPU] CG -> all-atom: {aa_pdb}")
-        except Exception as e:
-            if verbose:
-                print(f"  [Torch GPU] CG -> all-atom failed: {e}, using CG PDB")
+            from .isrnacirc_wrapper import _CG_TO_AA_EXE
+            _exe_ok = bool(os.path.exists(_CG_TO_AA_EXE))
+        except Exception:
+            _exe_ok = False
+        _used = None
+
+        def _bead_frame(tag):
+            write_allatom_pdb(reconstruct_all_atom_from_beads(beads_A, sequence), aa_pdb)
+            return tag
+
+        if beads_A is not None and (cg_frame_allatom or not _exe_ok):
+            try:
+                _used = _bead_frame("the SAMPLED bead frame" if cg_frame_allatom
+                                    else "the SAMPLED bead frame (CG_to_allatom.exe not installed)")
+            except Exception as e:
+                print(f"  [Torch GPU] bead-frame all-atom failed: {e}")
+        if _used is None and _exe_ok:
+            try:
+                from .isrnacirc_wrapper import cg_to_allatom
+                cg_to_allatom(cg_pdb, aa_pdb, sequence)
+                _used = "CG_to_allatom.exe"
+            except Exception as e:
+                print(f"  [Torch GPU] CG_to_allatom.exe failed: {e}")
+        if _used is None and beads_A is not None:
+            try:
+                _used = _bead_frame("the SAMPLED bead frame (fallback)")
+            except Exception as e:
+                print(f"  [Torch GPU] bead-frame all-atom failed: {e}")
+        if _used is None:
             aa_pdb = cg_pdb
+            print("  [Torch GPU] NO all-atom step succeeded: the product is the CG P trace")
+        else:
+            print(f"  [Torch GPU] CG -> all-atom via {_used}: {aa_pdb}")
 
     elapsed = time.time() - t0
     if verbose:

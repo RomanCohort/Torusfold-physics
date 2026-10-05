@@ -199,10 +199,14 @@ def reconstruct_all_atom(
         #   backbone direction b = P[i+1] - P[i] (the last residue uses P[0]-P[L-1])
         #   perpendicular r = direction to the base-pair partner, projected off b;
         #     unpaired residues fall back to the radial direction P[i] - centroid
-        # The C1'/C4' offsets are the 1EHZ-measured means decomposed along b
-        # (61 standard residues, chain A; see docs/archive/reconstruction_anchor_audit.md):
-        #   C1': 3.25 along + 4.16 perpendicular  (|C1'-P| = 5.33 +/- 0.19)
-        #   C4': 2.79 along + 2.63 perpendicular  (|C4'-P| = 3.90 +/- 0.04)
+        # The C1'/C4' offsets are the 1EHZ-measured means decomposed along b, r and n --
+        # the actual values are the _ANCHOR_OFFSETS dict at the top of this module, and
+        # THIS COMMENT USED TO RESTATE THEM WRONG ("C4': 2.79 along + 2.63 perpendicular").
+        # A reader who took the restatement instead of the dict computed a
+        # C4'(i)-P(i+1) of 4.07 A where the dict gives 3.65 A and the code produces 3.20 A,
+        # and spent a round hunting a 0.87 A discrepancy that was in the comment.
+        # The dict is the value; do not restate it here.
+        # For reference from the dict: C1' (3.36, 2.63, -2.35), C4' (2.97, 0.65, -2.07).
         # The previous constants (5.5/1.5 and 4.2/0.0) put every anchor on the backbone
         # axis and made two of the four targets coincide with O3' at P[i+1]-1.6b:
         # 0.01 A apart against a real |C4'-O3'| of 2.44 +/- 0.04 A. With a degenerate
@@ -285,6 +289,52 @@ def trace_frames(p):
             nn = np.linalg.norm(n)
         out.append((b, np.cross(n / nn, b), n / nn))
     return out
+
+
+def beads_from_pdb(pdb_path, chain=None):
+    """(L, 3, 3) Angstrom beads (P, C4', N9/N1) read from a structure that HAS them, or None.
+
+    WHY THIS EXISTS. torch_gpu_refine's input is a P trace, so its CG stage has to FABRICATE the two
+    non-backbone beads, and it does that with real_cg_beads -- the very axis heuristic the bead-frame
+    reconstruction exists to replace. Measured on 2OIU with the term on and the tables installed: the
+    fabricated beads come out with the right internal geometry (P-C4' 3.90 A, C4'-N 3.35 against the
+    deposit's 3.86 and 3.37) and the WRONG orientation relative to each other (base_cos 0.607 against the
+    deposit's 0.901), and the product built from them is unstacked. The deposit's own base frames are in the
+    file the pipeline was given; when they are there, they are what a refinement should start from.
+
+    Returns None rather than raising when the file lacks the atoms, so a caller can fall back to the
+    heuristic and say which one it used.
+    """
+    try:
+        from openmm.app import PDBFile
+        from openmm import unit as _u
+    except Exception:
+        return None
+    _gly = {"A": "N9", "G": "N9", "C": "N1", "U": "N1", "RA": "N9", "RG": "N9", "RC": "N1", "RU": "N1",
+            "ADE": "N9", "GUA": "N9", "CYT": "N1", "URA": "N1"}
+    try:
+        pdb = PDBFile(str(pdb_path))
+    except Exception:
+        return None
+    beads = []
+    for res in pdb.topology.residues():
+        if chain is not None and res.chain.id != chain:
+            continue
+        base = _gly.get(res.name.strip().upper())
+        if base is None:
+            continue
+        want = {"P", "C4'", base}
+        got = {}
+        for atom in res.atoms():
+            nm = atom.name.strip()
+            if nm in want and nm not in got:
+                got[nm] = np.asarray(pdb.positions[atom.index].value_in_unit(_u.angstrom), dtype=np.float64)
+        if len(got) != 3:
+            return None
+        beads.append([got["P"], got["C4'"], got[base]])
+    if len(beads) < 2:
+        return None
+    return np.asarray(beads, dtype=np.float64)
 
 
 def carry_beads_along_trace(p_new, beads_ref, p_ref):

@@ -1574,6 +1574,45 @@ scoreboard (Parts 18-22), retention is untouched (Part 22), and the PRODUCT now 
 level was for (25 -> 58 percent against a 100 percent crystal). The remaining gap -- 58 against 100, and
 2 of 12 WC contacts -- is the trace's 1.58 A and the rigid template's idealisation, in that order.
 
+## Part 26 — The production path, wired and measured: the switches work, the protocol is the blocker (2026-10-05)
+
+THE WIRING, all four pieces, each verified by a log line rather than by inspection:
+
+* **The term reaches the CG stage**: `TORUSFOLD_BASE_STACK=16.6:0,1,0.19` (with `_FORM` and `_W`) makes
+  `torch_gpu_refine` build its potentials through `cg_potentials.build_potential_kwargs(..., base_stack=...)`
+  -- the same entry point the loop and the retention instrument use, so there is one object and not three --
+  and it prints the strength, form and weights it ran with.
+* **The all-atom step has a stated precedence** instead of an accidental one: skip -> bead frame -> the
+  external `CG_to_allatom.exe` -> the CG P trace, and **whichever ran is printed unconditionally**. Until
+  today the last of those was silent and only under `verbose`, so on a machine without the binary (this one)
+  the pipeline's "all-atom product" was a P trace and nothing said so. Measured now: 1551 atoms instead of
+  71, from the same call. `write_allatom_pdb` was written for this (it did not exist; the branch that called
+  it raised ImportError and fell back silently).
+* **The refinement can start from the deposit's own base frames**: `bead_source_pdb` supplies them when the
+  prepared input is P-only, because `_read_p_coords` is not chain-aware and pointing the whole refinement at
+  a full-atom file feeds it every phosphorus in the structure (measured: 1527 P for a 71-nt chain). With the
+  beads read from the deposit, the log says so; without, it says they were FABRICATED.
+* **The bead-frame reconstruction is the fallback the exe's absence now selects**, not a consolation.
+
+AND THE RESULT IS NOT THE 58 PERCENT, for a reason that is a protocol and not a bug. Run end to end on 2OIU
+with the term on and the beads read from the deposit, the refiner's CG stage returns beads whose base-frame
+cosine is **0.650** against the deposit's 0.901, with rise +1.343 nm against +3.186, and the product built
+from them is unstacked. The same field, the same tables and the same term in the LOOP's sampler, under the
+protocol Part 24's sweep identified (1000 steps, 300 K, no pre-relaxation), keeps the beads at cosine 0.895
+and gives a product 58.3 percent stacked.
+
+The difference is what the two stages are FOR. `torch_gpu_refine`'s CG stage is a FOLDING protocol: a
+six-stage 400 -> 300 K pre-fold and an REMD ladder whose replicas reach 1000 K, with the returned state chosen
+by CG energy. A term worth ~6 kBT per pair at 300 K is worth ~1.5 kBT at the top of that ladder, so the base
+frames are scrambled by construction -- and the "best" state can come from a hot replica whose base geometry
+is arbitrary. The loop's sampler is a room-temperature equilibrium sampler, which is what a base-level term
+needs.
+
+SO THE NEXT PIECE IS A REFINEMENT MODE, and it is small: a flag that skips the anneal, drops the temperature
+ladder, and runs a short room-temperature Langevin trajectory -- the protocol the sweep already measured
+(1.58 A of trace drift, sd 0.12 over eight seeds, beads on target). Everything else it needs is in place: the
+term, the bead source, the reconstruction, the writer, and the precedence that selects them.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

@@ -12,7 +12,7 @@ for two reasons:
 
 1. **Scale mismatch / conflict.** TriRNASP is a *log-odds statistical potential*,
    not a physical energy. At `trirnasp_scale = 0.002` it still contributed
-   ~11 % of the total energy 闂?i.e. its raw magnitude was ~50闁?the CG terms.
+   ~11 % of the total energy 闂?i.e. its raw magnitude was ~50闂?the CG terms.
    The two potentials disagreed in their minima (idealized CG geometry vs.
    PDB statistics), producing a frustrated landscape that made the composite
    hard to anneal and hypersensitive to the coupling scale.
@@ -49,13 +49,13 @@ correct `score_pdb()` implementation (it was never called in-tree).
 ## Far / long-range pair closure is still imperfect
 
 Distal (topologically far) pairing distances come out too large in early runs;
-RL MCTS + steering forces were added to pull them toward Watson闂佺偨鍎插鐬╥ck
-geometry (C1闂佺偨鍎茬粊鎾焵椤掍礁鐤?闂?~10.5 闁? but this remains the main accuracy bottleneck for
+RL MCTS + steering forces were added to pull them toward Watson闂備胶鍋ㄩ崕鎻掝嚕閻暐ck
+geometry (C1闂備胶鍋ㄩ崕鑼矈閹绢喖鐒垫い鎺嶇閻?闂?~10.5 闂? but this remains the main accuracy bottleneck for
 long sequences. Not fully solved.
 
 ## CG planar collapse (fixed)
 
-Initialization collapsed to a flat disc (`z 闂?0.6 闁煎瓨绔? because CG started with
+Initialization collapsed to a flat disc (`z 闂?0.6 闂佺厧鐡ㄧ粩? because CG started with
 `z = 0` and the energy surface flattened it. Fixed by injecting helical `z`
 into the CG initialization and a `CustomExternalForce` `z`-restraint during
 refinement. Keep the restraint on; do not "clean up" the `z` patch.
@@ -65,7 +65,7 @@ refinement. Keep the restraint on; do not "clean up" the `z` patch.
 In the all-atom amber path, the `alpha`/`zeta` dihedrals were computed with
 cross-residue atoms of the *same* residue instead of the *neighboring*
 residue, causing 18/20 outlier dihedrals. Fixed; verify per-residue dihedral
-deviations stay within ~5闁?of ideal.
+deviations stay within ~5闂?of ideal.
 
 ## Modules referenced but not published yet
 
@@ -94,12 +94,12 @@ Measured on an AMD Ryzen AI MAX 395 (Radeon 8060S iGPU): ROCm compatibility
 was poor and required extensive patching (a large time cost); iGPU throughput
 measured far below an RTX 3080. The CPU path is therefore the reference for
 all measured runs. GPU full-configuration wall time (~14 d estimated on this
-APU; 闂? d on an NVIDIA A100 at the 闂?闁?estimate) is not yet measured.
+APU; 闂? d on an NVIDIA A100 at the 闂?闂?estimate) is not yet measured.
 
 ## 2026-09-09 闂?2OIU force-field integrity test (update)
 
 Completed: starting from the 2OIU X-ray structure, the Level-2 relaxation
-(CPU) took 17 min and ended at RMSD 1.83 闁?vs the crystal 闂?the force field
+(CPU) took 17 min and ended at RMSD 1.83 闂?vs the crystal 闂?the force field
 does not distort known structures. Note this is a force-field integrity test
 from the X-ray structure, not a from-sequence "recovery" benchmark; the
 from-sequence recovery question above remains open.
@@ -366,7 +366,7 @@ ensemble almost nothing.**
 **What that does not mean.** The pass is at the *pooled equilibrium* marginal, which is what the tables
 were fitted to. It is not a statement about any single structure's geometry: that is what the 2OIU A/B
 measures, and its single draw showed the fitted dihedral field halving the log width error
-(|ln(sd/target)| 0.635 -> 0.307) while the two products differed by 13.5 闁?from REMD's unseeded start.
+(|ln(sd/target)| 0.635 -> 0.307) while the two products differed by 13.5 闂?from REMD's unseeded start.
 Ten draws per arm are running now, analysed as a PAIRED difference so the scatter cancels.
 
 **Which of the failures were real.** Three, and all three are now handled in code rather than by taste:
@@ -641,7 +641,7 @@ spread -- a demonstration, not a converged measurement; the ten-draw 2OIU produc
 carry no beads; and 75.7 percent is a reconstruction validation on ideal input, not a product claim.
 \n**Second and third strength (same day).** eps = 2.3 kJ/mol with the same weights cut joint_J_base from 0.92\nto **0.30** and changed the error's shape: base_rise is now 1.8-1.9x too WIDE, base_cos 1.15-1.19x, base_dist\nstill slightly narrow (0.88-0.93). Applying sigma ~ 1/sqrt(eps) per coordinate gives the rise 7.9, the\norientation 3.1 and the distance 0.56 kJ/mol of effective strength, i.e. **eps = 7.9 with weights\n(0.07, 1, 0.39)** -- the per-coordinate weighting the scans kept asking for, now derived rather than\nsearched. Third arm is running. The loop's sigma scoreboard is the calibration instrument now: the first\nstrength came from a 5000-step scan and was wrong by 15x, the second and third come from two-round\nseven-chain arms that take 25 minutes each.\n
 
-## 2026-10-05 (8) 闁?The stacking term costs nothing on retention
+## 2026-10-05 (8) 闂?The stacking term costs nothing on retention
 
 The fourth calibration (eps 16.6, weights 0/1/0.19 -- the rise's derived lever, the distance term dropped)
 brings joint_J_base to **0.190** from 0.918 at the first strength, with base_rise 1.21x the crystal width
@@ -661,7 +661,7 @@ The distance term stays dropped: taking it from 0.07 to 0.0 moved base_dist's si
 0.738 -- the wrong way for a term being removed, which is what "this coordinate's width is the backbone's"
 looks like when it is tested rather than argued.
 
-## 2026-10-05 (9) 闁?The product step: infrastructure fixed, and a negative result that bounds the reconstruction
+## 2026-10-05 (9) 闂?The product step: infrastructure fixed, and a negative result that bounds the reconstruction
 
 Two infrastructure pieces, one of them broken: `write_allatom_pdb` did not exist anywhere (the
 `cg_frame_allatom` branch imported it from a module that never had it and fell back SILENTLY), and the
@@ -694,7 +694,7 @@ So: threading the sampled beads in is worth doing for a GOOD trace (the refineme
 the fix for a drifted one. The fix for that is a model whose base frame is its own -- beads defining the
 plane, or a fifth bead carrying a normal -- which is now the measured bottleneck rather than a suspicion.
 
-## 2026-10-05 (10) 閳?Refinement protocols: the drift is a startup effect, and one number does not reproduce
+## 2026-10-05 (10) 闁?Refinement protocols: the drift is a startup effect, and one number does not reproduce
 
 Sweep over one 2OIU chain, recording every frame's Kabsch RMSD against the deposit (findings Part 24):
 
@@ -716,7 +716,7 @@ tables, term, seed, chain, initial state and step count. Until that difference i
 claim built on this comparison is readable; the two products it built are both unstacked and say nothing
 about the reconstruction. Settling it is a line-by-line A/B of the two run_round calls, not another run.
 
-## 2026-10-05 (11) 鈥?Three bugs of mine, and the product result they were hiding
+## 2026-10-05 (11) 閳?Three bugs of mine, and the product result they were hiding
 
 Part 24's "the map and the rigid fit come apart" was wrong. Building both scoreboards with the CRYSTAL as a
 reference row -- where the two definitions must agree -- caught three errors in one afternoon: the product was
@@ -739,3 +739,24 @@ And the product comparison, re-run with the units fixed, is the result the arc w
 real sampled trace at 1.58 A of drift; what did not transfer was my own bookkeeping. The remaining gap (58
 against 100, and 2 of 12 WC contacts) is the trace's 1.58 A and the rigid template's idealisation, in that
 order.
+
+## 2026-10-05 (12) 鈥?The production path: switches wired and verified, and the protocol is the blocker
+
+Four pieces wired, each verified by a log line: the base-level term reaches the refiner's CG stage through
+`TORUSFOLD_BASE_STACK=16.6:0,1,0.19` (same `cg_potentials` entry point as the loop, so one object, not
+three); the all-atom step has a stated precedence (skip -> bead frame -> the external `CG_to_allatom.exe` ->
+the CG trace) and **prints which one ran** (before today the last was silent and only under verbose, so on a
+machine without the binary the "all-atom product" was a 71-atom P trace; now it is 1551 atoms);
+`bead_source_pdb` lets a refinement start from the DEPOSIT's own base frames when the prepared input is
+P-only; and `write_allatom_pdb` exists at all (the branch that called it raised ImportError and fell back
+silently).
+
+The end-to-end result is not the 58 percent, for a reason that is a protocol and not a bug: the refiner's CG
+stage returns beads with a base-frame cosine of **0.650** against the deposit's 0.901, while the LOOP's
+sampler under the sweep's protocol (1000 steps, 300 K, no pre-relaxation) keeps 0.895 and gives a 58.3 percent
+product. The refiner's CG stage is a FOLDING protocol -- a 400 -> 300 K pre-fold and an REMD ladder reaching
+1000 K, with the returned state chosen by CG energy -- so a term worth ~6 kBT per pair at 300 K is worth ~1.5
+at the top of the ladder and the base frames are scrambled by construction.
+
+So the next piece is a refinement MODE: a flag that skips the anneal, drops the temperature ladder and runs a
+short room-temperature Langevin trajectory. Everything else it needs is in place.
