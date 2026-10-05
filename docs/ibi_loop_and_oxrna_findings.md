@@ -824,6 +824,91 @@ frozen-angle arm reports. And the tolerances, 10 percent in width and 0.05 in ed
 the record's own round-to-round scatter (1-3 percent) and the basis project's frozen edge tolerance;
 they are not derived.
 
+## Part 13 — Measured: the stacking bottleneck is base placement, not the CG force field (2026-10-05)
+
+Part 12 ended with the field passing on every coordinate it controls, and with stacking still
+unexplained: K_STACK = 0, the scored stack coordinate is the algebraic P(i)-P(i+2) distance, and every
+base in the product is placed by a 1EHZ template plus an axis heuristic rather than by anything the CG
+stage sampled. The question that decides where to spend the next month is which of those actually costs
+stacking, so it was measured rather than argued (scripts/measure_base_stacking.py).
+
+WHAT IS MEASURED. A HELICAL STEP is a WC pair (i, j) whose next pair along the helix (i+1, j-1) also
+exists -- the only place stacking is expected, since sequence-adjacent bases across a bulge are not
+supposed to stack. For each step: the centroid separation, the angle between the base-plane normals
+theta, the RISE (separation along the mean normal) and the TWIST (in-plane rotation between the two
+glycosidic directions). A step counts as STACKED when its rise is 2.5-4.0 A and theta <= 30 degrees.
+Pairs are detected geometrically from the H-bond contacts (A N1-U N3 / A N6-U O4, G N1-C N3 / G O6-C N4 /
+G N2-C O2, 3.6 A cutoff), so the same instrument applies to a deposit, to a reconstruction and to a CG
+product with no second source of truth.
+
+THE INSTRUMENT, CALIBRATED ON CRYSTALS, over 20 fragments of _cgdata/combined:
+
+| | steps | stacked | rise | theta | twist |
+| :-- | --: | --: | --: | --: | --: |
+| crystal | 226 | 98.8% +- 5.4 | 3.353 +- 0.075 A | 8.3 deg | 31.3 +- 2.4 deg |
+| reconstruction, trace EXACT | 226 | **43.1% +- 22.7** | **2.496 +- 0.274 A** | 16.9 deg | 29.3 +- 2.8 deg |
+
+Two pitfalls found while building it, both recorded because each produced a wrong answer first: the
+plane normal comes out of an SVD with an arbitrary sign, so a perfectly stacked pair can read as
+theta = 180 degrees (2OIU's crystal scored 50 percent stacked until the normals were sign-aligned); and
+the criterion has to be the rise, not the centroid separation, because A-form bases are 4.2-4.8 A apart
+along a helix whose rise is 3.4 A, so a 4.5 A separation cutoff rejects correct steps.
+
+(A) THE TEMPLATE COSTS MORE THAN THE TRACE DOES. With the trace taken from the crystal itself, i.e. zero
+trace error, reconstruction loses **57 percent of the stacking** (98.8 -> 43.1), puts the bases 0.9 A too
+close (rise 3.35 -> 2.50 A), doubles the normal angle, and **keeps 10-20 percent of the WC contacts**
+(2OIU: 0 of 12; 4QK9: 2 of 22; 2QBZ_1: 4 of 21) -- the shipped CG-to-all-atom step reproduces neither the
+rise nor the pairing geometry of the structure it is reconstructing.
+
+(B) TRACE ERROR COMPOUNDS IT, measured by perturbing 2OIU's P trace (RMSD quoted after Kabsch):
+
+| trace RMSD | stacked | rise | theta | WC contacts kept |
+| --: | --: | --: | --: | --: |
+| 0.000 A | 58.3% | 2.49 A | 15.5 deg | 0/12 |
+| 0.777 A | 33.3% | 2.49 A | 22.7 deg | 2/12 |
+| 1.734 A | 25.0% | 2.18 A | 31.0 deg | 2/12 |
+| 2.736 A | 0.0% | 2.47 A | 32.2 deg | 1/12 |
+| 3.602 A | 8.3% | 3.44 A | 48.8 deg | 0/12 |
+| 5.013 A | 8.3% | 3.41 A | 55.4 deg | 0/12 |
+
+The note in docs/NOTES.md that "a 1.5 A trace error halves the reconstructed stacking fraction" is now a
+curve, and it was optimistic in the middle: 0.78 A already costs a third, and by 2.7 A the stacking is
+gone; past 3.6 A the number sits at the uncorrelated floor.
+
+(C) WHAT OUR OWN PRODUCTS RECONSTRUCT TO. The ten-draw 2OIU A/B products are P traces of a 300 K CG
+ensemble, with no restraint to the deposit (torch_gpu_refine is a sampler: pre-fold, REMD, physical
+relaxation -- free to drift). They sit **8.95-11.19 A** from the crystal trace (Kabsch) while keeping
+their circular closure (BSJ 0.638-0.718 nm against the crystal's 0.592), and reconstruct to **0-25 percent
+stacked**, theta 39-59 degrees, 0-1 of 12 WC contacts. The drift is expected of this stage and is not a
+defect; the stacking it carries is nonetheless gone by then, and (A) says most of it was already gone
+before the drift.
+
+WHAT THIS DECIDES. The binding constraint on stacking is the CG-to-all-atom BASE PLACEMENT, not the CG
+force field: with a perfect trace, the reconstruction alone loses more than half the stacking and almost
+all the pairing contacts. So the ordering of work is
+
+1. **base placement first, and it is not a force-field change**: place each base by superposing the
+   template on the SAMPLED per-residue frame (P, C4', base site) instead of on the P trace plus an axis
+   heuristic, and optionally solve the base orientation against the pair list. The machinery already
+   exists -- aform_from_template.real_cg_beads reads those three beads per residue from exactly this
+   reconstruction, and its own docstring says fabricated beads "carry no base identity, so no
+   base-specific quantity can be expressed on them". This is the cheapest change on the list and it is
+   upstream of every stacking number we are unhappy with.
+2. **then a base-level stacking term in the CG field** (Part 12's predecessor analysis: the term exists as
+   e_stack = 0.5*K_STACK*lam*(d_st - STACK_R0)^2 on the P(i)-P(i+2) distance with K_STACK = 0, i.e. an
+   isotropic backbone proxy switched off; oxRNA, at the same three sites per nucleotide, puts it on a
+   dedicated stacking site between neighbouring units and gets orientation dependence from the rigid
+   body). It only pays off together with (1): today the CG base beads' geometry never reaches the product.
+3. **trace accuracy stays worth having** -- 0.78 A costs a third of the stacking -- but it is the part we
+   are already doing, and Part 12 says it is the part that is already inside tolerance.
+
+NOT CLAIMED. The WC criterion is strict (all key contacts within 3.6 A); it is calibrated on crystals,
+which pass 98.8 percent, so it is a fair test of a structure that should be paired, but it does not say
+an amber refinement downstream cannot recover pairing -- that is testable with amber_refine on these same
+two structures and it was not run here. (C) measures what a free 300 K CG ensemble reconstructs to, not
+how well the pipeline relaxes a deposit; a restrained protocol is a different experiment. And the 20
+fragments are the first 20 with an RNA chain of at most 300 nucleotides, not a designed sample.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

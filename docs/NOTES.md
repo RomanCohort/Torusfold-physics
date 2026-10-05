@@ -385,5 +385,44 @@ of one coordinate's own transmission. And the record itself moved — the campai
 `results/ibi_relax` for nine rounds and was parked elsewhere on 2026-10-01; `ibi_core.campaign_root()`
 resolves it now, and eight scripts still hard-code the old path.
 
+---
+
+## 2026-10-05 — Stacking, measured: the bottleneck is base placement, not the force field
+
+We argued for months about whether the CG field is too simple to carry stacking. It was measurable, so we
+measured it (`scripts/measure_base_stacking.py`; full tables in Part 13 of
+`docs/ibi_loop_and_oxrna_findings.md`). A helical step is a WC pair whose next pair along the helix also
+exists; a step is stacked when its rise is 2.5-4.0 A and the angle between base-plane normals is <= 30
+degrees. The instrument passes its own calibration: over 20 crystal fragments from `_cgdata/combined`,
+**98.8 +- 5.4 percent of helical steps are stacked, rise 3.35 +- 0.08 A, normal angle 8.3 deg**.
+
+Three results, and the first is the one that changes the plan:
+
+* **The template loses more than the trace does.** Take the P trace from the crystal itself — zero trace
+  error — and `reconstruct_all_atom` still loses **57 percent of the stacking** (98.8 -> 43.1 percent),
+  puts the bases **0.9 A too close** (rise 3.35 -> 2.50 A), and keeps only **10-20 percent of the WC
+  contacts** (2OIU 0/12, 4QK9 2/22). The shipped CG-to-all-atom step reproduces neither the rise nor the
+  pairing geometry of the structure it is given.
+* **Trace error compounds it**: 0.78 A RMSD costs a third of the stacking, 1.7 A two thirds, and by
+  2.7 A it is gone. The note that "a 1.5 A trace error halves the reconstructed stacking fraction" was
+  optimistic in the middle of the range.
+* **Our own products are past that point anyway**: the ten-draw 2OIU A/B traces sit **8.95-11.19 A** from
+  the deposit (they keep their circular closure, BSJ 0.64-0.72 nm against 0.59) and reconstruct to 0-25
+  percent stacked. That is expected of a free 300 K sampler stage, not a defect — but nothing downstream
+  can put the stacking back.
+
+**What this decides.** The next month should not start with a new CG energy term. It should start with
+**base placement**: superpose the template on the SAMPLED per-residue frame (P, C4', base site) instead of
+on the P trace plus an axis heuristic, and optionally solve the base orientation against the pair list.
+The three beads already exist in the model and `real_cg_beads` already reads them out of this very
+reconstruction — whose own docstring says fabricated beads "carry no base identity, so no base-specific
+quantity can be expressed on them". A base-level stacking term (oxRNA does it at the same three sites per
+nucleotide, on a dedicated stacking site, with orientation from the rigid body) is the step AFTER that
+one, because today nothing the CG base beads do can reach the product.
+
+**Not claimed**: the WC test is strict (all key contacts within 3.6 A) and calibrated on crystals; amber
+refinement downstream might recover pairing, which is testable with `amber_refine` and was not run here.
+And a restrained refinement protocol is a different experiment from the free sampler measured above.
+
 
 
