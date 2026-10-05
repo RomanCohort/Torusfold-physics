@@ -1489,6 +1489,43 @@ passes and the other does not, or a default that differs -- and the way to settl
 the two `run_round` calls rather than another run. It is also why the sweep's numbers should be read relative
 to EACH OTHER (they were produced in one process with one setup) and not as absolute drift values.
 
+**FOUND, and it was mine: a units bug in the product script.** `p_final` was in nm (the sampler's unit) and
+`p_crystal` in Angstrom (the parser's), so the printed "21.53 A" mixed the two. An eight-seed sweep of the
+same protocol -- 1000 steps, 300 K, no relaxation, the only change being the seed -- gives **1.33, 1.41,
+1.52, 1.58, 1.63, 1.64, 1.65, 1.65 A with sd 0.12** (`scripts/measure_drift_spread.py`), i.e. the protocol is
+not chaotic and the two scripts were never in disagreement: one of them was reporting the wrong number. Fixed
+(`* 10.0`), and the corrected product comparison at that trace quality is the interesting one:
+
+| product (same state, trace 1.58 A from the deposit) | stacked | rise | normal angle | WC contacts |
+| :-- | --: | --: | --: | --: |
+| crystal | 100% | 3.40 +- 0.13 A | 7.8 deg | 12/12 |
+| A: P trace (the in-tree path) | **25.0%** | 2.33 +- 0.33 A | 19.7 deg | 1/12 |
+| B: sampled bead frame | **0.0%** | **0.85 +- 0.49 A** | 21.9 deg | 3/12 |
+
+with the field's beads on target in the same run (d 0.5315 against 0.5306 nm, rise +0.3272 with a 5th
+percentile of +0.2351 against +0.2110, cos 0.8955 against 0.9008).
+
+SO THE BEAD FRAME IS NOT BETTER HERE EITHER, and the reason is now precise rather than "the trace was bad".
+The SCORING map and the RECONSTRUCTION ask different questions of the same three points:
+
+  * `base_frames` (and therefore the term, and therefore every base-level number in Parts 15-24) takes the
+    base normal as a FIXED LINEAR COMBINATION of the triad's vectors -- exact for the template's own geometry,
+    a linearisation away from it;
+  * `reconstruct_all_atom_from_beads` fits the whole rigid residue onto the triad, and when the triad is
+    distorted the best-fit rotation is set by the shape mismatch, not by the linear map.
+
+Near the deposited geometry the two agree (Part 14's 43.9 -> 75.7 percent, measured with the crystal's own
+rigid units). As the triad distorts they diverge, and at 1.58 A of drift the divergence is total: the field
+scores itself as stacked while the product is not. The heuristic P-trace path happens to be less sensitive
+and lands at 25 percent.
+
+WHAT TO FIX, and it is a small piece of work rather than a new model: make the scoreboard measure what the
+product will be. Score the base-level coordinates through the SAME rigid fit the reconstruction uses (a
+three-point Kabsch per residue, closed-form and O(L) per frame) instead of through the linearised normal. The
+term can keep the linear map -- it is the same object as the scoreboard that way, and a potential only needs a
+smooth function of the beads -- but then the two numbers must be reported separately, because "the field
+thinks it is stacked" and "the product is stacked" are now known not to be the same statement.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

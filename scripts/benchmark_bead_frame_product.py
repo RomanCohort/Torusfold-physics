@@ -114,7 +114,10 @@ def main():
                        constraints=C.make_intra_constraints(L), relax=relax,
                        collect_positions=True, log=lambda *a, **k: None)
     frames = res.positions.numpy()[:, 0].reshape(-1, 3 * L, 3)          # (F, 3L, 3) nm
-    p_final = frames[-1][0::3]
+    # A -> the crystal trace is in Angstrom, so the P trace has to be too. Measured the hard way: without
+    # the * 10 the script printed "trace vs crystal 21.53 A" for a state that had moved 1.6 A, and an
+    # 8-seed sweep of the same protocol (1.33-1.65 A, sd 0.12) is what exposed it.
+    p_final = frames[-1][0::3] * 10.0
     print("\nCG sampling: %d frames in %.0f s | trace vs crystal %.2f A (Kabsch)"
           % (len(frames), time.time() - t0, M.kabsch_rmsd(p_final, p_crystal)), flush=True)
 
