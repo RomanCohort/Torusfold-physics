@@ -1311,6 +1311,47 @@ factor of fifteen; the second was derived from the loop's own ratios and cut the
 third is derived the same way, per coordinate. Every one of those numbers came from a two-round, seven-chain
 arm that takes twenty-five minutes.
 
+## Part 21 — The calibration converges, and one of its own derivations was wrong for a good reason (2026-10-05)
+
+Three two-round, seven-chain arms, everything else identical, only the term's strength and weights moving:
+
+| arm | (eps, weights) | joint_J (trace) | **joint_J_base** | base_dist | base_rise | base_cos |
+| :-- | :-- | --: | --: | --: | --: | --: |
+| 1 | (35, 0.3/1/1) | 0.078 | **0.918** | 0.805 | 0.246 | 0.254 |
+| 2 | (2.3, 0.3/1/1) | 0.185 | **0.316** | 0.925 | 1.92 | 1.19 |
+| 3 | (7.9, 0.07/1/0.39) | 0.193 | **0.254** | 0.834 | 1.50 | **1.07** |
+| target | -- | -- | **0** | 1.0 | 1.0 | 1.0 |
+
+(round 1 of each arm; the round-0 numbers are within a few percent of these.)
+
+THREE READINGS.
+
+1. **The orientation is at its target**: base_cos's sigma is 1.07 of the crystal's, from 0.254 at the first
+   strength -- a factor of four in the term's strength and a factor of eleven in its weight, arrived at by
+   two derivations and not by a search.
+2. **The rise is still 1.4-1.5 times too wide**, and the lever is known and linear in the effective
+   strength: 7.9 * 1.45^2 = 16.6 kJ/mol, i.e. w_r = 2 with eps kept at 7.9, or eps = 16.6 with w_d and w_t
+   rescaled to hold their effective strengths where they are. That is one more 25-minute arm.
+3. **The base-base distance does not follow the law, and that is a finding rather than a failure.** Its
+   sigma ratio moved 0.805 -> 0.925 -> 0.834 while the term's effective strength on it moved 10.5 -> 0.69 ->
+   0.55, i.e. by a factor of nineteen with no monotone response: the distance's width is set by the
+   backbone's own pair and link network, not by the base-level term. The derivation in Part 20 that put the
+   distance at "22.7 kJ/mol" assumed the 1/sqrt(eps) relation applies to it; it does not, and the arm that
+   was meant to confirm that number is what showed it.
+
+ONE OBSERVATION ABOUT THE TRACE, stated because it would otherwise read as a win: the trace's own J is
+BEST in the arm with the strongest base term (0.078 at eps = 35 against 0.19 at 7.9). That is not better
+physics -- a term strong enough to pin the base frames to a quarter of their width removes degrees of
+freedom the trace tables were fitted WITHOUT, so the trace is being scored against a more constrained, and
+therefore easier, ensemble. The honest reading is that the trace J is comparable across these arms only
+because the term is weak enough not to dominate, and that a base-level term at a physically sensible
+strength leaves the trace where Part 19 found it.
+
+WHAT IS LEFT, in one line each: the rise's last factor of 1.5 (one arm); the distance, which is a backbone
+property and should probably be dropped from the term or given a cosmetic weight rather than tuned (its
+0.07 already makes it almost inactive, and the result is 0.83); and then the question this all served --
+whether the field that carries stacking also reproduces the standard this project is judged on, retention.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 
