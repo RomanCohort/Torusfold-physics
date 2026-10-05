@@ -117,6 +117,69 @@ def _cg_potential_kwargs():
     return _CG_TABLE_KW
 
 
+def _refine_langevin(beads_A, sequence, pairs, nsteps, temp, seed=None):
+    """A short ROOM-TEMPERATURE Langevin trajectory, in nm, returning (final P in A, final beads in A).
+
+    WHY IT IS HERE. torch_gpu_refine's CG stage is a FOLDING protocol: a six-stage 400 -> 300 K pre-fold and
+    an REMD ladder whose replicas reach 1000 K, with the returned state chosen by CG energy. A base-level
+    stacking term worth ~6 kBT per pair at 300 K is worth ~1.5 at the top of that ladder, so the base frames
+    are scrambled by construction -- measured on 2OIU: the folding path returns beads with a base-frame
+    cosine of 0.650 against the deposit's 0.901 and produces an unstacked product, while this protocol keeps
+    0.895 and produces one that is 58.3 percent stacked (findings Parts 24-26).
+
+    It is the loop's OWN sampler (ibi_core.run_round) with the loop's protocol, not a second integrator: the
+    sweep that chose these numbers (1000 steps, 300 K, no pre-relaxation; 1.58 A of trace drift with sd 0.12
+    over eight seeds) ran through exactly this call.
+    """
+    import sys as _sys
+    import torch as _torch
+    _scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))))), "scripts")
+    if _scripts not in _sys.path:
+        _sys.path.insert(0, _scripts)
+    import ibi_core as _IC
+    from .torch_cgsim import make_intra_constraints as _mk_con
+
+    L = len(sequence)
+    pos = _torch.tensor((np.asarray(beads_A, dtype=np.float64) / 10.0).reshape(1, 3 * L, 3),
+                        dtype=_torch.float64)
+    # The refiner's pair list is (i, j, w) triples or (i, j) pairs; the sampler wants indices only.
+    ij = _torch.tensor(np.asarray([(int(p[0]), int(p[1])) for p in pairs], dtype=np.int64).reshape(-1, 2),
+                       dtype=_torch.long)
+    pw = _torch.ones(len(ij), dtype=_torch.float32)
+    # The binning tables are the reference grids, not the production U: run_round needs a table per scored
+    # coordinate while the DYNAMICS comes from pot_kw, and mixing them is deliberate -- the reference file
+    # carries the full layout (the production file is U/lo/binw only).
+    _tab_path = os.environ.get("TORUSFOLD_CG_TABLES", "").strip()
+    _ref = os.path.join(os.path.dirname(_tab_path), "refit_smooth5_with_base.npz") if _tab_path else ""
+    if not os.path.exists(_ref):
+        _ref = os.path.join(os.path.dirname(_scripts), "results", "refit_smooth5_with_base.npz")
+    tab = _IC.load_tables(_ref)
+    if _tab_path and os.path.exists(_tab_path):
+        with np.load(_tab_path) as z:
+            for c in ("bb_bond", "angle", "dihedral"):
+                if f"{c}__U" in z.files:
+                    tab[c] = dict(tab[c], U=np.asarray(z[f"{c}__U"], dtype=float))
+    res = _IC.run_round(pos=pos, vel=_torch.zeros_like(pos), ij=ij, pw=pw,
+                        temps=_torch.full((1,), float(temp), dtype=_torch.float64), tab=tab,
+                        nsteps=int(nsteps), burn=0, stride=25, blocks=4, friction=1.0,
+                        force_cap=5000.0, pot_kw=_cg_potential_kwargs(),
+                        seed=(seed if seed is not None else 20261005), nrep=1, progress=False,
+                        constraints=_mk_con(L), relax=0, collect_positions=True,
+                        log=lambda *a, **k: None)
+    frames = res.positions.numpy()[:, 0].reshape(-1, 3 * L, 3)
+    final_nm = frames[-1]
+    # The CG energy of the final state, so the caller's diag carries a real number: this path does not go
+    # through the REMD block, which is the only other place final_e is set.
+    import torch as _t2
+    from . import torch_cgsim as _C
+    with _t2.no_grad():
+        _e = float(_C.cg_energy_forces(
+            _t2.tensor(final_nm.reshape(1, 3 * L, 3), dtype=_t2.float64),
+            ij, pw, force_cap=5000.0, **_cg_potential_kwargs())[0].mean())
+    return final_nm[0::3] * 10.0, final_nm.reshape(L, 3, 3) * 10.0, _e
+
+
 def torch_gpu_refine(
     input_pdb: str,
     output_dir: str,
@@ -151,6 +214,9 @@ def torch_gpu_refine(
     cg_bead_sink: Optional[list] = None,
     cg_frame_allatom: bool = False,
     bead_source_pdb: Optional[str] = None,
+    refine_mode: str = "fold",        # "fold" (the annealing protocol) or "refine" (see below)
+    refine_steps: int = 1000,
+    refine_temp: float = 300.0,
     seed: Optional[int] = None,
 ) -> Tuple[str, float, dict]:
     """torch GPU-accelerated refinement (interface compatible with openmm_gpu_refine).
@@ -177,6 +243,22 @@ def torch_gpu_refine(
                         is byte-identical to before; measurements on the 1EHZ template path (findings
                         Part 13) say the heuristic loses 57 percent of the helical stacking and 80-90
                         percent of the WC contacts even when the trace is the crystal's own.
+      bead_source_pdb   read the initial (P, C4', N) beads from this file instead of fabricating them.
+                        Needed because a prepared input is P-only while the deposit it came from has the
+                        base frames, and an initial state that guesses them costs the base level its
+                        meaning: measured, fabricated beads have the right internal geometry and a
+                        base-frame cosine of 0.607 against the deposit's 0.901.
+      refine_mode       "fold" (default, unchanged) runs the annealing protocol this pipeline has always
+                        run; "refine" skips the 400 -> 300 K pre-fold and the REMD ladder and runs
+                        refine_steps at refine_temp through the loop's own sampler. The difference is not
+                        cosmetic: a base-level term worth ~6 kBT per pair at 300 K is worth ~1.5 at the
+                        top of a 1000 K ladder, so the folding path returns scrambled base frames (cos
+                        0.650) while the refinement keeps them (cos 0.907). Measured end to end on 2OIU,
+                        with TORUSFOLD_BASE_STACK=16.6:0,1,0.19 and the beads read from the deposit:
+                        trace 1.62 A from the crystal, beads d 5.345 / rise +3.297 / cos 0.907 against
+                        5.306 / +3.186 / 0.901, product 1551 atoms and **50.0 percent of helical steps
+                        stacked** against 0.0 percent for the folding path and 25.0 for the P-trace
+                        reconstruction (findings Part 27).
 
     Returns:
         (output_pdb_path, final_energy, diag_dict)
@@ -250,7 +332,35 @@ def torch_gpu_refine(
     final_e = float("inf")
     final_p_coords = p_coords.copy()
 
-    if use_potential_refine and not skip_minimal_fold:
+    # 1b. REFINEMENT MODE: no anneal, no temperature ladder -- the short room-temperature trajectory the
+    # protocol sweep measured, run on the beads the refinement was given (bead_source_pdb, or fabricated
+    # from the P trace when nothing else is available). Sets final_p_coords and prev_3bead_state so that the
+    # bead sink, the all-atom step and the diag all describe the refined state rather than the input.
+    _beads_used = None
+    if refine_mode == "refine":
+        from .aform_from_template import real_cg_beads, beads_from_pdb
+        _beads_used = beads_from_pdb(bead_source_pdb or input_pdb)
+        if _beads_used is None or _beads_used.shape[0] != len(sequence):
+            _beads_used = real_cg_beads(np.asarray(final_p_coords, dtype=np.float64), sequence)
+            print("  [Torch GPU] refine mode: initial beads FABRICATED from the P trace")
+        else:
+            print(f"  [Torch GPU] refine mode: initial beads from {bead_source_pdb or input_pdb}")
+        _t0 = time.time()
+        _p_A, _b_A, _e_A = _refine_langevin(_beads_used, sequence, pairs, refine_steps, refine_temp, seed=seed)
+        final_p_coords = _p_A
+        final_e = _e_A
+        import torch as _t
+        # The sink and the all-atom step read prev_3bead_state as (any shape) -> (L, 3, 3) NANOMETRES and
+        # multiply by 10, so this is the same object type the REMD path leaves behind.
+        prev_3bead_state = _t.tensor((_b_A / 10.0).reshape(3 * len(sequence), 3), dtype=_t.float64)
+        prev_3bead_p = _p_A
+        print(f"  [Torch GPU] refine mode: {refine_steps} steps at {refine_temp:.0f} K, no anneal, "
+              f"no ladder ({time.time() - _t0:.0f} s)")
+
+    # refine_mode="refine" has already produced the trajectory; the folding stages below are skipped so
+    # that the anneal (400 -> 300 K) and the REMD ladder (to 1000 K) cannot scramble the base frames the
+    # refinement was asked to keep (findings Part 26).
+    if use_potential_refine and not skip_minimal_fold and refine_mode != "refine":
         if verbose:
             print(f"  [Torch GPU] pre-fold: 400K->300K, 6 stages x 2000 steps")
         try:
@@ -359,7 +469,8 @@ def torch_gpu_refine(
                 print(f"  [Torch GPU] pre-fold failed: {e}")
 
     # 3. Multi-round REMD (8 rounds x 5000 steps, Langevin restarted each round)
-    if use_remd:
+    n_rounds = 0 if refine_mode == "refine" else (8 if use_multistage_remd else 1)
+    if use_remd and refine_mode != "refine":
         n_rounds = 8 if use_multistage_remd else 1
         steps_per_round = 5000 if use_multistage_remd else remd_n_steps
 
@@ -492,7 +603,7 @@ def torch_gpu_refine(
                   f"T-acc={np.mean(all_diags[-1]['acceptance_T']):.0%}")
 
     # 3. Physical relaxation (torch GPU)
-    if use_physical_relax and L >= 10:
+    if use_physical_relax and L >= 10 and refine_mode != "refine":
         try:
             # relaxation: pass the full pair list (includes pseudoknot candidates and BPP weighting)
             relaxed, relax_m = relax_structure(
