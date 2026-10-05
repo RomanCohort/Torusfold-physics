@@ -1289,6 +1289,28 @@ should not carry equal weight" finding the scan saw on the other side, now with 
 weights and strength are one calibration, and the loop is finally the instrument that can do it: a
 two-round arm at 2 kJ/mol with the distance weight raised is the next run, and it is 25 minutes.
 
+THE SECOND STRENGTH, run at 2.3 kJ/mol with the weights unchanged (0.3/1/1):
+
+| round | joint_J (trace) | **joint_J_base** | base_dist sim/ref | base_rise sim/ref | base_cos sim/ref |
+| --: | --: | --: | --: | --: | --: |
+| 0 | 0.2182 | **0.3013** | 0.877 | **1.77** | 1.14 |
+| 1 | 0.1848 | **0.3158** | 0.925 | **1.92** | 1.19 |
+| (for scale) 35 kJ/mol, round 1 | 0.0784 | 0.9178 | 0.805 | 0.246 | 0.254 |
+
+**joint_J_base falls from 0.92 to 0.30**, and the error has changed sign and shape: the rise is now 1.8-1.9
+times TOO WIDE, the orientation 1.15-1.19 times too wide, and the base-base distance is still slightly
+narrow (0.88-0.93). One strength cannot fix three coordinates that want different ones, which is the
+per-coordinate weighting the scans kept asking for -- and now it can be DERIVED rather than searched:
+applying sigma ~ 1/sqrt(eps) per coordinate, the rise wants 2.3 * 1.85^2 = 7.9, the orientation
+2.3 * 1.17^2 = 3.1, and the distance 0.69 * 0.9^2 = 0.56. With eps = 7.9 that is **w = (0.07, 1, 0.39)**,
+which is the third arm, running.
+
+Worth stating plainly, because it is the point of this whole step: **the loop's sigma-based scoreboard is
+now the calibration instrument.** The first strength was chosen from a 5000-step scan and was wrong by a
+factor of fifteen; the second was derived from the loop's own ratios and cut the residual by three; the
+third is derived the same way, per coordinate. Every one of those numbers came from a two-round, seven-chain
+arm that takes twenty-five minutes.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 
