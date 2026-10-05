@@ -975,6 +975,65 @@ it; the ten-draw 2OIU products were produced before the sink existed and carry n
 is on ideal input (the crystal's own rigid units), which is the right number for validating a
 reconstruction and the wrong number for claiming a product.
 
+## Part 15 — The base-level marginals, measured: what a stacking term would have to fix (2026-10-05)
+
+Part 14 ended with a pair of conclusions: the reconstruction must consume the sampled base frame, and the
+field must have a term that makes that frame mean something. The input to such a term is a pair of
+distributions, and both sides are now measurable (`scripts/measure_base_coords.py`). Every coordinate is
+a function of the three beads the model carries, because a CG potential can only be a function of those:
+
+    nb_dist   |N_i - N_{i+1}|                base-base separation
+    cc_dist   |C4'_i - C4'_{i+1}|            sugar-sugar separation (control: this one IS restrained)
+    rise      (N_{i+1} - N_i) . n_mean        separation along the mean triangle normal
+    theta     angle(n_i, n_{i+1})             triangle-normal angle, sign-aligned first
+    twist     in-plane rotation of P->N about n_mean,   n_i = normalize((C4'_i - P_i) x (N_i - P_i))
+
+TARGET: every consecutive pair over 20 crystal fragments (1625 pairs; the helical subset is 609).
+SAMPLED: `ibi_core.run_round` -- the sampler the loop itself uses, production tables installed -- on the
+loader's own 3-bead chains, 5000 steps each at stride 25, four chains, 17 920 pair observations.
+
+| coordinate | TV (target vs sampled) | target mean +- sd | sampled mean +- sd | target's OWN internal TV |
+| :-- | --: | --: | --: | --: |
+| nb_dist | **0.534** | 0.570 +- 0.198 nm | **0.703 +- 0.171 nm** | 0.118 |
+| cc_dist | 0.490 | 0.625 +- 0.120 nm | 0.614 +- 0.087 nm | 0.096 |
+| rise | **0.551** | 0.366 +- 0.193 nm | 0.337 +- **0.350 nm** | 0.068 |
+| theta | 0.464 | 28.6 +- 21.1 deg | **49.4 +- 20.9 deg** | 0.099 |
+| twist | 0.387 | 44.1 +- 34.2 deg | 51.9 +- 42.7 deg | 0.114 |
+
+FOUR READINGS, and the third is the one that says what the term is for:
+
+1. **Neighbouring base frames are much more mutually rotated than the crystals**: theta 49.4 against 28.6
+   degrees. Nothing in the current field couples the two triangles' orientations.
+2. **The bases sit further apart, not closer**: nb_dist 0.703 against 0.570 nm. A stacking term is an
+   attraction between bases, and there is none.
+3. **The rise is nearly symmetric about zero, where the target is a sharp forward offset.** The target's
+   rise is 0.366 +- 0.193 nm with a 5th percentile at +0.02; the model's is 0.337 +- **0.350** with a 5th
+   percentile at **-0.43 nm**, i.e. the model has no preference for one base lying OVER its neighbour
+   rather than beside or under it. That asymmetry IS stacking, and it is the quantity a base-level term
+   has to create. Its spread alone (sd 0.35 against 0.19) is the size of the effect.
+4. **The reference is not ambiguous, which is what makes the gap readable.** The target's own internal
+   spread -- all consecutive pairs against the helical subset, i.e. loop residues against stacked ones --
+   is TV 0.07-0.12, five times smaller than the 0.39-0.55 gap to the model. So the disagreement is a model
+   deficiency and not an artefact of how "stacked" was defined.
+
+ONE CAVEAT ON THE INSTRUMENT, measured on the same 20 fragments: the triangle P-C4'-N is not the base
+plane. Its normal is off the true base-plane normal (from the ring atoms) by a mean of **20.2 degrees**,
+median 16.2. Both sides of the table above use the same proxy, so the comparison is fair, but a term fitted
+on this theta carries that systematic, and a target built from ring atoms would be the honest one to fit
+against if the model ever gains a bead that can express a plane.
+
+TWO INCIDENTAL FINDINGS, both recorded because both cost a run:
+
+* **The 24-34 residue band is 31 chains, and the loader's order is NOT stable across processes.** Measured:
+  two calls in the same session returned different members first. `ibi_loop`'s "small" pool takes the first
+  N of that list, so its seven-chain arms are not necessarily the same seven chains between runs -- which
+  matters for comparing `run_dih7` against the earlier seven-chain arms. The measurement script sorts by
+  name before it indexes anything.
+* **A chain in the band hangs `run_round` reproducibly** -- twice, at the sixth chain of a
+  nondeterministically ordered pool, with five complete chains' work lost the first time. The defence is
+  structural and now in place: one process per chain under a 420 s timeout, so a hang costs one chain. The
+  chain itself is not identified, because the order was not stable enough to name it.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

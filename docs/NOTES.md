@@ -389,6 +389,36 @@ resolves it now, and eight scripts still hard-code the old path.
 draws per arm, analysed as a paired difference, give the dihedral effect as **+0.006 +- 0.132 with 6 of 10
 draws closer to target** -- indistinguishable from zero, against a draw-to-draw scatter of 8-10 percent.
 The single draw was one sample, and the fitted field has NOT been shown to change this stage's geometry.
+## 2026-10-05 (3) — The base-level marginals, on both sides, measured
+
+`scripts/measure_base_coords.py` measures the same bead-only coordinates on the crystals and on the
+field's own sampler (production tables, the loader's 3-bead chains, 5000 steps each). Every coordinate is
+a function of the three beads the model carries, so a fitted potential could use any of them directly.
+
+| coordinate | target (20 fragments, 1625 pairs) | sampled (4 chains, 17 920 pairs) |
+| :-- | :-- | :-- |
+| base-base distance | 0.570 +- 0.198 nm | **0.703 +- 0.171 nm** |
+| rise along the mean triangle normal | 0.366 +- 0.193 nm | 0.337 +- **0.350 nm** (5th percentile **-0.43**) |
+| triangle-normal angle | 28.6 +- 21.1 deg | **49.4 +- 20.9 deg** |
+| twist | 44.1 +- 34.2 deg | 51.9 +- 42.7 deg |
+
+Total-variation distances are 0.39-0.55, against 0.07-0.12 for the target's OWN internal spread (all
+consecutive pairs against the helical subset) -- so the gap is five times the reference's own ambiguity and
+is a model deficiency, not a definition artefact. The three things a stacking term would have to fix, in
+the order the numbers put them: **align neighbouring base frames** (theta 49 against 29 deg), **pull the
+bases together** (0.70 against 0.57 nm), and above all **make the rise one-sided** -- the target has one
+base lying over its neighbour at +0.37 nm, the model is symmetric about zero with a 5th percentile at
+-0.43 nm, i.e. no preference at all for over rather than under. That asymmetry is stacking.
+
+Instrument caveat: the P-C4'-N triangle normal is 20.2 deg (median 16.2) off the true base-plane normal.
+Both sides use the same proxy so the comparison is fair, but a fitted term would inherit the systematic.
+
+Two incidental findings, both recorded because both cost a run: the 24-34 residue band holds 31 chains and
+the loader's order is not stable across processes (so the loop's seven-chain arms may not be the same seven
+chains between runs), and one chain in that band hangs `run_round` reproducibly -- twice at the sixth
+chain of an unordered pool, with five completed chains' work lost the first time. The sampler now runs one
+process per chain under a timeout, so a hang costs one chain.
+
 The same ten draws also show that these products sit far from the fitted marginals (dihedral 0.386 against
 a 0.630 target, angle 0.426 against 0.320) because a short free refinement with bond restraints is not an
 equilibrium sampler for them -- the tables are validated at the loop's pooled level (the entry above),
