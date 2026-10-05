@@ -130,7 +130,9 @@ def main():
     write_allatom_pdb(st_a, str(pa))
     metrics("PRODUCT A: P trace (shipped path)", seq, M.structure_to_residues(st_a, seq), pairs)
 
-    st_b = reconstruct_all_atom_from_beads(frames[-1].reshape(L, 3, 3), seq)
+    # Angstrom, like every other caller of the reconstruction: passing the sampler's nm here was the
+    # second of the two units bugs that made this script report an unstacked product (findings Part 25).
+    st_b = reconstruct_all_atom_from_beads(frames[-1].reshape(L, 3, 3) * 10.0, seq)
     pb = WORK / "2oiu_product_beadframe.pdb"
     write_allatom_pdb(st_b, str(pb))
     metrics("PRODUCT B: sampled bead frame", seq, M.structure_to_residues(st_b, seq), pairs)

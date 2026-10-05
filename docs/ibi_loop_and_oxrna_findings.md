@@ -1526,6 +1526,54 @@ term can keep the linear map -- it is the same object as the scoreboard that way
 smooth function of the beads -- but then the two numbers must be reported separately, because "the field
 thinks it is stacked" and "the product is stacked" are now known not to be the same statement.
 
+**Part 24's last section is WRONG, and it was wrong because of three bugs of mine.** Building the two
+scoreboards (`scripts/measure_product_scoreboard.py`) and putting the CRYSTAL in as a reference row -- where
+the two definitions must agree -- caught all three in one afternoon:
+
+1. the map's `base_dist`/`base_rise` are built on the N9/N1 BEADS, and the scoreboard first measured the
+   product on the ring CENTROIDS: 2.62 against 5.31 A on the crystal, a factor of two from the centroid
+   sitting in the middle of the ring while N9/N1 sits at its edge;
+2. `reconstruct_all_atom_from_beads` takes ANGSTROM and the scoreboard fed it the sampler's nm, so the rigid
+   fit ran ten-times-scaled anchors against an Angstrom template and landed somewhere arbitrary -- the same
+   error that `benchmark_bead_frame_product.py` had in BOTH of its products, which is what made Part 23 and
+   Part 24 report an unstacked product;
+3. and an SVD plane normal's sign is arbitrary (the third time today that one has bitten), fixed by the same
+   convention `base_frames` uses.
+
+With those fixed, the crystal row agrees to 0.02 A on distance and 0.2 A on rise:
+
+| | base_dist | base_rise | base_cos |
+| :-- | --: | --: | --: |
+| crystal, linear map | 5.306 +- 1.430 A | **+3.186 +- 1.421** (p5 +2.110) | 0.901 |
+| crystal, ring atoms | 5.289 +- 1.404 A | **+2.984 +- 1.630** (p5 +0.556) | 0.888 |
+| sampled, linear map (12 frames) | 5.163 +- 0.090 A | +3.162 +- 0.067 (p5 +3.074) | 0.905 |
+| sampled, ring atoms | 5.138 +- 0.089 A | +3.011 +- 0.048 (p5 +2.948) | 0.885 |
+
+**The field's self-score predicts the product after all**: the per-frame correlation between the two rise
+definitions is r = 0.66 over twelve frames, and the product of the same frames is **67.4 percent stacked of
+its helical steps** (range 33-92 percent frame by frame). There is no divergence between the map and the rigid
+fit to report; Part 24's "the two worlds come apart" was an artefact of measuring different points in
+different units.
+
+AND THE PRODUCT COMPARISON, re-run with the units fixed, is the result this whole arc was for:
+
+| product (same state, trace 1.58 A from the deposit) | stacked | rise | normal angle | WC contacts |
+| :-- | --: | --: | --: | --: |
+| crystal | 100% | 3.40 +- 0.13 A | 7.8 deg | 12/12 |
+| A: P trace (the in-tree path) | 25.0% | 2.33 +- 0.33 A | 19.7 deg | 1/12 |
+| **B: sampled bead frame** | **58.3%** | **3.48 +- 0.69 A** | 21.9 deg | 2/12 |
+
+The sampled-frame product carries **33 more points of helical stacking** than the in-tree path on the same
+state, and its rise (3.48 A) is the crystal's (3.40) where the P-trace path's is two thirds of it. Part 14's
+ideal-input measurement (43.9 -> 75.7 percent, using the crystal's own rigid units) transfers to a real
+sampled trace at 1.58 A of drift; what did not transfer was my own bookkeeping.
+
+So the arc closes with all four statements standing: the trace coordinates are inside tolerance at the pool
+level (Part 12), the base level is carried to its measured targets by a term calibrated on the loop's own
+scoreboard (Parts 18-22), retention is untouched (Part 22), and the PRODUCT now shows the stacking the base
+level was for (25 -> 58 percent against a 100 percent crystal). The remaining gap -- 58 against 100, and
+2 of 12 WC contacts -- is the trace's 1.58 A and the rigid template's idealisation, in that order.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 
