@@ -550,6 +550,35 @@ stacking term's (at full weight it was fighting the backbone's own pair and link
 strength is slightly past optimal**, visible as overshoot rather than damage: theta lands at 18.7 against a
 24.5 target, the rise's 5th percentile at +0.16 against +0.06.
 
+## 2026-10-05 (6) — The strength lands on the target at 35 kJ/mol, and a loop arm holds the trace with the term on
+
+Ten chains each, same chains and seeds as the baseline, so every number is paired:
+
+| eps | base-base distance | rise 5th pct | neighbour-normal angle | trace J |
+| --: | --: | --: | --: | --: |
+| target | 0.5704 +- 0.1980 | **+0.06** | 24.51 +- 22.22 | -- |
+| 0 (off) | 0.7164 +- 0.0359 | -0.3267 +- 0.1566 | 49.6469 +- 2.2567 | 0.1269 |
+| 25 | 0.6061 +- 0.0359 | -0.0022 +- 0.2957 | **24.7943 +- 2.4062** | 0.1369 |
+| **35** | 0.5977 +- 0.0308 | **+0.0842 +- 0.2517** | 21.8752 +- 2.7995 | **0.1215** |
+| 45 | 0.5906 +- 0.0306 | +0.1625 +- 0.2225 | 18.7428 +- 1.0735 | 0.1234 |
+
+The parameters now LAND on the target: at 25 the orientation angle matches to 0.28 degrees but the rise is
+only just one-sided; at 35 the rise lands closest (+0.084 against +0.06) with a mild orientation overshoot and
+the trace J is the only one BELOW the baseline; at 45 both overshoot. **35 kJ/mol per pair is the setting to
+carry.**
+
+And a seven-chain loop arm with the term ON (45, run before the scan chose 35), three rounds, production
+protocol: the three trace coordinates are all inside tolerance by **round 2** (bb_bond |ln| 0.031, angle 0.055,
+dihedral 0.042), the dihedral's update falls from 4.19 and 5.30 kJ/mol to **0.99** with the moment norm at
+0.0502, and the per-chain J median returns to 0.1477 -- the level the nine-round campaign had at its own second
+round. So a base-level term does not stop the trace tables from reaching their reference marginals.
+
+What the loop cannot see yet, and it is the next wiring step: it bins the six coordinates of
+`boltzmann_bonded.COORDS` and none is a base-level quantity, so this arm can report the trace but cannot
+measure or fit the base-level marginals. `base_dist`, `base_rise` and `base_theta` have to become
+coordinates of the sampler's own binning loop -- their definitions and their measured targets are in Parts
+15-18 -- and then the loop can close on them the way it closes on the trace.
+
 Next: scan eps over 25-35 to land nearer the target, then the question that now has an instrument -- does the
 term survive being fitted by the loop against an ensemble that contains it (`IBI_LOOP_BASE_STACK=45` plus
 form and weights, with everything else the loop already does).

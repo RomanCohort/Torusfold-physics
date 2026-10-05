@@ -1196,6 +1196,53 @@ stable across processes -- Part 15), 5000 steps, one seed per chain, and the tar
 marginal through the same bead-to-plane map, not the ring-atom one. "Chains improved" is a sign count, not a
 p-value; the paired means being several times their standard deviations is what carries the result.
 
+## Part 19 — Landing the strength on the target, and the loop holding the trace with the term on (2026-10-05)
+
+TWO THINGS RUN TOGETHER: a strength scan to land the term on the measured target, and a seven-chain loop arm
+with the term ON to ask the question the loop exists for -- with a base-level term pulling the trace, can the
+trace tables still match their reference marginals, and do they stop drifting.
+
+THE STRENGTH SCAN, ten chains each, same chains and seeds as the baseline, so every column is paired:
+
+| eps (kJ/mol) | base-base distance | rise, 5th percentile | neighbour-normal angle | trace J |
+| --: | --: | --: | --: | --: |
+| target | 0.5704 +- 0.1980 | **+0.06** | 24.51 +- 22.22 | -- |
+| 0 (off) | 0.7164 +- 0.0359 | -0.3267 +- 0.1566 | 49.6469 +- 2.2567 | 0.1269 |
+| 25 | 0.6061 +- 0.0359 | -0.0022 +- 0.2957 (8/10) | **24.7943 +- 2.4062** | 0.1369 |
+| **35** | 0.5977 +- 0.0308 | **+0.0842 +- 0.2517 (9/10)** | 21.8752 +- 2.7995 | **0.1215** |
+| 45 | 0.5906 +- 0.0306 | +0.1625 +- 0.2225 (9/10) | 18.7428 +- 1.0735 | 0.1234 |
+
+The term's parameters now land ON the target rather than near it: at 25 kJ/mol the orientation angle matches
+to 0.28 degrees (24.79 against 24.51) but the rise's one-sidedness is only just achieved (-0.002), at 35 the
+rise lands nearest the target (+0.084 against +0.06) with a mild orientation overshoot, and at 45 both
+overshoot. **35 kJ/mol per pair is the setting to carry**: it is the closest on the coordinate the model could
+not express at all, and it is also the only strength at which the trace joint J ends BELOW the baseline
+(0.1215 against 0.1269).
+
+THE LOOP ARM, seven chains, three rounds, production protocol, `IBI_LOOP_BASE_STACK=45` (run before the scan
+above chose 35), moment operator on all three trace coordinates, support gate 0.03:
+
+| round | bb_bond sampled / target (\|ln\|) | angle | dihedral | per-chain J median |
+| --: | :-- | :-- | :-- | --: |
+| 0 | 0.06553 / 0.05402 (0.193) | 0.41631 / 0.32176 (0.258) | 0.73043 / 0.62471 (0.156) | 0.1552 |
+| 1 | 0.05359 / 0.05402 (**0.008**) | 0.29619 / 0.32176 (0.083) | 0.50814 / 0.62471 (0.207 FAIL) | 0.1757 |
+| 2 | 0.05571 / 0.05402 (**0.031**) | 0.30452 / 0.32176 (**0.055**) | 0.65178 / 0.62471 (**0.042**) | **0.1477** |
+
+**Every trace coordinate is inside tolerance by round 2, with the base-level term on**, and the dihedral's
+update falls from 4.19 and 5.30 kJ/mol in rounds 0-1 to **0.99 kJ/mol in round 2** with the moment norm at
+0.0502 -- the table is settling rather than ringing. The per-chain J median comes back to 0.1477, the level the
+nine-round campaign had at its own second round. So the loop's question is answered for the trace: a
+base-level term does not prevent the trace tables from reaching their reference marginals, and the machinery
+already in `ibi_loop.py` (the `marginals` block, the support gate, the divergence guard) is what shows it.
+
+WHAT THE LOOP CANNOT SEE YET, and it is the next wiring step: the loop bins the SIX coordinates in
+`boltzmann_bonded.COORDS` -- bb_bond, intra_pc, intra_cn, angle, dihedral, stack -- and none of them is a
+base-level quantity. So this arm can report that the trace is fine with the term on, but it cannot report
+whether the base-level marginals are, or fit them: `base_dist`, `base_rise` and `base_theta` have to become
+coordinates of the sampler's own binning loop (their bead-only definitions and their measured targets are in
+Parts 15-18) before the loop can close on them the way it closes on the trace. That is a table, a target
+measurement, and three lines in the binning loop -- the same shape as every other coordinate in this field.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

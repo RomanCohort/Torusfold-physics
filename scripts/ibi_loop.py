@@ -961,6 +961,11 @@ def main():
           + (f", operator {OPERATOR}" + (f" (K={CORRECTION_K})" if OPERATOR == "moments" else ""))
         + (", per-coordinate rules " + " ".join(f"{c}={r}" for c, r in _rules.items())
            if _rules else "")
+        # The base-level term belongs in the header for the same reason the frozen list does: a run whose
+        # field is different from every previous run has to say so in its own output, not only in its
+        # launcher.
+        + (f", base-level stacking eps {BASE_STACK_EPS:g} kJ/mol ({BASE_STACK_FORM}, "
+           f"w {','.join(f'{x:g}' for x in BASE_STACK_W)})" if BASE_STACK_EPS > 0.0 else "")
         # The frozen list belongs in the header: a run with IBI_LOOP_FREEZE set is judged on the
         # coordinates it did NOT touch, and the log is the only place that says so. (The launcher
         # records it too; the header is what a reader of the output file sees.)
