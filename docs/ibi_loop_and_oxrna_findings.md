@@ -921,6 +921,60 @@ two structures and it was not run here. (C) measures what a free 300 K CG ensemb
 how well the pipeline relaxes a deposit; a restrained protocol is a different experiment. And the 20
 fragments are the first 20 with an RNA chain of at most 300 nucleotides, not a designed sample.
 
+## Part 14 — Reconstructing from the SAMPLED base frame recovers over half the loss, and needs a field term to finish (2026-10-05)
+
+Part 13 said the reconstruction, not the field, was the binding constraint on stacking. The fix that
+follows from it is small: the model already carries three beads per residue (P, C4', N9/N1) and its
+intra-residue geometry is rigid by SHAKE, so those three points ARE the base frame -- the roll about the
+backbone is information, not something to guess. `aform_from_template.reconstruct_all_atom_from_beads`
+fits the 1EHZ template's own P / C4' / N9-N1 onto the sampled beads (a three-point Kabsch per residue,
+which fixes the rotation including the roll). The shipped `reconstruct_all_atom` is untouched, and the
+pipeline only uses the new path when asked (`cg_frame_allatom=True`).
+
+MEASURED OVER THE SAME 20 FRAGMENTS, same pairs, same instrument:
+
+| reconstruction | stacked | sep | rise | theta | twist |
+| :-- | --: | --: | --: | --: | --: |
+| crystal (reference) | 98.8% +- 5.4 | 4.271 A | 3.345 +- 0.071 A | 8.2 deg | 31.1 deg |
+| P-trace template (shipped) | **43.9% +- 22.7** | 4.180 A | **2.466 +- 0.244 A** | 16.7 deg | 28.8 deg |
+| sampled bead frame (new) | **75.7% +- 15.5** | 4.252 A | **3.032 +- 0.148 A** | 15.3 deg | 31.9 deg |
+
+One fragment in full, because the contacts matter as much as the stacking (38JD_1, 20 helical steps):
+crystal 100 percent, shipped path 50 percent with 2 of 25 WC contacts kept, bead frame **85 percent with
+11 of 25**. So the reconstruction change recovers **roughly half of what the template loses** (43.9 -> 75.7
+against a 98.8 crystal), fixes the rise from 0.9 A short to 0.3 A short, and multiplies the surviving
+pairing contacts by about five. The residual gap is the template's own rigid-residue idealisation, not the
+roll: with three points per residue the base PLANE is still inferred from the template.
+
+AND THEN IT STOPS, for a reason worth stating plainly. On a REAL CG state -- the new `cg_bead_sink` hands
+out the 3-bead state the sampler actually moved, which the interface used to slice to P and discard
+(torch_gpu_refine line ~236; the state existed all along, REMD carries it across rounds) -- the bead-frame
+reconstruction does not deliver: one short 2OIU draw (4 replicas x 5000 steps) landed 7.74 A from the
+crystal trace, and there the shipped path gives 0 percent stacked (theta 53.9 deg) and the bead-frame path
+gives 16.7 percent with a twist of 100 +- 54 deg. A twist of 100 degrees is not a reconstruction artefact:
+it says the SAMPLED base frames are not physically oriented relative to each other. They are not, because
+nothing in the field asks them to be -- `K_STACK = 0`, there is no base-orientation term, and the roll is
+held only by the K_LINK_* links against a pair potential that does not care about it.
+
+So the two changes are a PAIR, and the measurement says neither works alone:
+
+  * the reconstruction change is necessary -- without it nothing base-level can reach the product, and it
+    is worth 32 percentage points of stacking on ideal input;
+  * a base-level orientation/stacking term is necessary too -- without it the sampled frames the
+    reconstruction consumes are arbitrary, and the reconstruction faithfully reproduces arbitrariness.
+
+THAT also reframes what the next arm should fit. The base-level coordinates (rise, twist, normal angle,
+base-base distance) are now measurable on BOTH sides of the loop: the target from the crystal database
+with this instrument, and what the current field produces from the bead sink on a real run. That pair of
+distributions is the loop's input, and it can be measured before anything is parameterised -- the same
+order that made Part 12 possible.
+
+NOT CLAIMED. The real-run comparison is ONE short draw at 7.74 A drift, with the twist spread at +- 54 deg,
+so it is a demonstration that the sampled roll is currently meaningless and not a converged measurement of
+it; the ten-draw 2OIU products were produced before the sink existed and carry no beads. The 75.7 percent
+is on ideal input (the crystal's own rigid units), which is the right number for validating a
+reconstruction and the wrong number for claiming a product.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

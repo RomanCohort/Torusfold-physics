@@ -424,5 +424,45 @@ one, because today nothing the CG base beads do can reach the product.
 refinement downstream might recover pairing, which is testable with `amber_refine` and was not run here.
 And a restrained refinement protocol is a different experiment from the free sampler measured above.
 
+---
+
+## 2026-10-05 (2) — The reconstruction fix works on ideal input and stops on real input, which is the useful answer
+
+Acting on the entry above: `aform_from_template.reconstruct_all_atom_from_beads` now fits the 1EHZ
+template onto the three beads the model already carries (P, C4', N9/N1) instead of guessing the base roll
+from the P trace, and `torch_gpu_refine` hands those beads out through `cg_bead_sink` -- they always
+existed (REMD carries the full 3-bead state across rounds) but the interface sliced them to P and threw
+the rest away. Both are opt-in; the shipped product is unchanged.
+
+**On ideal input it recovers half the loss.** Same 20 fragments, same pairs, same instrument:
+
+| reconstruction | stacked | rise | twist |
+| :-- | --: | --: | --: |
+| crystal | 98.8% | 3.345 A | 31.1 deg |
+| P-trace template (shipped) | **43.9%** | **2.466 A** | 28.8 deg |
+| sampled bead frame (new) | **75.7%** | **3.032 A** | 31.9 deg |
+
+and the surviving Watson-Crick contacts go from 2/25 to 11/25 on the fragment checked in full. The
+residual gap is the template's rigid-residue idealisation -- with three points per residue the base PLANE
+is still inferred.
+
+**On a real CG state it does nothing yet, and the reason is the field.** One short 2OIU draw (4 replicas x
+5000 steps) landed 7.74 A from the crystal trace, where the shipped path gives 0 percent stacked and the
+bead-frame path gives 16.7 percent with a **twist of 100 +- 54 deg**. That is not a reconstruction
+artefact: the sampled base frames are simply not oriented relative to each other, because nothing asks them
+to be -- `K_STACK = 0`, no base-orientation term, and the roll is held only by the K_LINK_* links against
+a pair potential that does not care.
+
+**So the two changes are a pair.** The reconstruction is necessary (without it no base-level quantity can
+reach the product) and insufficient (without a field term it faithfully reproduces arbitrary rolls). What
+is now available, and was not before, is the ability to measure BOTH sides of a base-level IBI: the target
+from the crystal database with `scripts/measure_base_stacking.py`, and what the current field produces
+from the bead sink on a real run. That is the next thing to do, and it is a measurement rather than a
+parameterisation.
+
+**Caveats, stated**: the real-run comparison is one short draw at 7.74 A drift with a +- 54 deg twist
+spread -- a demonstration, not a converged measurement; the ten-draw 2OIU products predate the sink and
+carry no beads; and 75.7 percent is a reconstruction validation on ideal input, not a product claim.
+
 
 

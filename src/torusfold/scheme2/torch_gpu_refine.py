@@ -82,6 +82,8 @@ def torch_gpu_refine(
     tri_stage_config: Optional[dict] = None,
     lambdas: Optional[Tuple[float, ...]] = None,  # added: custom lambda values
     on_report: Optional[Callable] = None,
+    cg_bead_sink: Optional[list] = None,
+    cg_frame_allatom: bool = False,
 ) -> Tuple[str, float, dict]:
     """torch GPU-accelerated refinement (interface compatible with openmm_gpu_refine).
 
@@ -92,6 +94,21 @@ def torch_gpu_refine(
     4. relax_structure (torch GPU) physical relaxation
     5. CG -> all-atom (reuses isrnacirc_wrapper)
     6. Write the refined PDB
+
+    TWO OPT-IN ARGUMENTS, both about the beads the sampler actually moved (2026-10-05):
+
+      cg_bead_sink      a list; on return it holds one dict with the LAST sampled 3-bead state in
+                        Angstrom ("beads", (L, 3, 3), P / C4' / N per residue) and the P trace it
+                        belongs to ("p"). Until now the pipeline propagated only the P trace: the REMD
+                        output is sliced to bead 0 of every 3 (line ~236) and relax_structure takes and
+                        returns P, so the base frames the model had just sampled were discarded and any
+                        later consumer re-derived them with a heuristic. Handing them out costs nothing
+                        and is what makes "reconstruct from the sampled frame" measurable on a real run.
+      cg_frame_allatom  do the CG -> all-atom step with reconstruct_all_atom_from_beads on those beads
+                        instead of cg_to_allatom on the P trace. Off by default, so the shipped product
+                        is byte-identical to before; measurements on the 1EHZ template path (findings
+                        Part 13) say the heuristic loses 57 percent of the helical stacking and 80-90
+                        percent of the WC contacts even when the trace is the crystal's own.
 
     Returns:
         (output_pdb_path, final_energy, diag_dict)
@@ -285,6 +302,7 @@ def torch_gpu_refine(
         all_diags = []
         backup_p_coords = final_p_coords.copy()  # NaN recovery backup
         prev_3bead_state = None  # carry the full 3-bead state across rounds
+        prev_3bead_p = None      # ... and the P trace that state belongs to (best_coords of the round)
         backup_3bead_state = None  # Bug 7 fix: 3-bead state backup
         _global_step_acc = 0  # cumulative global step count across rounds
         prev_vel = None  # Bug 3 fix: carry velocities across rounds
@@ -333,6 +351,7 @@ def torch_gpu_refine(
                     final_p_coords = backup_p_coords.copy()
                     # Bug 7 fix: restore the 3-bead state from backup (do not set None)
                     prev_3bead_state = backup_3bead_state
+                    prev_3bead_p = np.asarray(backup_p_coords, dtype=np.float64)
                     prev_vel = None  # Bug 3 fix: velocities are invalid too
                     continue
 
@@ -341,6 +360,10 @@ def torch_gpu_refine(
                 final_p_coords = best_coords
                 # keep the full 3-bead state (P + C4'/N) to avoid re-initializing next round
                 prev_3bead_state = diag.get("best_pos_3bead")
+                # best_pos_3bead and best_coords are the SAME replica (torch_cgsim takes both from
+                # pos[i_min]), so this pair is a consistent (beads, P trace) snapshot -- which is what
+                # carry_beads_along_trace needs at the end, after the relaxation stage has moved P.
+                prev_3bead_p = np.asarray(best_coords, dtype=np.float64)
                 # Bug 7 fix: save the 3-bead state backup
                 backup_3bead_state = prev_3bead_state
                 # Bug 3 fix: keep the velocity state
@@ -364,6 +387,7 @@ def torch_gpu_refine(
                     traceback.print_exc()
                 final_p_coords = backup_p_coords.copy()
                 prev_3bead_state = None
+                prev_3bead_p = None
                 continue
 
         if verbose and all_diags:
@@ -394,13 +418,54 @@ def torch_gpu_refine(
             if verbose:
                 print(f"  [Torch GPU] physical relaxation failed: {e}")
 
+    # 3b. The last SAMPLED bead frame, carried onto whatever the P trace became.
+    #
+    # REMD keeps the full 3-bead state (diag["best_pos_3bead"]) and the relaxation stage downstream
+    # takes and returns P alone, so the units are carried by the local trace frame with
+    # carry_beads_along_trace -- the sampled unit is kept, only the frame it is expressed in is
+    # re-read. Both the sink and the bead-frame all-atom path need this, and neither changes anything
+    # when it is not asked for.
+    beads_A = None
+    try:
+        if prev_3bead_state is not None and prev_3bead_p is not None:
+            _b = prev_3bead_state
+            if hasattr(_b, "detach"):
+                _b = _b.detach().cpu().numpy()
+            _b = np.asarray(_b, dtype=np.float64).reshape(-1, 3, 3) * 10.0      # nm -> A
+            _p_ref = np.asarray(prev_3bead_p, dtype=np.float64).reshape(-1, 3)
+            _p_end = np.asarray(final_p_coords, dtype=np.float64).reshape(-1, 3)
+            if _b.shape[0] == len(_p_ref) == len(_p_end):
+                from .aform_from_template import carry_beads_along_trace
+                beads_A = carry_beads_along_trace(_p_end, _b, _p_ref)
+    except Exception as e:
+        beads_A = None
+        if verbose:
+            print(f"  [Torch GPU] bead frame unavailable: {e}")
+    if cg_bead_sink is not None:
+        cg_bead_sink.append({"beads": beads_A, "p": np.asarray(final_p_coords, dtype=np.float64),
+                             "energy": float(final_e)})
+
     # 4. Write CG PDB + CG -> all-atom
     cg_pdb = str(out_path / f"{name}_cg.pdb")
     _write_pdb_simple(cg_pdb, final_p_coords, sequence)
 
     if skip_cg_to_allatom:
         aa_pdb = cg_pdb
-    else:
+    elif cg_frame_allatom and beads_A is not None:
+        # The base frames the sampler moved, instead of the axis heuristic that guesses them.
+        aa_pdb = str(out_path / f"{name}.pdb")
+        try:
+            from .isrnacirc_wrapper import write_allatom_pdb
+            from .aform_from_template import reconstruct_all_atom_from_beads
+            _st = reconstruct_all_atom_from_beads(beads_A, sequence)
+            write_allatom_pdb(_st, aa_pdb)
+            if verbose:
+                print(f"  [Torch GPU] CG -> all-atom on the SAMPLED bead frame: {aa_pdb}")
+        except Exception as e:
+            if verbose:
+                print(f"  [Torch GPU] bead-frame CG -> all-atom failed: {e}; falling back")
+            beads_A = None
+    if not skip_cg_to_allatom and beads_A is None:
         aa_pdb = str(out_path / f"{name}.pdb")
         try:
             from .isrnacirc_wrapper import cg_to_allatom

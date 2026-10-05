@@ -267,6 +267,130 @@ def reconstruct_all_atom(
     return structure
 
 
+def trace_frames(p):
+    """Per-residue (tangent, in-plane, normal) frame of a P trace, wrapped for a circular chain."""
+    p = np.asarray(p, dtype=np.float64)
+    L = len(p)
+    out = []
+    for i in range(L):
+        nxt, prv = p[(i + 1) % L], p[(i - 1) % L]
+        b = nxt - prv
+        nb = np.linalg.norm(b)
+        b = b / nb if nb > 1e-9 else np.array([1.0, 0.0, 0.0])
+        n = np.cross(nxt - p[i], prv - p[i])
+        nn = np.linalg.norm(n)
+        if nn < 1e-9:
+            tmp = np.array([0.0, 0.0, 1.0]) if abs(b[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+            n = np.cross(b, tmp)
+            nn = np.linalg.norm(n)
+        out.append((b, np.cross(n / nn, b), n / nn))
+    return out
+
+
+def carry_beads_along_trace(p_new, beads_ref, p_ref):
+    """Move rigid (P, C4', N) units from one P trace to another, keeping each unit's roll in the
+    LOCAL trace frame. All arguments in the same length unit; returns (L, 3, 3).
+
+    WHY THIS BELONGS IN THIS MODULE. The model's intra-residue geometry is rigid -- K_INTRA_PN plus the
+    K_LINK_* links, all SHAKE/RATTLE constrained -- so a CG state is a rigid unit per residue carried by
+    the backbone, and its roll about the backbone is INFORMATION the model has. Two stages of the
+    pipeline propagate only the P trace: torch_gpu_refine extracts bead 0 of every 3 after REMD, and
+    relax_structure takes and returns P. A caller that wants the sampled base frames at the end
+    therefore has to carry them, and this is that operation.
+
+    It is not a re-derivation. The unit that is carried is the SAMPLED one (beads_ref, read at a stage
+    where the sampler still had it); only the frame it is expressed in comes from the trace. Compare
+    reconstruct_all_atom, which has no sampled unit at all and guesses the roll from the base-pair
+    partner or from a radial fallback -- measured to lose 57 percent of the helical stacking even when
+    the trace it is given is the crystal's own (scripts/measure_base_stacking.py, findings Part 13).
+    """
+    p_new = np.asarray(p_new, dtype=np.float64)
+    p_ref = np.asarray(p_ref, dtype=np.float64)
+    beads_ref = np.asarray(beads_ref, dtype=np.float64)
+    if beads_ref.shape[1:] != (3, 3):
+        raise ValueError(f"beads_ref has shape {beads_ref.shape}, expected (L, 3, 3)")
+    if len(p_new) != beads_ref.shape[0] or len(p_ref) != beads_ref.shape[0]:
+        raise ValueError("p_new, p_ref and beads_ref disagree on the number of residues")
+    fr_new, fr_ref = trace_frames(p_new), trace_frames(p_ref)
+    out = np.zeros_like(beads_ref)
+    for i in range(len(p_new)):
+        b0, r0, n0 = fr_ref[i]
+        b1, r1, n1 = fr_new[i]
+        for k in range(3):
+            d = beads_ref[i, k] - p_ref[i]
+            comp = np.array([float(d @ b0), float(d @ r0), float(d @ n0)])
+            out[i, k] = p_new[i] + comp[0] * b1 + comp[1] * r1 + comp[2] * n1
+    return out
+
+
+def reconstruct_all_atom_from_beads(beads: np.ndarray, sequence: str) -> AllAtomStructure:
+    """CG beads (P, C4', N9/N1) -> all-atom RNA, with the template fitted on the SAMPLED frame.
+
+    WHY THIS EXISTS, measured. reconstruct_all_atom places every base from the P trace alone: C1' and
+    C4' come from _ANCHOR_OFFSETS in a (tangent, partner-or-radial, normal) frame, i.e. the base's roll
+    about the backbone is a heuristic guess, and O3' is pinned to the next P. Feeding it the crystal's
+    OWN P trace -- zero trace error -- loses 57 percent of the helical stacking (98.8 -> 43.1 percent
+    over 20 fragments), puts the bases 0.9 A too close (rise 3.35 -> 2.50 A) and keeps only 10-20 percent
+    of the Watson-Crick contacts (scripts/measure_base_stacking.py, findings Part 13). The information
+    that is thrown away is exactly the base site: the CG model carries one bead per base, its intra-bead
+    geometry is rigid (K_INTRA_PN and the K_LINK_* links, all SHAKE/RATTLE constrained), so the three
+    beads P / C4' / N9-or-N1 ARE the base frame, and the roll is not a free parameter to guess.
+
+    This function fits the 1EHZ template's own P, C4' and N9/N1 onto the three sampled beads -- a
+    three-point Kabsch per residue, which determines the rotation completely, including the roll -- and
+    emits the residue. It is additive: reconstruct_all_atom is untouched, and every caller that has only
+    a P trace keeps working exactly as before.
+
+    Args:
+        beads: (L, 3, 3) Angstrom, per residue (P, C4', N9 for purines / N1 for pyrimidines). These are
+            the CG solver's own beads -- aform_from_template.real_cg_beads returns this layout, and
+            torch_cgsim's intra-residue constraints are what make it a rigid frame.
+        sequence: ACGU string of length L.
+    Returns:
+        AllAtomStructure with the same interface reconstruct_all_atom returns.
+    """
+    sequence = sequence.upper().replace("T", "U")
+    bad = [c for c in sequence if c not in "ACGU"]
+    if bad:
+        raise ValueError(f"sequence contains invalid letters {set(bad)}; only ACGU allowed")
+    beads = np.asarray(beads, dtype=np.float64)
+    if beads.ndim != 3 or beads.shape[1:] != (3, 3):
+        raise ValueError(f"beads has shape {beads.shape}, expected (L, 3, 3)")
+    if beads.shape[0] != len(sequence):
+        raise ValueError(f"sequence length {len(sequence)} != bead count {beads.shape[0]}")
+    if not np.all(np.isfinite(beads)):
+        raise ValueError("beads contain a non-finite coordinate")
+
+    templates = _load_templates()
+    structure = AllAtomStructure(sequence=sequence)
+    serial = 0
+    for i in range(len(sequence)):
+        base = sequence[i]
+        tmpl = templates[base]
+        names = tmpl["names"]
+        tcoords = tmpl["coords"]
+        gly = "N9" if base in "AG" else "N1"
+        for anchor in ("P", "C4'", gly):
+            if anchor not in names:
+                raise ValueError(f"template for {base} has no {anchor}")
+        src = np.stack([tcoords[names.index(nm)] for nm in ("P", "C4'", gly)])
+        aligned = _kabsch_align(src, beads[i], tcoords)
+
+        atom_index: Dict[str, int] = {}
+        start = len(structure.atoms)
+        for k, name in enumerate(names):
+            element = name[0]
+            structure.atoms.append(Atom(
+                serial=serial, res_seq=i + 1, res_name=base,
+                atom_name=name, element=element, xyz=aligned[k],
+            ))
+            atom_index[name] = serial
+            serial += 1
+        structure.residue_atom_spans.append((start, len(structure.atoms)))
+        structure.residue_atom_index.append(atom_index)
+    return structure
+
+
 if __name__ == "__main__":
     seq = "AUGCAUGCAUGCAUGCAUGCAUGCAUGCAUGC"
     L = len(seq)

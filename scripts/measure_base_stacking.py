@@ -39,7 +39,8 @@ import numpy as np
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
-from torusfold.scheme2.aform_from_template import reconstruct_all_atom   # noqa: E402
+from torusfold.scheme2.aform_from_template import (                       # noqa: E402
+    reconstruct_all_atom, reconstruct_all_atom_from_beads)
 
 # Ring atoms that define each base plane. Purines: the fused bicyclic (9 atoms, planar). Pyrimidines:
 # the six-membered ring. Four atoms is the minimum a plane fit needs; a residue missing more is skipped
@@ -287,6 +288,90 @@ def measure_reconstruction(seq, p_ang, pairs, tag):
     return rows, skipped, len(detected)
 
 
+def structure_to_residues(st, seq):
+    """An AllAtomStructure -> the residue list this module measures on."""
+    out = []
+    for i in range(len(seq)):
+        idx = st.residue_atom_index[i]
+        out.append({"base": seq[i],
+                    "atoms": {nm: np.asarray(st.atoms[a].xyz, dtype=float)
+                              for nm, a in idx.items()}})
+    return out
+
+
+def crystal_beads(seq, residues):
+    """(L, 3, 3) Angstrom: the CG model's own beads (P, C4', N9/N1) read off a crystal."""
+    out = np.zeros((len(seq), 3, 3), dtype=float)
+    for i, base in enumerate(seq):
+        atoms = residues[i]["atoms"]
+        gly = GLY[base]
+        for k, nm in enumerate(("P", "C4'", gly)):
+            if nm not in atoms:
+                return None
+            out[i, k] = atoms[nm]
+    return out
+
+
+def trace_frames(p):
+    """Per-residue (tangent, in-plane, normal) frame of a P trace, wrapped for a circle."""
+    L = len(p)
+    out = []
+    for i in range(L):
+        nxt, prv = p[(i + 1) % L], p[(i - 1) % L]
+        b = nxt - prv
+        nb = np.linalg.norm(b)
+        b = b / nb if nb > 1e-9 else np.array([1.0, 0.0, 0.0])
+        n = np.cross(nxt - p[i], prv - p[i])
+        nn = np.linalg.norm(n)
+        if nn < 1e-9:
+            tmp = np.array([0.0, 0.0, 1.0]) if abs(b[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+            n = np.cross(b, tmp)
+            nn = np.linalg.norm(n)
+        n = n / nn
+        r = np.cross(n, b)
+        out.append((b, r, n / np.linalg.norm(n) if False else n))
+    return out
+
+
+def beads_via_frames(p_new, beads_ref, p_ref):
+    """Carry each residue's rigid unit from p_ref to p_new, keeping its roll in the LOCAL trace frame.
+
+    THIS IS AN EMULATION, and the honest label matters. The CG solver's sampled beads are not available
+    from a round (the loop writes histograms, and torch_gpu_refine returns only P), so the question "what
+    would a base-frame reconstruction recover" is asked by moving the crystal's rigid units exactly the
+    way the model's own constraints would: intra-residue geometry is rigid (K_INTRA_PN plus the K_LINK_*
+    links, SHAKE/RATTLE), so a sampled bead set is the crystal's unit carried by the backbone frame, and
+    the only thing a trace perturbation changes is that frame.
+    """
+    fr_new, fr_ref = trace_frames(p_new), trace_frames(p_ref)
+    out = np.zeros_like(beads_ref)
+    for i in range(len(p_new)):
+        b0, r0, n0 = fr_ref[i]
+        b1, r1, n1 = fr_new[i]
+        for k in range(3):
+            d = beads_ref[i, k] - p_ref[i]
+            comp = np.array([float(d @ b0), float(d @ r0), float(d @ n0)])
+            out[i, k] = p_new[i] + comp[0] * b1 + comp[1] * r1 + comp[2] * n1
+    return out
+
+
+def measure_bead_reconstruction(beads, seq, pairs, tag):
+    """Reconstruct from the SAMPLED beads (the new path) and measure with the crystal's step list."""
+    if beads is None or not np.all(np.isfinite(beads)):
+        print("  %-34s skipped: beads missing" % tag)
+        return [], 0, 0
+    try:
+        st = reconstruct_all_atom_from_beads(beads, seq)
+    except Exception as exc:                                   # noqa: BLE001
+        print("  %-34s skipped: %s" % (tag, exc))
+        return [], 0, 0
+    residues = structure_to_residues(st, seq)
+    planes = [plane(r) for r in residues]
+    detected = wc_pairs(seq, residues, planes)
+    rows, skipped = measure(seq, residues, pairs, planes)
+    return rows, skipped, len(detected)
+
+
 def summarize(rows, n_pairs, skipped, tag, extra=""):
     if not rows:
         print("  %-34s no helical steps" % tag)
@@ -374,6 +459,42 @@ def main():
                       "(L=%d, %d pairs, %d WC contacts kept)" % (len(seq), len(pairs), det))
         return
 
+    if mode == "--beads":
+        # The upper bound of this path: the crystal's OWN rigid units, so the fit has the right roll.
+        for path in args[1:]:
+            seq, residues, p, ch = parse_pdb(path)
+            planes = [plane(r) for r in residues]
+            pairs = wc_pairs(seq, residues, planes)
+            beads = crystal_beads(seq, residues)
+            rows, skipped, det = measure_bead_reconstruction(beads, seq, pairs,
+                                                             "beads " + Path(path).name)
+            summarize(rows, len(pairs), skipped, "beads(exact) " + Path(path).name,
+                      "(%d/%d WC contacts kept)" % (det, len(pairs)))
+        return
+
+    if mode == "--beads-noise":
+        # Same ladder as --noise, but the rigid units are carried by the perturbed frame instead of the
+        # P trace being re-guessed by the axis heuristic. Same structure, same pairs, same criterion.
+        sds = [float(x) for x in args[1].split(",")]
+        path = args[2] if len(args) > 2 else str(REPO / "artifacts" / "2oiu" / "2OIU.pdb")
+        seq, residues, p, ch = parse_pdb(path)
+        planes = [plane(r) for r in residues]
+        pairs = wc_pairs(seq, residues, planes)
+        beads0 = crystal_beads(seq, residues)
+        print("%s: L=%d, %d WC pairs" % (Path(path).name, len(seq), len(pairs)))
+        summarize(measure(seq, residues, pairs, planes)[0], len(pairs), 0, "crystal (reference)")
+        rows, skipped, det = measure_bead_reconstruction(beads0, seq, pairs, "beads")
+        summarize(rows, len(pairs), skipped, "beads at trace RMSD 0.000 A",
+                  "(%d/%d WC contacts kept)" % (det, len(pairs)))
+        for sd in sds:
+            pp = perturb(p, sd, rng)
+            rms = kabsch_rmsd(pp, p)
+            beads = beads_via_frames(pp, beads0, p)
+            rows, skipped, det = measure_bead_reconstruction(beads, seq, pairs, "beads")
+            summarize(rows, len(pairs), skipped, "beads at trace RMSD %.3f A" % rms,
+                      "(noise sd %.2f A, %d/%d WC contacts kept)" % (sd, det, len(pairs)))
+        return
+
     if mode == "--products":
         # --products <crystal.pdb> <product.pdb> [product.pdb ...]
         # The crystal supplies the sequence, the pair list AND the trace the RMSD is measured against,
@@ -402,7 +523,7 @@ def main():
         files = sorted((REPO / "_cgdata" / "combined").glob("*.pdb"))
         print("fragments: %d files, measuring the first %d with an RNA chain of <= 300 nt" % (len(files), n))
         done = 0
-        tot = {"crystal": [], "recon": []}
+        tot = {"crystal": [], "recon": [], "beads": []}
         for f in files:
             if done >= n:
                 break
@@ -415,21 +536,28 @@ def main():
                 continue
             rows_c, _ = measure(seq, residues, pairs, planes)
             rows_r, skipped, det = measure_reconstruction(seq, p, pairs, "recon")
-            if not rows_c or not rows_r:
+            beads = crystal_beads(seq, residues)
+            rows_b, _skb, detb = measure_bead_reconstruction(beads, seq, pairs, "beads")
+            if not rows_c or not rows_r or not rows_b:
                 continue
             sc = summarize(rows_c, len(pairs), 0, "crystal " + f.stem)
             sr = summarize(rows_r, len(pairs), skipped, "recon   " + f.stem,
                            "(skipped %d, %d/%d WC contacts kept)" % (skipped, det, len(pairs)))
-            if sc and sr:
+            sb = summarize(rows_b, len(pairs), 0, "beads   " + f.stem,
+                           "(%d/%d WC contacts kept)" % (detb, len(pairs)))
+            if sc and sr and sb:
                 tot["crystal"].append(sc)
                 tot["recon"].append(sr)
+                tot["beads"].append(sb)
                 done += 1
         if tot["crystal"]:
             for key in ("stacked_frac", "sep", "rise", "theta", "twist"):
                 a = np.array([d[key] for d in tot["crystal"]])
                 b = np.array([d[key] for d in tot["recon"]])
-                print("MEAN %-12s crystal %8.3f +- %-6.3f   recon %8.3f +- %-6.3f   n=%d"
-                      % (key, a.mean(), a.std(), b.mean(), b.std(), len(a)))
+                c = np.array([d[key] for d in tot["beads"]])
+                print("MEAN %-12s crystal %8.3f +- %-6.3f   P-trace %8.3f +- %-6.3f   "
+                      "bead-frame %8.3f +- %-6.3f   n=%d"
+                      % (key, a.mean(), a.std(), b.mean(), b.std(), c.mean(), c.std(), len(a)))
         return
 
     raise SystemExit("unknown mode " + mode)
