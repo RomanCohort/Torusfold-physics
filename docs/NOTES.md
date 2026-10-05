@@ -525,6 +525,35 @@ and at the sampled theta of 51 degrees the orientation factor is exp(-(51.4/25)^
 10 kJ/mol acts as **0.07 kJ/mol per pair** against the ~6 kJ/mol a 20 degree reorientation costs. The reward
 vanishes exactly where repair is needed.
 
+## 2026-10-05 (5) — Ten chains, paired: the term works and the trace does not pay for it
+
+The two open items from the entry above were both weight problems. Discounting the distance penalty to 0.3
+(the rise and the orientation are the coordinates the model cannot express at all today; the base-base
+distance at least has the pair and link network pulling on it) and raising the strength fixes both at once.
+Ten chains, 5000 steps, production tables, SAME chains and SAME seeds with and without the term, so every
+number is paired (weights 0.3/1/1, eps = 45 kJ/mol = 18 kBT per pair):
+
+| coordinate | without | with the term | paired change | chains improved |
+| :-- | --: | --: | --: | --: |
+| base-base distance | 0.7164 +- 0.0359 nm | **0.5906 +- 0.0306** | -0.1258 +- 0.0267 | **10/10** |
+| rise, TV vs target | 0.5418 +- 0.0418 | **0.2717 +- 0.0310** | **-0.2702 +- 0.0449** | **10/10** |
+| **rise, 5th percentile** | **-0.3267 +- 0.1566** | **+0.1625 +- 0.2225** | **+0.4891 +- 0.2250** | **9/10** |
+| neighbour-normal angle | 49.65 +- 2.26 deg | **18.74 +- 1.07** | -30.90 +- 2.42 | **10/10** |
+| trace joint J | 0.1269 | **0.1234** | -0.0035 | -- |
+
+Three readings. **The stacking asymmetry is created and every chain agrees**: the rise's 5th percentile
+goes from -0.327 nm to +0.163 (paired +0.489 +- 0.225, twice its own spread) against a +0.06 target -- the
+model starts with no preference for one base lying over its neighbour and ends with the right one, slightly
+overdone. **The trace does not pay**, once the weights are right: J 0.1269 -> 0.1234, the opposite of the
+two-chain equal-weight indication, which says the trace cost was the distance penalty's rather than the
+stacking term's (at full weight it was fighting the backbone's own pair and link network). And **the
+strength is slightly past optimal**, visible as overshoot rather than damage: theta lands at 18.7 against a
+24.5 target, the rise's 5th percentile at +0.16 against +0.06.
+
+Next: scan eps over 25-35 to land nearer the target, then the question that now has an instrument -- does the
+term survive being fitted by the loop against an ensemble that contains it (`IBI_LOOP_BASE_STACK=45` plus
+form and weights, with everything else the loop already does).
+
 **Correction and the result (same day).** The rewrite tried first -- `eps * (1 - Gd*Gr*Gt)` -- is
 dynamically IDENTICAL to the reward, because `SUM(1-f) = N - SUM(f)` differs by a constant; the sampler
 proved it by producing bit-identical trajectories for the two forms. The limiter is the gradient, not the

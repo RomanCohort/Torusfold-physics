@@ -1152,6 +1152,50 @@ Two things this run does NOT settle, both visible in the same table and both the
 So: the model can carry stacking, the term can be built from measurements, and the shape of the term -- not
 its strength -- was what stood in the way for two attempts.
 
+## Part 18 — Ten chains, paired: the term works, and the trace does not pay for it (2026-10-05)
+
+Part 17's two open items were the distance well over-constraining its own width at equal weights, and the
+trace J rising with the strength. Both were weight problems. Discounting the distance penalty to 0.3 (the
+rise and the orientation are the coordinates the model cannot express at all today; the base-base distance
+at least has the pair and link network pulling on it) and raising the strength fixes both at once. Ten
+chains of the 24-34 residue band, 5000 steps each, production tables, SAME chains and SAME seeds with and
+without the term, so every number below is paired
+(`scripts/analyze_stack_sum_paired.py`, weights 0.3/1/1, eps = 45 kJ/mol = 18 kBT per pair):
+
+| coordinate | without the term | with the term | paired change | chains improved |
+| :-- | --: | --: | --: | --: |
+| base-base distance | 0.7164 +- 0.0359 nm | **0.5906 +- 0.0306** | -0.1258 +- 0.0267 | **10/10** |
+| ... its TV vs target | 0.5506 +- 0.0547 | **0.4255 +- 0.0398** | -0.1251 +- 0.0595 | **10/10** |
+| rise, mean | 0.3208 +- 0.0665 | 0.3197 +- 0.0254 | -0.0011 +- 0.0704 | TV: 10/10 |
+| rise, TV vs target | 0.5418 +- 0.0418 | **0.2717 +- 0.0310** | **-0.2702 +- 0.0449** | **10/10** |
+| **rise, 5th percentile** | **-0.3267 +- 0.1566** | **+0.1625 +- 0.2225** | **+0.4891 +- 0.2250** | **9/10** |
+| neighbour-normal angle | 49.6469 +- 2.2567 deg | **18.7428 +- 1.0735** | -30.9041 +- 2.4238 | **10/10** |
+| ... its TV vs target | 0.5072 +- 0.0336 | **0.2357 +- 0.0281** | -0.2715 +- 0.0289 | **10/10** |
+| trace joint J (mean) | 0.1269 | **0.1234** | -0.0035 | -- |
+
+THREE READINGS.
+
+1. **The stacking asymmetry is created, and every chain agrees.** The rise's 5th percentile goes from
+   -0.327 +- 0.157 nm to +0.163 +- 0.223, a paired change of +0.489 +- 0.225 that is twice its own spread,
+   against the crystal target's +0.06. The model starts with no preference for one base lying over its
+   neighbour rather than beside or under it and ends with the right one, slightly overdone.
+2. **The trace does not pay for it, once the weights are right.** Joint J: 0.1269 without the term, 0.1234
+   with it. That is the opposite of the two-chain equal-weight indication (0.139 -> 0.215), and it says the
+   trace cost was the distance penalty's, not the stacking term's -- i.e. the base-base distance at full
+   weight was fighting the backbone's own pair and link network, which is exactly the double-counting the
+   weighting removes.
+3. **The strength is slightly past optimal, and that is visible as overshoot rather than as damage.** theta
+   lands at 18.7 +- 1.1 against a 24.5 target (TV 0.236, the best of the three coordinates) and the rise's
+   5th percentile at +0.16 against +0.06. A scan of eps over 25-35 is the obvious way to land nearer the
+   target; the interesting question -- whether the term survives being fitted by the loop against an
+   ensemble that contains it -- now has an instrument: `IBI_LOOP_BASE_STACK=45` plus the form and weights,
+   with everything else the loop already does.
+
+Sample and caveats: ten chains from the 24-34 residue band (the band holds 31, and its loader order is not
+stable across processes -- Part 15), 5000 steps, one seed per chain, and the target is the crystal-expressible
+marginal through the same bead-to-plane map, not the ring-atom one. "Chains improved" is a sign count, not a
+p-value; the paired means being several times their standard deviations is what carries the result.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 
