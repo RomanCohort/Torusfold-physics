@@ -1613,6 +1613,39 @@ ladder, and runs a short room-temperature Langevin trajectory -- the protocol th
 (1.58 A of trace drift, sd 0.12 over eight seeds, beads on target). Everything else it needs is in place: the
 term, the bead source, the reconstruction, the writer, and the precedence that selects them.
 
+## Part 27 — The refinement mode, and the end-to-end number (2026-10-05)
+
+`refine_mode="refine"` does exactly what the sweep said: it skips the 400 -> 300 K pre-fold and the REMD
+ladder and runs `refine_steps` at `refine_temp` through the loop's OWN sampler (ibi_core.run_round, the same
+call every measurement in Parts 15-25 used), on the beads the refinement was given. End to end on 2OIU, one
+call, with `TORUSFOLD_CG_TABLES=production_tables.npz`, `TORUSFOLD_BASE_STACK=16.6:0,1,0.19` and
+`bead_source_pdb=artifacts/2oiu/2OIU.pdb`:
+
+| quantity | value | reference |
+| :-- | --: | --: |
+| trace vs the deposit | **1.62 A** (Kabsch) | -- |
+| the field's beads: base_dist | 5.345 A | 5.306 |
+| ... base_rise | **+3.297 A** | +3.186 |
+| ... base_cos | **0.907** | 0.901 |
+| product atoms | 1551 | (71 as a P trace) |
+| **product, helical steps stacked** | **50.0%** | crystal 100% |
+| product rise | 3.44 +- 0.65 A | 3.40 +- 0.13 |
+| product normal angle | 21.0 deg | 7.8 |
+| WC contacts kept | 2/12 | 12/12 |
+
+So the shipped path now produces an all-atom product whose base geometry is half-way to the crystal, against
+**0.0 percent** for its folding mode and **25.0 percent** for the P-trace reconstruction of the same state.
+The gap to the folding mode is the point: the same field, the same tables, the same term and the same input
+differ only in whether the CG stage anneals to 1000 K, and a term worth ~6 kBT per pair at 300 K is worth
+~1.5 at the top of that ladder.
+
+THE DEFAULT IS STILL "fold", deliberately. Flipping it would change every existing caller's product, and a
+mode that changes what the pipeline returns should be asked for by the caller that wants it -- the docstring
+now states the measured difference so that choice can be made with the number in hand. What remains is the
+rest of the gap: 50 percent against 100 lies in the trace's 1.6 A and in the rigid template's idealisation,
+in that order, and the WC contacts (2 of 12) are the template's, not the trace's -- a reconstruction that
+satisfies the H-bond criterion is the same architectural question as the base frame being the model's own.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

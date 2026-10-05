@@ -49,13 +49,13 @@ correct `score_pdb()` implementation (it was never called in-tree).
 ## Far / long-range pair closure is still imperfect
 
 Distal (topologically far) pairing distances come out too large in early runs;
-RL MCTS + steering forces were added to pull them toward Watson闂備胶鍋ㄩ崕鎻掝嚕閻暐ck
-geometry (C1闂備胶鍋ㄩ崕鑼矈閹绢喖鐒垫い鎺嶇閻?闂?~10.5 闂? but this remains the main accuracy bottleneck for
+RL MCTS + steering forces were added to pull them toward Watson闂傚倷鑳堕崑銊╁磿閹绘帩鍤曢柣顑芥殣ck
+geometry (C1闂傚倷鑳堕崑銊╁磿閼碱剛鐭堥柟缁㈠枛閻掑灚銇勯幒宥囶槮闁?闂?~10.5 闂? but this remains the main accuracy bottleneck for
 long sequences. Not fully solved.
 
 ## CG planar collapse (fixed)
 
-Initialization collapsed to a flat disc (`z 闂?0.6 闂佺厧鐡ㄧ粩? because CG started with
+Initialization collapsed to a flat disc (`z 闂?0.6 闂備胶鍘ч悺銊х博? because CG started with
 `z = 0` and the energy surface flattened it. Fixed by injecting helical `z`
 into the CG initialization and a `CustomExternalForce` `z`-restraint during
 refinement. Keep the restraint on; do not "clean up" the `z` patch.
@@ -694,7 +694,7 @@ So: threading the sampled beads in is worth doing for a GOOD trace (the refineme
 the fix for a drifted one. The fix for that is a model whose base frame is its own -- beads defining the
 plane, or a fifth bead carrying a normal -- which is now the measured bottleneck rather than a suspicion.
 
-## 2026-10-05 (10) 闁?Refinement protocols: the drift is a startup effect, and one number does not reproduce
+## 2026-10-05 (10) 闂?Refinement protocols: the drift is a startup effect, and one number does not reproduce
 
 Sweep over one 2OIU chain, recording every frame's Kabsch RMSD against the deposit (findings Part 24):
 
@@ -716,7 +716,7 @@ tables, term, seed, chain, initial state and step count. Until that difference i
 claim built on this comparison is readable; the two products it built are both unstacked and say nothing
 about the reconstruction. Settling it is a line-by-line A/B of the two run_round calls, not another run.
 
-## 2026-10-05 (11) 閳?Three bugs of mine, and the product result they were hiding
+## 2026-10-05 (11) 闁?Three bugs of mine, and the product result they were hiding
 
 Part 24's "the map and the rigid fit come apart" was wrong. Building both scoreboards with the CRYSTAL as a
 reference row -- where the two definitions must agree -- caught three errors in one afternoon: the product was
@@ -740,7 +740,7 @@ real sampled trace at 1.58 A of drift; what did not transfer was my own bookkeep
 against 100, and 2 of 12 WC contacts) is the trace's 1.58 A and the rigid template's idealisation, in that
 order.
 
-## 2026-10-05 (12) 鈥?The production path: switches wired and verified, and the protocol is the blocker
+## 2026-10-05 (12) 閳?The production path: switches wired and verified, and the protocol is the blocker
 
 Four pieces wired, each verified by a log line: the base-level term reaches the refiner's CG stage through
 `TORUSFOLD_BASE_STACK=16.6:0,1,0.19` (same `cg_potentials` entry point as the loop, so one object, not
@@ -760,3 +760,18 @@ at the top of the ladder and the base frames are scrambled by construction.
 
 So the next piece is a refinement MODE: a flag that skips the anneal, drops the temperature ladder and runs a
 short room-temperature Langevin trajectory. Everything else it needs is in place.
+
+## 2026-10-05 (13) 鈥?The refinement mode: 50 percent stacked end to end
+
+`refine_mode="refine"` skips the 400 -> 300 K pre-fold and the REMD ladder and runs 1000 steps at 300 K
+through the loop's own sampler, on the beads read from the deposit. End to end on 2OIU with the term on
+(`TORUSFOLD_BASE_STACK=16.6:0,1,0.19`): trace **1.62 A** from the crystal, the field's beads at d 5.345 /
+rise +3.297 / cos 0.907 against 5.306 / +3.186 / 0.901, a **1551-atom** product (against 71 as a P trace), and
+**50.0 percent of helical steps stacked** with a rise of 3.44 +- 0.65 A against the crystal's 3.40 -- versus
+**0.0 percent** for the folding mode and **25.0** for the P-trace reconstruction of the same state.
+
+The same field, tables, term and input differ only in whether the CG stage anneals to 1000 K, where a term
+worth ~6 kBT per pair at 300 K is worth ~1.5. The default stays "fold" on purpose -- flipping it would change
+every existing caller's product -- and the docstring now carries the measured difference so that choice can be
+made with the number in hand. What is left of the gap (50 against 100, and 2 of 12 WC contacts) is the trace's
+1.6 A and the rigid template's idealisation, in that order.
