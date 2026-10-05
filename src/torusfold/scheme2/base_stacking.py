@@ -146,7 +146,8 @@ def stack_energy_sum(pos_nm: torch.Tensor, eps: float = EPS_DEFAULT,
                      coef_nm: Optional[torch.Tensor] = None,
                      d_ref: float = D_REF, d_sig: float = D_SIG,
                      rise_ref: float = RISE_REF, rise_sig: float = RISE_SIG,
-                     theta_c: float = THETA_C_BROAD) -> torch.Tensor:
+                     theta_c: float = THETA_C_BROAD,
+                     w_d: float = 1.0, w_r: float = 1.0, w_t: float = 1.0) -> torch.Tensor:
     """SEPARATE penalties, one per coordinate: E = eps * SUM_i [ (1-Gd) + (1-Gr) + (1-Gt) ].
 
     WHY THIS AND NOT "1 MINUS THE PRODUCT", measured the hard way. The previous attempt combined the same
@@ -185,7 +186,13 @@ def stack_energy_sum(pos_nm: torch.Tensor, eps: float = EPS_DEFAULT,
     g_d = torch.exp(-((d - d_ref) / d_sig) ** 2)
     g_r = torch.exp(-((rise - rise_ref) / rise_sig) ** 2)
     g_t = torch.exp(-(theta / math.radians(theta_c)) ** 2)
-    return eps * ((1.0 - g_d) + (1.0 - g_r) + (1.0 - g_t)).sum(dim=-1)
+    # PER-COORDINATE WEIGHTS, added because the equal-weight scan showed they should not be equal: at
+    # eps = 20 the distance well got the MEAN right (0.750 -> 0.621 against 0.570) while squeezing the WIDTH
+    # to sd 0.122 against the target's 0.198, so the distance's total variation got worse while the other
+    # two coordinates' improved. The rise and the orientation are the ones the model cannot express at all
+    # today (no preference for over vs under, no coupling at all); the base-base distance at least has the
+    # pair and link network pulling on it. So the distance penalty is the one to discount.
+    return eps * (w_d * (1.0 - g_d) + w_r * (1.0 - g_r) + w_t * (1.0 - g_t)).sum(dim=-1)
 
 
 def make_base_stack_potential(eps: float = EPS_DEFAULT, coef_nm: Optional[np.ndarray] = None,

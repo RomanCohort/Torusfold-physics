@@ -191,6 +191,16 @@ GAIN_BY_COORD = {c: float(os.environ.get(f"IBI_LOOP_GAIN_{c.upper()}", GAIN)) fo
 # pins the default path against golden digests. A launcher that wants the working knob to work sets
 # IBI_LOOP_SUPPORT_GATE=0.03.
 SUPPORT_GATE = float(os.environ.get("IBI_LOOP_SUPPORT_GATE", I.DEFAULT_MAX_OUTSIDE_FRAC))
+
+# BASE-LEVEL STACKING, opt-in, 0 = off and the field is unchanged (2026-10-05). Strengths and shapes are
+# measured in findings Parts 15-17: the sum form (independent penalties, broad orientation factor) has
+# 111.5 kJ/mol/nm of force at an unstacked geometry against 7.4 for the product-shaped reward, and it is the
+# one that creates the rise's one-sidedness; the default weights discount the base-base distance because at
+# equal weights it over-constrained its own width (sampled sd 0.122 against the target's 0.198).
+BASE_STACK_EPS = float(os.environ.get("IBI_LOOP_BASE_STACK", "0"))
+BASE_STACK_FORM = os.environ.get("IBI_LOOP_BASE_STACK_FORM", "sum")
+BASE_STACK_W = tuple(float(x) for x in
+                     os.environ.get("IBI_LOOP_BASE_STACK_W", "0.3,1,1").split(","))
 # "table" alone has no restoring force outside its support (both edge slopes of the shipped
 # bb_bond table are exactly 0.0), so the wall is what bounds an excursion.
 #
@@ -484,7 +494,30 @@ def _build_potentials(round_npz):
         spec = P.resolve_spec(f"table_wall:{WALL_K:g}", coord) if coord == "bb_bond" \
             else P.resolve_spec("table", coord)
         pots.append((coord, spec, P.make_potential(coord, spec)))
-    return pots, P.potential_kwargs(pots)
+    kw = P.potential_kwargs(pots)
+    # A BASE-LEVEL STACKING TERM, opt-in, off by default (2026-10-05).
+    #
+    # The trace coordinates above cannot express stacking: measured over 20 crystal fragments and the
+    # field's own sampler, the crystals' base-base distance is 0.570 +- 0.198 nm and their rise along the
+    # mean base-plane normal is 0.328 +- 0.188 nm with a 5th percentile at +0.06 -- one-sided, because one
+    # base lies OVER its neighbour -- while the sampler gives 0.750 nm and a rise whose 5th percentile is
+    # -0.33 nm, i.e. no preference at all (findings Part 15). A term built from those measurements and
+    # shaped as INDEPENDENT penalties creates the asymmetry: the rise's 5th percentile moves to +0.02 nm at
+    # 20 kJ/mol per pair (Part 17). The same form's max|F| at an unstacked geometry is 111.5 against 7.4 for
+    # a product-shaped reward at the same nominal strength, which is why this is the shape that ships here.
+    #
+    # WHY IT BELONGS IN THE LOOP rather than in a scan: with the term ON, the trace tables are being fitted
+    # against an ensemble that includes it -- which is the only honest way to keep both, since the trace
+    # tables in results/ were fitted with no base-level term present and a stacking term pulls the trace
+    # away from its own fitted marginals (measured: joint J 0.139 -> 0.215 on two chains at 20 kJ/mol).
+    #
+    # IBI_LOOP_BASE_STACK=0 (default) leaves the field bit-identical to before this block existed.
+    if BASE_STACK_EPS > 0.0:
+        from torusfold.scheme2.base_stacking import make_base_stack_potential
+        kw = dict(kw, base_stack_potential=make_base_stack_potential(
+            eps=BASE_STACK_EPS, form=BASE_STACK_FORM,
+            w_d=BASE_STACK_W[0], w_r=BASE_STACK_W[1], w_t=BASE_STACK_W[2]))
+    return pots, kw
 
 
 def process_memory_mb():

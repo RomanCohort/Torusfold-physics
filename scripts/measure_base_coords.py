@@ -199,7 +199,7 @@ def sampled_frames(n_chains=8, nsteps=5000, burn=1000, stride=25, blocks=4, thre
 
 
 def sampled_frames_with_stack(eps, n_ch=2, nsteps=5000, burn=1000, stride=25, blocks=4, threads=4,
-                              form="reward"):
+                              form="reward", weights=(1.0, 1.0, 1.0)):
     """Sample with the base-level stacking term installed. Returns (frames, trace joint J).
 
     Everything else is the same protocol as sampled_frames: production tables, the loader's 3-bead chains,
@@ -215,7 +215,8 @@ def sampled_frames_with_stack(eps, n_ch=2, nsteps=5000, burn=1000, stride=25, bl
     _pots, pot_kw = CP.build_potential_kwargs(str(PROD), wall_k=2000.0,
                                              coords=("bb_bond", "angle", "dihedral"))
     if eps != 0.0:
-        pot_kw = dict(pot_kw, base_stack_potential=BS.make_base_stack_potential(eps=eps, form=form))
+        pot_kw = dict(pot_kw, base_stack_potential=BS.make_base_stack_potential(
+            eps=eps, form=form, w_d=weights[0], w_r=weights[1], w_t=weights[2]))
     else:
         pot_kw = dict(pot_kw, base_stack_potential=None)
     out = []
@@ -241,8 +242,9 @@ def sampled_frames_with_stack(eps, n_ch=2, nsteps=5000, burn=1000, stride=25, bl
         js.append(float(j))
         print("  chain %-9s L=%2d  %4d frames in %.0f s  J %.4f"
               % (s["name"], L, res.positions.shape[0], time.time() - t0, float(j)), flush=True)
-        for fr in range(res.positions.shape[0]):
-            out.append(res.positions[fr][0].reshape(L, 3, 3).numpy())
+        chain_frames = [res.positions[fr][0].reshape(L, 3, 3).numpy()
+                        for fr in range(res.positions.shape[0])]
+        out.append((s["name"], chain_frames))
     return out, float(np.mean(js))
 
 
@@ -404,11 +406,19 @@ def main():
         tz = np.load(OUT / "_base_coords_planes.npz")
         tgt = {k: tz[f"impl_{k}"] for k in ("nb_dist", "rise", "theta", "twist")}
         grid = {"nb_dist": (0.3, 1.6), "rise": (-1.0, 1.0), "theta": (0.0, 180.0), "twist": (0.0, 180.0)}
+        w = (1.0, 1.0, 1.0)
+        if len(sys.argv) > 5:
+            w = tuple(float(x) for x in sys.argv[5].split(","))
         for eps in eps_list:
-            print("\n===== SUM form (independent penalties, broad orientation), eps = %.2f kJ/mol"
-                  " (%.2f kBT) per pair =====" % (eps, eps / 2.494), flush=True)
-            frame_list, jval = sampled_frames_with_stack(eps, n_ch=n_ch, nsteps=nst, form="sum")
-            smp = coords_from_frame_list(frame_list)
+            print("\n===== SUM form, eps = %.2f kJ/mol (%.2f kBT) per pair, weights"
+                  " (d, rise, theta) = %s =====" % (eps, eps / 2.494, w), flush=True)
+            per_chain, jval = sampled_frames_with_stack(eps, n_ch=n_ch, nsteps=nst, form="sum",
+                                                          weights=w)
+            # PER-CHAIN coordinates as well as pooled ones: the settings are compared on the SAME chains
+            # and the same seeds, so a paired test across chains is available and a pooled mean would only
+            # be the average of it.
+            per = {nm: coords_from_frame_list(frames) for nm, frames in per_chain}
+            smp = {k: np.concatenate([per[nm][k] for nm, _f in per_chain]) for k in COORDS}
             for k in ("nb_dist", "rise", "theta"):
                 v = smp[k][np.isfinite(smp[k])]
                 tv, _ha, _hb = tv_distance(tgt[k], v, *grid[k])
@@ -416,8 +426,14 @@ def main():
                       % (k, v.mean(), v.std(), np.percentile(v, 5), tv,
                          np.nanmean(tgt[k]), np.nanstd(tgt[k])), flush=True)
             print("  trace joint J = %.4f" % jval, flush=True)
-            np.savez(OUT / ("_base_coords_pen84_eps%g.npz" % eps),
-                     **{f"sampled_{k}": smp[k] for k in COORDS}, j=np.asarray([jval]))
+            payload = {f"sampled_{k}": smp[k] for k in COORDS}
+            for nm, _f in per_chain:
+                for k in COORDS:
+                    payload[f"chain_{nm}_{k}"] = per[nm][k]
+            payload["j"] = np.asarray([jval])
+            payload["eps"] = np.asarray([eps])
+            payload["weights"] = np.asarray(w)
+            np.savez(OUT / ("_stack_sum_w%g_eps%g.npz" % (w[0], eps)), **payload)
         return
 
     if len(sys.argv) > 2 and sys.argv[1] == "--stack-scan":
