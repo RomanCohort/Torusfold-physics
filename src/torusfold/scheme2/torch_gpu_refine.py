@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -20,6 +20,20 @@ _CG_TABLE_KW = None
 
 # The environment variable that seeds a run without touching any call site.
 SEED_ENV = "TORUSFOLD_SEED"
+
+# The three refinement knobs, on the same route: a call site that passes nothing runs the built-in
+# default, and a caller that wants the refinement protocol switches an EXISTING call site from the
+# environment instead of editing it. See _resolve_refine_settings for the precedence, for the one
+# case this mechanism cannot tell apart, and for what the switch is worth (findings Parts 24-27).
+REFINE_MODE_ENV = "TORUSFOLD_REFINE_MODE"
+REFINE_STEPS_ENV = "TORUSFOLD_REFINE_STEPS"
+REFINE_TEMP_ENV = "TORUSFOLD_REFINE_TEMP"
+
+# The built-in defaults of the three arguments, named because the resolver has to test a value
+# against them: "the caller passed this" and "Python filled in the default" are the same object.
+REFINE_MODE_DEFAULT = "fold"
+REFINE_STEPS_DEFAULT = 1000
+REFINE_TEMP_DEFAULT = 300.0
 
 
 def _resolve_seed(seed: Optional[int], verbose: bool = True) -> Optional[int]:
@@ -67,6 +81,101 @@ def _resolve_seed(seed: Optional[int], verbose: bool = True) -> Optional[int]:
               "differ by ~7.6 A RMSD on 71 nt (scripts/structure_spread.py). "
               f"Set {SEED_ENV} or pass seed= to fix that.")
     return seed
+
+
+class _RefineSettings(NamedTuple):
+    """What a run will actually use, plus the line that records what the environment changed."""
+
+    mode: str
+    steps: int
+    temp: float
+    env_note: str
+
+
+def _resolve_refine_settings(
+    refine_mode: str = REFINE_MODE_DEFAULT,
+    refine_steps: int = REFINE_STEPS_DEFAULT,
+    refine_temp: float = REFINE_TEMP_DEFAULT,
+) -> _RefineSettings:
+    """The three refinement knobs, resolved from (argument, environment, built-in default).
+
+    WHY THE ENVIRONMENT ROUTE EXISTS. refine_mode="refine" is the protocol a caller wants when a
+    structure is GIVEN and has to be kept. Measured on 2OIU, 71 nt, end to end (findings Part 27):
+    the folding path returns base frames with a cosine of 0.650 against the deposit's 0.901 and
+    produces an unstacked product (0.0 percent of helical steps stacked), while the refinement keeps
+    0.907 and produces 50.0 percent, with the trace 1.62 A from the deposit. A sequence-only caller
+    wants the opposite and keeps "fold". Every call site in this repository passes none of these
+    arguments (docs/refine_mode_call_sites.md), so the switch has to be reachable without editing
+    them -- the same route TORUSFOLD_SEED and TORUSFOLD_CG_TABLES already take.
+
+    PRECEDENCE, and the one case it cannot tell apart. An argument that DIFFERS from the built-in
+    default wins unconditionally, and then the environment variable for it is not consulted for a
+    value (it is still validated, below). A value EQUAL to the built-in default is what an omitted
+    argument also looks like once Python has filled the default in, so for that case the environment
+    wins. The consequence is honest and worth stating: a caller that explicitly passes
+    refine_mode="fold" while TORUSFOLD_REFINE_MODE=refine is set gets the refinement, because the
+    two are the same object here. The alternative -- a sentinel default of None -- changes the
+    signature other code inspects (test_seed_reproducibility.py pins its tail) for a case no caller
+    in the repository has, and every real call site omits these arguments.
+
+    VALIDATION IS LOUD AND UNCONDITIONAL. A malformed TORUSFOLD_REFINE_MODE/STEPS/TEMP raises
+    SystemExit naming the variable and the value, whether or not the argument wins: _resolve_seed
+    does the same for a non-integer TORUSFOLD_SEED, and ibi_loop.py for a bad IBI_LOOP_FREEZE.
+    A typo that silently left a run folding is the failure this whole mechanism exists to prevent.
+
+    The returned env_note is empty when the environment changed nothing. Otherwise it names every
+    variable that changed a value, what it changed it from, and -- when the mode is still "fold" --
+    that steps and temperature are inert until the mode is "refine". The caller prints it.
+    """
+    mode = refine_mode
+    steps = int(refine_steps)
+    temp = float(refine_temp)
+    changes: List[str] = []
+    steps_from_env = False
+    temp_from_env = False
+
+    raw_mode = os.environ.get(REFINE_MODE_ENV, "").strip().lower()
+    if raw_mode:
+        if raw_mode not in ("fold", "refine"):
+            raise SystemExit(f"{REFINE_MODE_ENV}={raw_mode!r} is not 'fold' or 'refine'")
+        if refine_mode == REFINE_MODE_DEFAULT and raw_mode != REFINE_MODE_DEFAULT:
+            mode = raw_mode
+            changes.append(f"{REFINE_MODE_ENV}={raw_mode} (was {REFINE_MODE_DEFAULT})")
+
+    raw_steps = os.environ.get(REFINE_STEPS_ENV, "").strip()
+    if raw_steps:
+        try:
+            env_steps = int(raw_steps)
+        except ValueError:
+            raise SystemExit(f"{REFINE_STEPS_ENV}={raw_steps!r} is not an integer")
+        if env_steps < 1:
+            raise SystemExit(f"{REFINE_STEPS_ENV}={env_steps} is not a positive step count")
+        if int(refine_steps) == REFINE_STEPS_DEFAULT and env_steps != REFINE_STEPS_DEFAULT:
+            steps = env_steps
+            steps_from_env = True
+            changes.append(f"{REFINE_STEPS_ENV}={env_steps} (was {REFINE_STEPS_DEFAULT})")
+
+    raw_temp = os.environ.get(REFINE_TEMP_ENV, "").strip()
+    if raw_temp:
+        try:
+            env_temp = float(raw_temp)
+        except ValueError:
+            raise SystemExit(f"{REFINE_TEMP_ENV}={raw_temp!r} is not a number")
+        if not env_temp > 0.0:
+            raise SystemExit(f"{REFINE_TEMP_ENV}={env_temp} is not a positive temperature")
+        if float(refine_temp) == REFINE_TEMP_DEFAULT and env_temp != REFINE_TEMP_DEFAULT:
+            temp = env_temp
+            temp_from_env = True
+            changes.append(f"{REFINE_TEMP_ENV}={env_temp:g} (was {REFINE_TEMP_DEFAULT:g})")
+
+    note = ""
+    if changes:
+        note = "refinement settings CHANGED BY THE ENVIRONMENT: " + ", ".join(changes)
+        if mode != "refine" and (steps_from_env or temp_from_env):
+            # The folding path never reads either one, and saying so stops a reader from concluding
+            # that setting them did something to the run they are looking at.
+            note += " -- inert while the mode is fold"
+    return _RefineSettings(mode, steps, temp, note)
 
 
 def _cg_potential_kwargs():
@@ -258,7 +367,11 @@ def torch_gpu_refine(
                         trace 1.62 A from the crystal, beads d 5.345 / rise +3.297 / cos 0.907 against
                         5.306 / +3.186 / 0.901, product 1551 atoms and **50.0 percent of helical steps
                         stacked** against 0.0 percent for the folding path and 25.0 for the P-trace
-                        reconstruction (findings Part 27).
+                        reconstruction (findings Part 27). All three knobs can also be set from the
+                        environment -- TORUSFOLD_REFINE_MODE / TORUSFOLD_REFINE_STEPS /
+                        TORUSFOLD_REFINE_TEMP, resolved by _resolve_refine_settings, which prints
+                        every value the environment changed -- so a call site that passes nothing can
+                        be switched without being edited.
 
     Returns:
         (output_pdb_path, final_energy, diag_dict)
@@ -289,6 +402,19 @@ def torch_gpu_refine(
             print("  [seed] this fixes the noise stream, not the kernels: verify by running "
                   "the same seed twice and comparing with scripts/structure_spread.py "
                   "(expect 0.000 A)")
+
+    # Resolve the three refinement knobs from (argument, environment, built-in default) BEFORE any
+    # of them is read, and print what the environment took over. The precedence and its one
+    # indistinguishable case are in _resolve_refine_settings; the values arrive here with Python's
+    # defaults already filled in, which is exactly what the resolver needs to see. Done next to the
+    # seed resolution so the run's configuration is stated once, in one place, at the top.
+    refine_mode, refine_steps, refine_temp, _refine_env_note = _resolve_refine_settings(
+        refine_mode, refine_steps, refine_temp)
+    if _refine_env_note:
+        # NOT gated on verbose, unlike the seed lines: a run whose protocol the environment
+        # changed has to be able to say so on its own, or a fold/refine mix-up survives the fix.
+        # The CG table line prints for the same reason, and it is the same kind of fact.
+        print("  [Torch GPU] " + _refine_env_note)
 
     # 1. Read P coordinates
     p_coords = _read_p_coords(input_pdb)
@@ -346,7 +472,12 @@ def torch_gpu_refine(
         else:
             print(f"  [Torch GPU] refine mode: initial beads from {bead_source_pdb or input_pdb}")
         _t0 = time.time()
-        _p_A, _b_A, _e_A = _refine_langevin(_beads_used, sequence, pairs, refine_steps, refine_temp, seed=seed)
+        # TORUSFOLD_SEED has to reach THIS sampler too: the folding path resolves the seed once and passes
+        # it down, while this branch used to hand _refine_langevin the raw argument, whose default is None
+        # and which then fell back to a hard-coded 20261005 -- so a seeded refinement was reproducible but
+        # not the seed it was asked for. Found by the call-site inventory in docs/refine_mode_call_sites.md.
+        _p_A, _b_A, _e_A = _refine_langevin(_beads_used, sequence, pairs, refine_steps, refine_temp,
+                                            seed=_resolve_seed(seed, False))
         final_p_coords = _p_A
         final_e = _e_A
         import torch as _t
