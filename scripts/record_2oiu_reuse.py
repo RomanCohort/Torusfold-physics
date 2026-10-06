@@ -57,6 +57,12 @@ sys.path.insert(0, str(REPO / "src"))
 os.environ.setdefault("TORUSFOLD_RSRNASP", str(REPO / "_cgdata" / "combined"))
 
 import measure_base_stacking as M                                          # noqa: E402
+# numpy-only, and needed by BOTH modes: the run measures the two attribution rows with it, and
+# --verify-only re-derives them. It was a function-local import first, which is how run() came to call a
+# name that did not exist in its own scope.
+from torusfold.scheme2.aform_from_template import (reconstruct_all_atom,   # noqa: E402
+                                                   reconstruct_all_atom_from_beads,
+                                                   repair_base_placement, write_allatom_pdb)
 
 DEPOSIT = REPO / "artifacts" / "2oiu" / "2OIU.pdb"
 SPEC = REPO / "results" / "plan_c" / "_2oiu_input.json"
@@ -294,6 +300,11 @@ def side_report(beads_A, residues, seq, pairs, planes=None):
     return out
 
 
+def beads_of(residues):
+    """(L, 3, 3) Angstrom P / C4' / N9-N1 of a structure's own atoms."""
+    return np.stack([[r["atoms"]["P"], r["atoms"]["C4'"], r["atoms"][GLY[r["base"]]]] for r in residues])
+
+
 def parse_side(path, seq_expected):
     """(seq, residues, beads in A, P trace in A) of a structure file, sequence checked not assumed."""
     seq, residues, p, chain = M.parse_pdb(str(path))
@@ -527,6 +538,17 @@ def run(args):
                 "(scripts/prep_2oiu_input.py). --check-spec re-folds the deposit and compares.",
     })
 
+    # THE REFERENCE ROWS THAT ATTRIBUTE THE GAP. A product's numbers mean nothing on their own: the
+    # ordinary question is "how much of this is the sampler and how much is the reconstruction?", and two
+    # ceilings answer it. Row 2 is the shipped reconstruction handed the DEPOSIT's own bead frame; row 3 is
+    # the shipped reconstruction handed the deposit's own P TRACE, which is the best any P-trace-based tool
+    # can do with zero sampling error. Both are deterministic and --verify-only re-derives them, so
+    # publishing them costs nothing but honesty -- and without them a reader cannot tell the two apart.
+    _dep_beads = beads_of(ref["residues"])
+    _dep_recon_res = M.structure_to_residues(reconstruct_all_atom_from_beads(_dep_beads, seq), seq)
+    _ptr_recon_res = M.structure_to_residues(
+        reconstruct_all_atom(np.asarray(ref["p"], dtype=float), seq,
+                             pairs=[(int(i), int(j)) for i, j in ref["pairs"]]), seq)
     tree_files, tree_dirty = tree_fingerprint()
 
     record = {
@@ -569,7 +591,11 @@ def run(args):
         "dotbracket_pair_list": db_pairs,
         "sampled_beads_angstrom": beads_A.reshape(L, 9).tolist(),
         "measured": {
-            "deposit": side_report(ref["beads"], ref["residues"], seq, ref["pairs"], ref["planes"]),
+            "deposit": side_report(_dep_beads, ref["residues"], seq, ref["pairs"], ref["planes"]),
+            "deposit_bead_frame_reconstruction": side_report(beads_of(_dep_recon_res), _dep_recon_res,
+                                                             seq, ref["pairs"]),
+            "deposit_ptrace_reconstruction": side_report(beads_of(_ptr_recon_res), _ptr_recon_res,
+                                                         seq, ref["pairs"]),
             "product": side_report(beads_A, prod_res, seq, ref["pairs"]),
         },
     }
@@ -585,13 +611,21 @@ def run(args):
           % (len(tree_files), len(tree_dirty), (" (" + ", ".join(Path(p).name for p in tree_dirty) + ")")
              if tree_dirty else ""), flush=True)
 
-    d, p = record["measured"]["deposit"], record["measured"]["product"]
-    print("\n%-26s %8s %8s" % ("", "deposit", "product"))
+    cols = (("deposit", record["measured"]["deposit"]),
+            ("recon(beads)", record["measured"]["deposit_bead_frame_reconstruction"]),
+            ("recon(Ptrace)", record["measured"]["deposit_ptrace_reconstruction"]),
+            ("PRODUCT", record["measured"]["product"]))
+    print("\n%-26s" % "" + "".join("%14s" % c[0] for c in cols))
     for key in ("base_dist_nm_linear_map", "base_rise_nm_linear_map", "base_cos_linear_map",
                 "base_dist_nm_ring_atoms", "base_rise_nm_ring_atoms", "base_cos_ring_atoms",
                 "stacked_percent", "rise_stacked", "theta_deg", "trace_rmsd_to_deposit_A", "wc_contacts"):
-        fmt = "%8.3f" if isinstance(d[key], float) else "%8s"
-        print("%-26s " % key + (fmt % d[key]) + " " + (fmt % p[key]))
+        row = "%-26s" % key
+        for _tag, col in cols:
+            # .get, because the two attribution rows have no trace deviation of their own: they are built
+            # FROM the deposit, so the quantity would be a tautology rather than a measurement.
+            v = col.get(key)
+            row += ("%14.3f" % v) if isinstance(v, float) else ("%14s" % (v if v is not None else "-"))
+        print(row)
     print("\n%s atoms in %.0f s | %s | wrote %s"
           % (record["run"]["product_atoms"], wall, record["products"]["allatom"]["sha256"][:16],
              (out / "record.json").relative_to(REPO)))
@@ -630,8 +664,6 @@ def verify(args):
     # points does not put the template's own P/C4'/N back onto them (measured on this record: 0.76 A max,
     # which is the reconstruction's documented residual, findings Part 25) -- but every atom of the file,
     # which is what the record's sha256 covers.
-    from torusfold.scheme2.aform_from_template import (reconstruct_all_atom_from_beads,
-                                                      repair_base_placement, write_allatom_pdb)
     if str(rec.get("bead_frame_source", "")).startswith("diag"):
         st = reconstruct_all_atom_from_beads(beads_A, seq)
         if rec["environment"].get("TORUSFOLD_HBOND_REPAIR") == "1":
@@ -653,26 +685,37 @@ def verify(args):
         checks.append(("the product still reads back the recorded bead frame (max dev)",
                        dev <= 1e-9 * max(1.0, float(np.abs(beads_A).max())), "%.3e A" % dev))
 
+    def check_row(tag, want, got):
+        for key, g in got.items():
+            w = want.get(key)
+            if isinstance(w, float) and isinstance(g, float):
+                checks.append(("%s %s" % (tag, key), abs(g - w) <= 1e-9 * max(1.0, abs(w)),
+                               "record %.6f, recomputed %.6f" % (w, g)))
+            elif key == "wc_contact_worst_A":
+                checks.append(("%s %s" % (tag, key),
+                               len(g) == len(w) and all(abs(a - b) < 1e-9 for a, b in zip(g, w)),
+                               "%d distances" % len(g)))
+            elif w is not None:
+                checks.append(("%s %s" % (tag, key), g == w, "record %s" % w))
+
     fresh = side_report(beads_A, prod_res, seq, pairs)
     fresh["trace_rmsd_to_deposit_A"] = float(M.kabsch_rmsd(np.asarray(prod_p, dtype=float), ref["p"]))
-    for key, got in fresh.items():
-        want = rec["measured"]["product"].get(key)
-        if isinstance(want, float) and isinstance(got, float):
-            ok = abs(got - want) <= 1e-9 * max(1.0, abs(want))
-            checks.append(("product %s" % key, ok, "record %.6f, recomputed %.6f" % (want, got)))
-        elif key == "wc_contact_worst_A":
-            ok = len(got) == len(want) and all(abs(a - b) < 1e-9 for a, b in zip(got, want))
-            checks.append(("product %s" % key, ok, "%d distances" % len(got)))
-        elif want is not None:
-            checks.append(("product %s" % key, got == want, "record %s" % want))
+    check_row("product", rec["measured"]["product"], fresh)
 
-    dep_want = rec["measured"]["deposit"]
-    dep_fresh = side_report(ref["beads"], ref["residues"], seq, pairs)
-    for key, got in dep_fresh.items():
-        want = dep_want.get(key)
-        if isinstance(want, float) and isinstance(got, float):
-            checks.append(("deposit %s" % key, abs(got - want) <= 1e-9 * max(1.0, abs(want)),
-                           "record %.6f, recomputed %.6f" % (want, got)))
+    # The three reference rows, re-derived the same way. They are deterministic and depend only on the
+    # deposit and the pair list, so a record whose attribution rows do not come back is a record whose
+    # explanation of its own numbers is wrong.
+    dep_beads = beads_of(ref["residues"])
+    check_row("deposit", rec["measured"]["deposit"],
+              side_report(dep_beads, ref["residues"], seq, pairs, ref["planes"]))
+    dep_recon = M.structure_to_residues(reconstruct_all_atom_from_beads(dep_beads, seq), seq)
+    check_row("deposit_bead_frame_reconstruction", rec["measured"]["deposit_bead_frame_reconstruction"],
+              side_report(beads_of(dep_recon), dep_recon, seq, pairs))
+    ptr_recon = M.structure_to_residues(
+        reconstruct_all_atom(np.asarray(ref["p"], dtype=float), seq, pairs=[(int(i), int(j)) for i, j in pairs]),
+        seq)
+    check_row("deposit_ptrace_reconstruction", rec["measured"]["deposit_ptrace_reconstruction"],
+              side_report(beads_of(ptr_recon), ptr_recon, seq, pairs))
 
     print("verifying %s (no GPU, no torch, no ViennaRNA)\n" % (out / "record.json").relative_to(REPO))
     bad = 0

@@ -89,14 +89,45 @@ SHA-256 of the nine files whose bytes decide what the run produces, and a flag f
 was in a commit. Three of them were **not** in a commit when this record was made — uncommitted edits in a
 shared working tree — and the record names them.
 
-This was measured rather than assumed. The same command, run from a clean worktree of the commit the record
-names, produced a *different* product: energy 2638.3 against 1499.4 kJ/mol, trace deviation 3.15 Å against
-1.386 Å, 25.0 % of helical steps stacked against 58.3 %, and 0 of 12 key contacts against 1. Verification is
+This was measured rather than assumed, and then narrowed down to one file. The same command, run from a
+clean worktree of the commit the record names, produces a *different* product: energy 2638.3 against 1499.4
+kJ/mol, trace deviation 3.15 Å against 1.386 Å, 25.0 % of helical steps stacked against 58.3 %, 0 of 12 key
+contacts against 1 — and putting back **only** `src/torusfold/scheme2/torch_cgsim.py` reproduces the
+recorded product `8619bb95…` byte for byte, while putting back `torch_gpu_refine.py` alone does not. The
+causal file is the force-field one; the refiner's uncommitted changes move bookkeeping, not the product. So
+one file stands between this record and a clean checkout that reproduces its headline numbers exactly, and
+the record says which one instead of implying the question does not exist. Verification is
 unaffected — it re-derives every number from the committed files and passes there too — but "repeat the run
 and compare hashes" is a claim about the tree the fingerprint describes, not about the commit alone. That is
 the honest form of the claim, and the fingerprint is what makes it checkable rather than a footnote. It is
 also the reason the copies of the force field above are in this directory: without them, a checkout has no
 field at all, because `results/` is git-ignored.
+
+## Where the gap comes from, measured
+
+Six numbers in that table look like failures — 58.3 % stacked, 1 of 12 contacts. Two deterministic reference
+rows, both re-derived by `--verify-only`, say which step each belongs to. Both are reconstructions the
+shipped code performs on the **deposit itself**: one handed its own bead frame, one handed its own P trace
+and therefore carrying zero sampling error.
+
+| Quantity (Å unless stated) | Deposit | Reconstruction from its own beads | Reconstruction from its own P trace | Recorded product |
+|---|---:|---:|---:|---:|
+| Helical steps stacked (of 12) | 100 % | 91.7 % | 83.3 % | **58.3 %** |
+| Watson–Crick key contacts within 3.6 Å | 12/12 | 5/12 | **2/12** | **1/12** |
+| base_dist, bead map | 5.306 | 5.289 | 4.615 | 5.201 |
+| base_rise, bead map | +3.186 | +3.216 | +2.444 | +3.329 |
+| base_cos, bead map | 0.901 | 0.905 | 0.884 | 0.899 |
+| Rise over all 12 steps (mean ± sd) | 3.397 ± 0.134 | 3.190 ± 0.352 | 2.862 ± 0.412 | 3.427 ± 0.519 |
+| Mean angle between the planes of a step | 7.8° | 14.6° | 15.3° | 17.8° |
+
+Read the contacts row down: the **reconstruction alone**, handed the deposit's exact trace and with no
+sampling error at all, already keeps only 2 of the 12 contacts. The CG model pairs bases with a harmonic on
+the N–N distance and has no orientation term, so nothing in the chain of tools is even attempting that
+criterion; 2/12 is the ceiling of that step rather than a failure of the sampler, and what the sampler
+costs on top of it is one contact. The stacking row decomposes the same way, and this residual really is
+the sampler's: the template reconstruction of the deposit reaches 83.3 %, and 1.39 Å of drift takes it to
+58.3 %. Both statements are cheap to make and would have been impossible to make from the product column
+alone, which is the whole reason the rows are in the record.
 
 ## How to check it: no GPU, no torch import, no ViennaRNA
 
@@ -105,7 +136,7 @@ python scripts/record_2oiu_reuse.py --verify-only
 python scripts/record_2oiu_reuse.py --verify-only --out artifacts/reuse_demo/2oiu_repair --repair
 ```
 
-The two print 32 checks and 33 checks respectively, with no failures — the extra one re-runs the repair
+The two print 66 checks and 67 checks respectively, with no failures — the extra one re-runs the repair
 and confirms it rotates the 39 bases the record says it did. The checks are not a re-print of the record: they re-hash all four
 files, re-derive every geometric number from the committed product, and **rebuild the all-atom product from
 the recorded bead frame with the same code and compare it byte for byte**. Only numpy, the repository's own

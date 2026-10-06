@@ -1,7 +1,7 @@
 {
   "what": "2OIU through the shipped CG stage, from the deposit, with the calibrated protocol",
-  "generated": "2026-10-06T17:20:45+08:00",
-  "git_commit": "c70e29cc3520083604930385a1d74f1fc81887d9",
+  "generated": "2026-10-06T17:42:14+08:00",
+  "git_commit": "995be47b59a47123d2f386d0f4ff10f9154b0067",
   "host": {
     "platform": "Windows-10-10.0.26200-SP0",
     "python": "3.11.15",
@@ -124,20 +124,20 @@
       {
         "sha256": "8619bb95849012e57fa5e01887a1c7cebd9ad4d9166992e09822e51857b87c12",
         "energy_kJ_per_mol": 1499.4403057153431,
-        "wall_seconds": 21.193279504776,
+        "wall_seconds": 21.555528163909912,
         "identical_to_the_recorded_product": true
       },
       {
         "sha256": "8619bb95849012e57fa5e01887a1c7cebd9ad4d9166992e09822e51857b87c12",
         "energy_kJ_per_mol": 1499.4403057153431,
-        "wall_seconds": 21.44035792350769,
+        "wall_seconds": 21.34941554069519,
         "identical_to_the_recorded_product": true
       }
     ],
     "the_seed_reproduces_the_product_byte_for_byte": true
   },
   "run": {
-    "wall_seconds": 21.491639852523804,
+    "wall_seconds": 22.037981271743774,
     "energy_kJ_per_mol": 1499.4403057153431,
     "product_atoms": 1550,
     "on_report_calls": 10,
@@ -1119,6 +1119,66 @@
       "theta_deg": 7.774595885674617,
       "skipped": 0,
       "trace_rmsd_to_deposit_A": 0.0
+    },
+    "deposit_bead_frame_reconstruction": {
+      "base_dist_nm_linear_map": 0.5289414551111512,
+      "base_rise_nm_linear_map": 0.3216218489967705,
+      "base_cos_linear_map": 0.9050350706307001,
+      "base_dist_nm_ring_atoms": 0.5289414551111512,
+      "base_rise_nm_ring_atoms": 0.29836474146276903,
+      "base_cos_ring_atoms": 0.887845224429348,
+      "wc_contacts": "5/12",
+      "wc_contact_worst_A": [
+        3.05,
+        3.123,
+        3.367,
+        3.44,
+        3.551,
+        3.841,
+        3.885,
+        4.207,
+        4.288,
+        4.342,
+        4.491,
+        4.558
+      ],
+      "stacked_percent": 91.66666666666667,
+      "n_steps": 12,
+      "rise_stacked": 3.260628036951879,
+      "rise_all_helical_mean": 3.189534443463504,
+      "rise_all_helical_sd": 0.3523289911594672,
+      "theta_deg": 14.608495475437957,
+      "skipped": 0
+    },
+    "deposit_ptrace_reconstruction": {
+      "base_dist_nm_linear_map": 0.46150422722436196,
+      "base_rise_nm_linear_map": 0.24435377951985368,
+      "base_cos_linear_map": 0.8841574952029839,
+      "base_dist_nm_ring_atoms": 0.46150422722436196,
+      "base_rise_nm_ring_atoms": 0.2334164487527628,
+      "base_cos_ring_atoms": 0.860590317874308,
+      "wc_contacts": "2/12",
+      "wc_contact_worst_A": [
+        3.056,
+        3.297,
+        3.808,
+        3.955,
+        4.061,
+        4.118,
+        4.826,
+        5.007,
+        5.234,
+        5.463,
+        5.504,
+        5.681
+      ],
+      "stacked_percent": 83.33333333333333,
+      "n_steps": 12,
+      "rise_stacked": 3.029568241220684,
+      "rise_all_helical_mean": 2.8624588793810304,
+      "rise_all_helical_sd": 0.4118980963178729,
+      "theta_deg": 15.273364446290813,
+      "skipped": 0
     },
     "product": {
       "base_dist_nm_linear_map": 0.5200816345534003,

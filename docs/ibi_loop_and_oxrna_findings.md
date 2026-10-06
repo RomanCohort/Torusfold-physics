@@ -1904,6 +1904,22 @@ WHAT WRITING IT DOWN CAUGHT, which is the argument for doing it:
    the product's own P/C4'/N with the route recorded in `bead_frame_source`. Verification never needed any
    of this.
 
+AND THE TWO ROWS THAT MAKE THE UGLY NUMBERS READABLE. A product column on its own invites the wrong
+question -- is 58.3 percent stacked bad? -- so the record now measures two reconstructions OF THE DEPOSIT
+with the same instrument: from its own bead frame (91.7 percent stacked, 5/12 contacts, rise 3.190) and
+from its own P trace (83.3 percent, 2/12, rise 2.862). The P-trace row carries zero sampling error, so the
+contacts criterion -- which nothing in the pipeline targets, the CG model pairing on an N-N distance with no
+orientation -- is already down to 2/12 before the sampler runs, and the sampler's own cost on top of it is
+one contact. The stacking row decomposes differently and just as usefully: 100 -> 83.3 is the reconstruction,
+83.3 -> 58.3 is the 1.39 A of drift. Both rows are deterministic and --verify-only re-derives them (66 and
+67 checks now, 0 failures).
+
+ISOLATED: WHICH UNCOMMITTED FILE MOVES THE PRODUCT. A clean worktree of the recorded commit gives a
+different product (E 2638.3, 3.15 A, 25.0 percent stacked, 0/12 contacts, sha cf2405c1). Putting back ONLY
+`torch_cgsim.py` restores the recorded product byte for byte (E 1499.4, sha 8619bb95); putting back only
+`torch_gpu_refine.py` does not. So the causal dependency is the force-field file, one file short of a clean
+checkout that reproduces the record exactly, and the refiner's uncommitted changes are bookkeeping.
+
 TWO CORRECTIONS it also produced: the Part 29 table's "1,551 atoms" is 1,550 ATOM records in the file the
 run actually writes, and Part 30's "rise 3.42 -> 2.54 A" is the mean over ALL helical steps while this
 record's `rise_stacked` is the mean over the stacked ones. Both definitions are now fields in

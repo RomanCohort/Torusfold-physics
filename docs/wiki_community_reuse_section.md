@@ -43,11 +43,18 @@ three times gave byte-identical products, so its seed reproduces the run and not
 | Helical steps judged stacked | 100 % | 58.3 % |
 | Watson–Crick key contacts within 3.6 Å | 12 / 12 | 1 / 12 |
 
+Two further rows in the record make those two numbers interpretable rather than merely honest, because both
+are reconstructions the software performs on the experimental structure itself. Handed the deposit's own
+coordinates, the reconstruction keeps 83.3 % of the stacking and only 2 of the 12 contacts; handed the
+deposit's own P trace, it keeps 5 of 12. The model pairs bases with a distance restraint and no orientation
+term, so most of the pairing gap belongs to a step that never targeted pairing geometry, and the 1.39 Å of
+drift measured above costs the rest: 83.3 % → 58.3 % of stacking, 2 → 1 contacts.
+
 The record also states what it is not, because a reuse record that only lists successes is not checkable.
 It is a refinement that starts from the deposited trace, not a prediction from sequence alone. The base
 pairing stays the weak point: the optional Watson–Crick edge repair (a rotation about the glycosidic bond,
-shipped off by default) brings the contacts from 1 to 3 of 12 and leaves the stacking essentially
-unchanged, while the remaining nine pairs are a positional gap the current model does not target. And
+shipped off by default) brings the contacts from 1 to 3 of 12 while leaving the stacking essentially where
+it was, and the pairs that remain unsatisfied are a positional gap the current model does not target at all. And
 2OIU is the only circular RNA we have run through the force-field stage; the 2,013 nt example is published
 as a decoded artifact with hashes, and its provenance file records that it was not re-run, so a reader can
 verify it but cannot reproduce it.
