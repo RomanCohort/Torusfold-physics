@@ -96,7 +96,17 @@ contacts against 1 — and putting back **only** `src/torusfold/scheme2/torch_cg
 recorded product `8619bb95…` byte for byte, while putting back `torch_gpu_refine.py` alone does not. The
 causal file is the force-field one; the refiner's uncommitted changes move bookkeeping, not the product. So
 one file stands between this record and a clean checkout that reproduces its headline numbers exactly, and
-the record says which one instead of implying the question does not exist. Verification is
+the record says which one instead of implying the question does not exist.
+
+The file is worth naming precisely, because it is the reason the two rows above look the way they do. The
+uncommitted change in `src/torusfold/scheme2/torch_cgsim.py` moves the **pair guide** from the P beads to
+the N beads. `PAIR_NN = 1.00 nm` is documented in that module as a target on N beads (native N–N 9.9 Å
+against P–P 18.2 Å), so reading the P beads instead pulled the phosphate of every paired residue toward
+10 Å — the term was strongest exactly on native geometry. Re-measured at the current commit with the same
+command and the same record: energy 2638.3 against 1499.4 kJ/mol, 3.15 Å against 1.386 Å, 25.0 % against
+58.3 % stacked, 0/12 against 1/12 contacts, product `cf2405c1…` against `8619bb95…`. Landing that one
+file is all it takes for a clone to reproduce this record; until then the fingerprint is what tells a
+reader which of the two fields they are looking at. Verification is
 unaffected — it re-derives every number from the committed files and passes there too — but "repeat the run
 and compare hashes" is a claim about the tree the fingerprint describes, not about the commit alone. That is
 the honest form of the claim, and the fingerprint is what makes it checkable rather than a footnote. It is

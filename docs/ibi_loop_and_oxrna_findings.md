@@ -1914,6 +1914,14 @@ one contact. The stacking row decomposes differently and just as usefully: 100 -
 83.3 -> 58.3 is the 1.39 A of drift. Both rows are deterministic and --verify-only re-derives them (66 and
 67 checks now, 0 failures).
 
+THE CAUSE, NAMED. The causal file is `torch_cgsim.py`, and the uncommitted hunk in it moves the PAIR GUIDE
+from the P beads to the N beads (`PAIR_NN = 1.00 nm` is documented there as an N-bead target: native N-N
+9.9 A against P-P 18.2 A). Reading P beads pulled the phosphate of every paired residue toward 10 A, so the
+term was strongest exactly on native geometry -- the same defect the module's own comment says "carried 100
+percent of a 2135 kJ/mol gap between the experimental structure and the field's own output". Re-confirmed at
+the current commit (2026-10-06): the same command reproduces E 2638.3 / 3.15 A / 25.0 percent / 0 contacts /
+sha cf2405c1 without it, and E 1499.4 / 1.386 A / 58.3 percent / 1 contact / sha 8619bb95 with it.
+
 ISOLATED: WHICH UNCOMMITTED FILE MOVES THE PRODUCT. A clean worktree of the recorded commit gives a
 different product (E 2638.3, 3.15 A, 25.0 percent stacked, 0/12 contacts, sha cf2405c1). Putting back ONLY
 `torch_cgsim.py` restores the recorded product byte for byte (E 1499.4, sha 8619bb95); putting back only
