@@ -1943,6 +1943,15 @@ stacked fraction reads 50.0 percent here against Part 30's "unchanged 58.3": one
 rise threshold, which is a one-step difference between two runs of the same protocol and is why this record
 quotes its own run.
 
+WHAT LANDING IT INVALIDATES, said before somebody else has to say it: `ibi_core.run_round` calls the same
+`cg_energy_forces`, so every LOOP measurement in Parts 15-30 was made with the P-bead guide. Those runs stay
+mutually comparable -- every arm shared one field -- and the base-level conclusions are about the base term
+rather than about the guide, but their absolute energies, and any 2OIU-versus-deposit distance taken from
+them, are properties of the OLD field. They have to be re-measured with `bc5e741` before being quoted as
+this field's behaviour. The 2OIU reuse record is the exception, because it was made with the fix in place;
+the next re-measurement worth doing is the loop scoreboard's own 2OIU row, which is where the difference
+would show up first.
+
 BOUNDARIES, stated in the record itself: it is a refinement from the deposit, not a prediction from
 sequence; one circRNA is not a benchmark; the pairing gap (1/12, 3/12 repaired) is still the model's, not
 the post-processing's; and a 21-second protocol reproduces a structure rather than converging an ensemble.
