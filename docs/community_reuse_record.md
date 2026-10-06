@@ -89,14 +89,17 @@ SHA-256 of the nine files whose bytes decide what the run produces, and a flag f
 was in a commit. Three of them were **not** in a commit when this record was made — uncommitted edits in a
 shared working tree — and the record names them.
 
-This was measured rather than assumed, and then narrowed down to one file. The same command, run from a
-clean worktree of the commit the record names, produces a *different* product: energy 2638.3 against 1499.4
-kJ/mol, trace deviation 3.15 Å against 1.386 Å, 25.0 % of helical steps stacked against 58.3 %, 0 of 12 key
-contacts against 1 — and putting back **only** `src/torusfold/scheme2/torch_cgsim.py` reproduces the
-recorded product `8619bb95…` byte for byte, while putting back `torch_gpu_refine.py` alone does not. The
-causal file is the force-field one; the refiner's uncommitted changes move bookkeeping, not the product. So
-one file stands between this record and a clean checkout that reproduces its headline numbers exactly, and
-the record says which one instead of implying the question does not exist.
+This was measured rather than assumed, and then narrowed down to one file **and fixed**. At the commit the
+record names, the same command from a clean worktree produced a *different* product: energy 2638.3 against
+1499.4 kJ/mol, trace deviation 3.15 Å against 1.386 Å, 25.0 % of helical steps stacked against 58.3 %, 0 of
+12 key contacts against 1 — and putting back **only** `src/torusfold/scheme2/torch_cgsim.py` reproduced the
+recorded product `8619bb95…` byte for byte, while putting back `torch_gpu_refine.py` alone did not.
+
+That isolated file has since been committed (`bc5e741`), and **a clean checkout of the repository now
+reproduces this record byte for byte**: same command, product `8619bb95849012e5`, E 1499.4 kJ/mol, 1.386 Å,
+58.3 % stacked, 1 of 12 contacts, and a tree fingerprint reporting zero uncommitted files. The record's own
+fingerprint still lists the three files as uncommitted, because that is what the tree was when the run was
+made — a record that edited itself after the fact would be worth nothing.
 
 The file is worth naming precisely, because it is the reason the two rows above look the way they do. The
 uncommitted change in `src/torusfold/scheme2/torch_cgsim.py` moves the **pair guide** from the P beads to
@@ -172,10 +175,12 @@ is the check that is both strong and true.
   with the repair. The remaining pairs are 4–13 Å apart: a positional gap that no rotation of a base can
   close (findings Part 30).
 * **The protocol is 21 seconds long.** It reproduces a structure; it is not a converged ensemble.
-* **The run needs the tree, not just the commit.** Three source files were uncommitted when the record
-  was made; their hashes are in `record.json`, and a run from the commit alone gives a visibly worse
-  product (3.15 Å, 25.0 % stacked, 0/12 contacts — measured, above). Verification does not care: it is a
-  function of the committed record and passes on a clean checkout.
+* **Reproduction depends on the field, and the field is committed now — but that is a fact with a date.**
+  Three source files were uncommitted when the record was made, and at that commit a clean checkout gave a
+  visibly worse product (3.15 Å, 25.0 % stacked, 0/12 contacts); the one that mattered was landed in
+  `bc5e741`, after which a clean checkout reproduces the record byte for byte. `record.json` keeps the
+  fingerprint of the tree it actually ran on, and verification never depended on any of this: it is a
+  function of the committed record and passes on a clean checkout either way.
 * **The start format has a ceiling.** The compact circular start the pipeline generates for a new sequence
   cannot be written past about 1,060 nt at the shipped 5.9 Å per step, because the PDB coordinate columns
   (31–54, `8.3f`) overflow and the loader's whitespace fallback cannot recover merged fields. Longer chains

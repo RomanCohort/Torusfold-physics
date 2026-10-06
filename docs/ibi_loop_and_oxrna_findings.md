@@ -1914,6 +1914,13 @@ one contact. The stacking row decomposes differently and just as usefully: 100 -
 83.3 -> 58.3 is the 1.39 A of drift. Both rows are deterministic and --verify-only re-derives them (66 and
 67 checks now, 0 failures).
 
+LANDED, AND THE CAVEAT GONE. The pair-guide fix was committed as `bc5e741` (with
+tests/test_pair_guide_coordinate.py, whose first assertion fails on the pre-fix code by construction). A
+clean worktree of that commit now runs the same command and reproduces the record BYTE FOR BYTE: product
+`8619bb95849012e5`, E 1499.4 kJ/mol, 1.386 A of trace deviation, 58.3 percent stacked, 1 of 12 contacts,
+and a tree fingerprint reporting zero uncommitted files. The record itself was not touched: its fingerprint
+still lists the three files as uncommitted, because that is what the tree was when the run was made.
+
 THE CAUSE, NAMED. The causal file is `torch_cgsim.py`, and the uncommitted hunk in it moves the PAIR GUIDE
 from the P beads to the N beads (`PAIR_NN = 1.00 nm` is documented there as an N-bead target: native N-N
 9.9 A against P-P 18.2 A). Reading P beads pulled the phosphate of every paired residue toward 10 A, so the
