@@ -825,3 +825,22 @@ own its base frame": about a week of plumbing, plus the question of whether the 
 
 Wired as `TORUSFOLD_HBOND_REPAIR=1` (off by default, prints how many bases it moved). Tests in
 tests/test_base_placement_repair.py, the important one being that an empty pair list moves nothing.
+
+## 2026-10-06 (18) — The reuse record: 2OIU executed end to end, checkable without a GPU
+
+`scripts/record_2oiu_reuse.py` runs 2OIU through the shipped CG stage from the deposit under the six
+environment settings of Part 29 (21 s, 1,550 atoms, E 1499.4) and writes every number, hash, the command
+and the sampled bead frame to `artifacts/reuse_demo/2oiu/`. `--verify-only` re-derives all of it from the
+committed files with numpy alone -- 32 checks on the main record and 33 on the repair one, 0 failures,
+including rebuilding the product from the bead frame and comparing it byte for byte. `--repeat 2` shows the seed reproduces the product exactly (three
+identical runs); Part 29's artifact differs because that run fixed no seed, with the geometry agreeing to
+three decimals.
+
+Three defects came out of writing it down: the demo's compact-start writer was off by TEN (Å read as nm,
+6,631 Å radius for a 706 nt circle, past the PDB columns -- now a refusal with the ~1,060 nt ceiling); the
+ring-plane scoreboard flipped normals to +e3 after forming the mean normal, so the deposit read +0.056 Å of
+rise instead of +3.598; and one verification asserted that the product's P/C4'/N equal the recorded beads,
+which is false by 0.76 Å on a correct product because the reconstruction fits a template onto three anchors.
+Two numbers were also corrected: the Part 29 product is 1,550 atoms (not 1,551), and Part 30's "rise" was
+the all-step mean (3.43 -> 2.56 Å) while this record's stacked-step mean is 3.29 -> 3.22 Å. See findings
+Part 31, `docs/community_reuse_record.md`, and the paste-ready `docs/wiki_community_reuse_section.md`.

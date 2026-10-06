@@ -1839,6 +1839,66 @@ looked like a field result.
 
 Chebyshev was a seven-chain number), and there is no arm-level evidence for K=16 or K=32.
 
+## Part 31 — The reuse record: 2OIU executed end to end, and the three defects that writing it down caught (2026-10-06)
 
+The community-reuse page needed a record a reader could EXECUTE, and the honest inventory was thin. 2OIU is
+the only circular RNA here that has ever been through the force-field stage; the 2,013 nt artifact is
+DECODED (`artifacts/2013nt/provenance.json`: `"is_a_rerun": false`); and the one other candidate prepared
+in this campaign (`ct1.fa` = `mmu_circ_0011663`, 706 nt, 49 percent GC) was never run. So the record is
+2OIU -- not because it is convenient, but because a reuse record whose only evidence is self-consistency is
+not evidence, and 2OIU is the one system whose output can be checked against something this project did not
+compute.
 
+`scripts/record_2oiu_reuse.py` runs it and `--verify-only` checks it. The run is the shipped
+`torch_gpu_refine` on the deposited P trace under the six environment settings of Part 29 (no edited call
+site), 21.3 s on the ROCm iGPU, E = 1499.4, 1,550 atoms out. The record carries the command, the host, both
+pair lists, the sampled bead frame, a SHA-256 for every file, and this table:
 
+| quantity | deposit | product | product + repair |
+| :-- | --: | --: | --: |
+| trace vs the deposit (Kabsch) | 0 | 1.386 A | 1.386 A |
+| base_dist / base_rise / base_cos, the map the field scores on | 5.306 / +3.186 / 0.901 | 5.201 / +3.329 / 0.899 | unchanged |
+| the same three on the ring planes of the file | 5.306 / +3.598 / 0.940 | 5.162 / +3.140 / 0.883 | 5.162 / +2.819 / 0.858 |
+| helical steps stacked (12) | 100 pct | 58.3 pct | 50.0 pct |
+| rise, stacked steps / all steps | 3.397 / 3.397 +- 0.134 | 3.292 / 3.427 +- 0.519 | 3.222 / 2.556 +- 0.905 |
+| WC key contacts within 3.6 A | 12/12 | 1/12 | 3/12 |
+| bases rotated by the repair | -- | -- | 39 |
+
+`--repeat 2` re-runs the identical protocol twice into a scratch directory and all three products are
+byte-identical, which is the first measurement of what the seed reaches. It does NOT reproduce Part 29's
+artifact byte for byte (`3c53529d` against `8619bb95`), because that run fixed no seed; the geometry agrees
+to three decimals (5.200 / +3.335 / 0.897 against 5.201 / +3.329 / 0.899), which is what "reproduced" means
+without one. Verification needs numpy alone: it re-hashes every file, re-derives every number from the
+committed product, and REBUILDS the product from the recorded bead frame and compares it byte for byte.
+
+WHAT WRITING IT DOWN CAUGHT, which is the argument for doing it:
+
+1. **The demo's start writer was off by ten.** `_generate_compact_coords` sizes its circle from
+   `BOND_P_NEXT = 5.90`, which is ANGSTROM, and `demo_circrna_reuse.py` multiplied the result by ten to
+   convert "nm -> A". A 706 nt circle came out at radius 6,631 A -- past the PDB coordinate columns
+   (31-54, 8.3f), where neighbouring fields merge and the loader's whitespace fallback dies on
+   `"-1029.8006543.839"`. It now refuses, with the ceiling spelled out: about 1,060 nt at the shipped
+   bond length, because `|x| < 1000` is what the format allows. A longer chain needs a real starting
+   structure, not a wider field.
+2. **The ring-plane scoreboard was reading a sign, not a geometry.** The first `ring_rows` flipped each
+   plane normal to `+e3` INSIDE the pairwise loop -- after the mean normal and the cosine had been formed
+   from the unflipped `a` -- so the deposit read +0.056 A of rise and 0.158 of cosine against the map's
+   +3.19 and 0.901. Flipping every plane first gives +3.598 A and 0.940. The reference row is the only
+   reason it was visible, and it is the second time in this campaign that a mixed-sign mean normal has
+   produced a plausible-looking zero (Part 13's 33 percent).
+3. **A check that asserted something the reconstruction does not do.** "The product's P/C4'/N atoms equal
+   the recorded beads" fails at 0.76 A on a CORRECT product: the reconstruction least-squares-fits a rigid
+   template onto three points, so the template's own atoms do not land back on their anchors (Part 25's
+   residual). Replaced by the stronger and true check -- rebuild from the beads and compare bytes.
+
+TWO CORRECTIONS it also produced: the Part 29 table's "1,551 atoms" is 1,550 ATOM records in the file the
+run actually writes, and Part 30's "rise 3.42 -> 2.54 A" is the mean over ALL helical steps while this
+record's `rise_stacked` is the mean over the stacked ones. Both definitions are now fields in
+`record.json`, and the all-step numbers (3.427 -> 2.556) reproduce Part 30's within 0.02 A. The repair's
+stacked fraction reads 50.0 percent here against Part 30's "unchanged 58.3": one step of twelve crosses the
+rise threshold, which is a one-step difference between two runs of the same protocol and is why this record
+quotes its own run.
+
+BOUNDARIES, stated in the record itself: it is a refinement from the deposit, not a prediction from
+sequence; one circRNA is not a benchmark; the pairing gap (1/12, 3/12 repaired) is still the model's, not
+the post-processing's; and a 21-second protocol reproduces a structure rather than converging an ensemble.

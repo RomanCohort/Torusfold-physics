@@ -17,6 +17,8 @@ thing a third party could check was a still image.
 | `2013nt/provenance.json` | Hashes and the decode path, so the files above can be checked rather than trusted | <1 KB |
 | `2013nt/quality.json` | Every number the viewer's stat panel displays, with whether a third party can re-derive it and, when they cannot, what the blocker is | 7 KB |
 | `2oiu/2OIU.pdb` | The one experimentally resolved circRNA structure (chain P, ≈100 nt) — the input to the force-field check | 84 KB |
+| `reuse_demo/2oiu/` | An executable reuse record: 2OIU through the shipped CG stage, with the command, the six environment settings, the product, every measured number and a SHA-256 of every file — plus a verifier that needs no GPU | 156 KB |
+| `reuse_demo/2oiu_repair/` | The same run with `TORUSFOLD_HBOND_REPAIR=1`: the optional Watson-Crick edge repair, its 39 rotated bases, and what it does and does not fix | 156 KB |
 
 ## How these files came to be here, stated plainly
 
@@ -47,12 +49,19 @@ python scripts/verify_headline.py
 #       docs/circrna_3d_viewer.html
 #    or point Mol* / PyMOL / ChimeraX at artifacts/2013nt/isrnaclong_final.pdb
 
-# 3. The one experimental cross-check in this repository: start from the crystal
+# 3. The executed reuse record: check it, then reproduce it. Verifying re-derives
+#    every number and hash from the committed files with numpy alone (~10 s, no GPU);
+#    reproducing the run itself took 21 s on the GPU named in record.json, and
+#    re-running it three times produced byte-identical products.
+python scripts/record_2oiu_reuse.py --verify-only
+python scripts/record_2oiu_reuse.py --spec results/plan_c/_2oiu_input.json   # the run
+
+# 4. The one experimental cross-check in this repository: start from the crystal
 #    structure and relax it, then compare. ~17 min on CPU, and it needs OpenMM and
 #    ViennaRNA. The input is committed now, so it no longer dies on a missing file.
 python scripts/benchmark_2oiu.py
 
-# 4. The full pipeline. Still expensive (30-60 GB, hours to days) and still needs
+# 5. The full pipeline. Still expensive (30-60 GB, hours to days) and still needs
 #    the external predictors -- see docs/REPRODUCTION_RESOURCES.md.
 python run_2013nt.py     # falls back to artifacts/2013nt/sequence.txt
 ```

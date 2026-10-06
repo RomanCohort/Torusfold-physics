@@ -1,0 +1,10 @@
+command: C:\ana\envs\comfyui\python_ab.exe scripts/record_2oiu_reuse.py --spec results/plan_c/_2oiu_input.json --repair --repeat 2
+environment: {"TORUSFOLD_BASE_STACK": "16.6:0,1,0.19", "TORUSFOLD_BEAD_SOURCE": "artifacts/2oiu/2OIU.pdb", "TORUSFOLD_CG_TABLES": "results/production_tables.npz", "TORUSFOLD_HBOND_REPAIR": "1", "TORUSFOLD_REFINE_MODE": "refine", "TORUSFOLD_REFINE_STEPS": "1000", "TORUSFOLD_SEED": "20261005"}
+  [torch_gpu_refine] CG tables from results/production_tables.npz: bb_bond, angle, dihedral + base-level stacking eps 16.6 kJ/mol (sum, w 0,1,0.19)
+  [Torch GPU] refinement settings CHANGED BY THE ENVIRONMENT: TORUSFOLD_REFINE_MODE=refine (was fold)
+  [Torch GPU] refinement settings CHANGED BY THE ENVIRONMENT: TORUSFOLD_BEAD_SOURCE=artifacts/2oiu/2OIU.pdb
+  [Torch GPU] refine mode: initial beads from artifacts/2oiu/2OIU.pdb
+  [Torch GPU] refine mode: 1000 steps at 300 K, no anneal, no ladder (21 s)
+  [Torch GPU] Watson-Crick edge repair (chi): 39 bases rotated
+  [Torch GPU] CG -> all-atom via the SAMPLED bead frame (CG_to_allatom.exe not installed): C:\baidunetdiskdownload\torusfold-hybrid\artifacts\reuse_demo\2oiu_repair\2oiu_reuse.pdb
+returned: 2oiu_reuse.pdb  E=1499.4
