@@ -1646,6 +1646,47 @@ rest of the gap: 50 percent against 100 lies in the trace's 1.6 A and in the rig
 in that order, and the WC contacts (2 of 12) are the template's, not the trace's -- a reconstruction that
 satisfies the H-bond criterion is the same architectural question as the base frame being the model's own.
 
+## Part 28 — The pairing gap is not a twist: two negative results that close off the cheap repairs (2026-10-05)
+
+THE DIAGNOSTIC (`scripts/diagnose_wc_contacts.py`) prints every key-atom distance for every reference pair,
+so "1 of 12" stops being a count and becomes a shape. Deposit and products, same 12 pairs, criterion = all
+key contacts within 3.6 A:
+
+| structure | pairs satisfying the criterion | worst key contact |
+| :-- | --: | --: |
+| deposit (2OIU) | **12/12** | 3.4 A |
+| product: refine mode + bead frame | 1/12 | 7.3 A |
+| product: folding mode + bead frame | 1/12 | 12.7 A |
+| product: P-trace reconstruction | 1/12 | 6.6 A |
+
+The distances are 3.7 to 13 A -- the bases are not twisted, they are in the wrong place relative to their
+partners. That is a different failure from the stacking one the term fixes, and it is worth saying why: the
+CG field has no term that targets PAIRING geometry at all. It pairs by a harmonic on the N-N distance, and a
+reconstruction places bases from the trace and the rigid template, so nothing in the chain of tools is
+responsible for whether the Watson-Crick edges face each other. The scoreboard counted it (that is what the
+WC column has been) but nothing was fitted to it.
+
+THE CHEAP REPAIR, TESTED AND REJECTED (`scripts/repair_product_roll.py`). The three beads per residue are a
+rigid unit, and rotating that unit about the local backbone axis is one degree of freedom per residue that
+Part 16 measured to be soft (12.4 kJ/mol for 30 degrees). A Gauss-Seidel sweep over that single angle per
+residue, minimising the key distances of that residue's own pairs, three passes:
+
+| | contacts | stacked | rise | normal angle |
+| :-- | --: | --: | --: | --: |
+| before | 1/12 | 50.0% | 3.44 +- 0.65 A | 21.0 deg |
+| after 3 passes | **1/12** | **0.0%** | 4.43 +- 2.72 A | 52.3 deg |
+
+It buys nothing and costs the stacking the term had produced. **The pairing gap is therefore not a twist**:
+one rotational degree of freedom per residue cannot bring a base edge to its partner, because the edge is
+where the RIGID TEMPLATE puts it relative to three points that do not determine a base plane. That closes the
+second of the two cheap fixes, the first having been the reconstruction's own rigid fit under a distorted
+triad (Part 24).
+
+WHAT IS LEFT, named so the choice is explicit: a model whose base frame is its own (the beads defining a
+plane, or a fifth bead carrying a normal), or an all-atom stage that optimises base placement against the
+pair list with real hydrogen-bond terms -- which is not the one-degree roll tested here but a genuine
+placement problem, and the pipeline's amber path is the place it would live.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

@@ -49,13 +49,13 @@ correct `score_pdb()` implementation (it was never called in-tree).
 ## Far / long-range pair closure is still imperfect
 
 Distal (topologically far) pairing distances come out too large in early runs;
-RL MCTS + steering forces were added to pull them toward Watson闂傚倷鑳堕崑銊╁磿閹绘帩鍤曢柣顑芥殣ck
-geometry (C1闂傚倷鑳堕崑銊╁磿閼碱剛鐭堥柟缁㈠枛閻掑灚銇勯幒宥囶槮闁?闂?~10.5 闂? but this remains the main accuracy bottleneck for
+RL MCTS + steering forces were added to pull them toward Watson闂傚倸鍊烽懗鍫曞磻閵娾晛纾块柟缁樺俯閸ゆ洟鏌ｉ鑺ユck
+geometry (C1闂傚倸鍊烽懗鍫曞磻閵娾晛纾块柤纰卞墰閻牓鏌熺紒銏犳灈闁绘帒鐏氶妵鍕箳瀹ュ浂妲梺?闂?~10.5 闂? but this remains the main accuracy bottleneck for
 long sequences. Not fully solved.
 
 ## CG planar collapse (fixed)
 
-Initialization collapsed to a flat disc (`z 闂?0.6 闂備胶鍘ч悺銊х博? because CG started with
+Initialization collapsed to a flat disc (`z 闂?0.6 闂傚倷鑳堕崢褔鎮洪妸褏鍗? because CG started with
 `z = 0` and the energy surface flattened it. Fixed by injecting helical `z`
 into the CG initialization and a `CustomExternalForce` `z`-restraint during
 refinement. Keep the restraint on; do not "clean up" the `z` patch.
@@ -716,7 +716,7 @@ tables, term, seed, chain, initial state and step count. Until that difference i
 claim built on this comparison is readable; the two products it built are both unstacked and say nothing
 about the reconstruction. Settling it is a line-by-line A/B of the two run_round calls, not another run.
 
-## 2026-10-05 (11) 闁?Three bugs of mine, and the product result they were hiding
+## 2026-10-05 (11) 闂?Three bugs of mine, and the product result they were hiding
 
 Part 24's "the map and the rigid fit come apart" was wrong. Building both scoreboards with the CRYSTAL as a
 reference row -- where the two definitions must agree -- caught three errors in one afternoon: the product was
@@ -740,7 +740,7 @@ real sampled trace at 1.58 A of drift; what did not transfer was my own bookkeep
 against 100, and 2 of 12 WC contacts) is the trace's 1.58 A and the rigid template's idealisation, in that
 order.
 
-## 2026-10-05 (12) 閳?The production path: switches wired and verified, and the protocol is the blocker
+## 2026-10-05 (12) 闁?The production path: switches wired and verified, and the protocol is the blocker
 
 Four pieces wired, each verified by a log line: the base-level term reaches the refiner's CG stage through
 `TORUSFOLD_BASE_STACK=16.6:0,1,0.19` (same `cg_potentials` entry point as the loop, so one object, not
@@ -761,7 +761,7 @@ at the top of the ladder and the base frames are scrambled by construction.
 So the next piece is a refinement MODE: a flag that skips the anneal, drops the temperature ladder and runs a
 short room-temperature Langevin trajectory. Everything else it needs is in place.
 
-## 2026-10-05 (13) 鈥?The refinement mode: 50 percent stacked end to end
+## 2026-10-05 (13) 閳?The refinement mode: 50 percent stacked end to end
 
 `refine_mode="refine"` skips the 400 -> 300 K pre-fold and the REMD ladder and runs 1000 steps at 300 K
 through the loop's own sampler, on the beads read from the deposit. End to end on 2OIU with the term on
