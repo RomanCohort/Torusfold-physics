@@ -399,6 +399,30 @@ entry points to the module that implements it.
   OpenMM GPU platform. `isrnaclong.py` prefers it when it imports and falls back to OpenMM
   otherwise, so on a ROCm machine it is the path a new run takes.
 
+**What the custom field is for, and what it is not.** It is a deliberately simplified
+coarse-grained field — a first stage, not the accuracy-bearing one. The pipeline continues past
+it: RL-guided CG close at Level 2, PyRosetta at 2.6, and **Amber14-OL3 all-atom restrained
+minimisation and MD at Level 5** (`amber_refine.py`), with the A-form backbone torsions, sugar
+pucker and a ViennaRNA pairing restraint at 10.6 Å C1'–C1' that carries the structure into
+Watson-Crick geometry. The CG stage's job is to place a starting structure good enough to hand
+over; the CG topology is a scaffold, not a specification — `amber_refine.py` loosens its P-atom
+positional restraint from 50 to 10 kJ/mol/nm precisely so the all-atom field can move the
+backbone to satisfy base pairing instead of being pinned to the CG trace.
+
+So the entries below bound **how far the simplified field needs to get on its own**, not how
+accurate the pipeline is. One calibration target is explicitly not first-pass correctness: the
+recorded aim for this stage was a starting structure the all-atom refinement can take up. Where
+an entry below says a number is bounded rather than pinned, read it as "this is how well the
+cheap stage is known", which is a different question from whether the delivered structure is
+right.
+
+A consequence worth stating because it is easy to misread a zero. Pairing geometry is realised
+downstream, so a CG-stage structure that shows no base pairs at pairing distance can mean the
+CG stage did its job and the all-atom stage did not run — not that the field is broken. In the
+200 nt run of 2026-10-06 both downstream steps failed (`PyRosetta: module 'socket' has no
+attribute 'AF_UNIX'`; `amber_refine: No template found`), the Level-5 product came out
+coarse-grained, and the base-pair count was zero for that reason.
+
 **The table and the notes below are about the custom field** — every constant named is in
 `torch_cgsim.py`. They are a record of tuning that field against the deposited-structure
 database. They are not a statement about the OpenMM path, and they are not a statement about
@@ -438,10 +462,16 @@ coordinate by chemical identity. **No criterion** means no measurement of that k
 
 ### Custom-field tuning: what is settled, what is not
 
-These are the open items in the custom Torch field's calibration. They are recorded so the next
-person does not rediscover them as surprises. They are properties of that field's state of
-tuning, not of the pipeline as a whole — the OpenMM path (see the top of this section) is the
-one the shipped model comes from, and it does not share these items.
+These are the open items in the custom Torch field's calibration — the simplified first stage,
+not the accuracy-bearing one. They are recorded so the next person does not rediscover them as
+surprises. They are properties of that stage's state of tuning, not of the pipeline as a whole:
+the OpenMM path (see the top of this section) is the one the shipped model comes from, and the
+Amber14-OL3 stage is where pairing geometry and accuracy are realised.
+
+Read them with the stage's job in mind. A bounded number here says how well a deliberately cheap
+field is characterised; it does not say the pipeline is that accurate, and for several of these
+it does not say the pipeline is that inaccurate either — the downstream stage is meant to
+absorb what the cheap one leaves.
 
 Each entry says what it bounds, so a reader can tell whether it touches their use.
 

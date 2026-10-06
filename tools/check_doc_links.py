@@ -32,7 +32,14 @@ DOCS = ROOT / "docs"
 
 SKIP_DIRS = {".git", "__pycache__", "_calib", "_strays", "results", "output_web",
              "output_2013nt", "_cgdata", "_civenv", "node_modules",
-             "_empty_strays", "_docs_video", "_park_20261002"}
+             "_empty_strays", "_docs_video", "_park_20261002",
+             # `_iso/` is a second copy of this repository sitting inside the
+             # working tree -- 599 files, untracked, and not gitignored. The
+             # checker walks into it and reports its stale references as broken
+             # links in this repository: `_iso/scripts/ibi_armA_verdict.py:5` was
+             # blaming `docs/plan_c_basis_family.md`, which does not exist here
+             # in any file. A nested checkout is not part of this tree's links.
+             "_iso"}
 SCAN_EXT = {".py", ".md", ".txt", ".yml", ".yaml", ".toml", ".js", ".cmd", ".bat",
             ".json", ".mermaid", ".cfg", ".lock"}
 
