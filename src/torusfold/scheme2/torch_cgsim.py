@@ -1396,16 +1396,39 @@ def cg_energy_forces(pos_nm, pairs_ij, pair_w=None, lam=1.0,
         total_E += e_c; total_F += f_c
 
     # ── 9. Pair guide: O(P) analytic ──
+    #
+    # IT READS THE N BEADS, AND IT USED TO READ THE P BEADS. `PAIR_NN = 1.00 nm` is
+    # documented at :377 as "pairing target on N beads; native 0.954 +/- 0.115 nm", and the
+    # BPP term twenty lines below compares `NN(pi)`/`NN(pj)` against the same constant. This
+    # block compared `P(pi)`/`P(pj)` against it instead.
+    #
+    # `_sigmoid_f` charges +k*softplus((r - r0)/width): nothing closer than r0, a linearly
+    # growing pull beyond it, so with a P-P input the guide pulled the PHOSPHATES of every
+    # paired residue toward 10 A. In A-form RNA the P-P distance across a Watson-Crick pair is
+    # about 18 A while the N-N distance is about 9.9 A, so the term was at its strongest
+    # exactly on native geometry. Measured on 2OIU (scripts/crystal_energy_2oiu.py):
+    #
+    #   crystal, paired P-P 18.16 A (N-N 9.86 A)  ->  this term charges it 2387 kJ/mol
+    #   run outputs, paired P-P 8.4 A, minima 3.96 A  ->  charges them 251 kJ/mol
+    #
+    # It carried 100 percent of a 2135 kJ/mol gap between the experimental structure and the
+    # field's own output, and the outputs' paired phosphates ended up 4 A apart. The coordinate
+    # was the whole of it. `_sigmoid_f`'s docstring records an earlier fix to this same term
+    # (the sign of x) whose remedy was to lower K_PAIR_GUIDE from 100 to 20.8; that treated the
+    # symptom, because at 20.8 the collapse is still there.
+    #
+    # tests/test_pair_guide_coordinate.py pins which atom this reads, by perturbing P beads and
+    # N beads separately and requiring the guide's energy to follow only the second.
     if pairs_ij.numel() > 0:
         pi, pj = pairs_ij[:,0].long(), pairs_ij[:,1].long()
-        delta_g = pos_nm[:,P(pi)]-pos_nm[:,P(pj)]
+        delta_g = pos_nm[:,NN(pi)]-pos_nm[:,NN(pj)]
         dist_g = _safe_norm(delta_g, dim=-1, keepdim=True, eps=eps)
         e_g, sig_g = _sigmoid_f(dist_g, PAIR_NN, K_PAIR_GUIDE, 0.2)
         total_E += e_g.squeeze(-1).sum(dim=-1)
-        # E = -K*softplus((r0-r)/w), dE/dr = +K*sig/w, F = -dE/dx = -K*sig/w * delta/r
+        # E = +K*softplus((r - r0)/w), dE/dr = +K*sig/w, F = -dE/dx = -K*sig/w * delta/r
         f_g = -K_PAIR_GUIDE/0.2*sig_g*delta_g/dist_g
-        total_F.index_add_(1, P(pi), f_g.squeeze(-1))
-        total_F.index_add_(1, P(pj), -f_g.squeeze(-1))
+        total_F.index_add_(1, NN(pi), f_g.squeeze(-1))
+        total_F.index_add_(1, NN(pj), -f_g.squeeze(-1))
 
     # ── 10. BSJ guide: O(1) analytic ──
     d_bg = pos_nm[:,P(0)]-pos_nm[:,P(L-1)]
