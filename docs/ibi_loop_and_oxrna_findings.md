@@ -1841,6 +1841,14 @@ Chebyshev was a seven-chain number), and there is no arm-level evidence for K=16
 
 ## Part 31 — The reuse record: 2OIU executed end to end, and the three defects that writing it down caught (2026-10-06)
 
+**REMOVED FROM THE REPOSITORY, the same day.** The script and the files this Part describes --
+`scripts/record_2oiu_reuse.py`, `scripts/demo_circrna_reuse.py`, `artifacts/reuse_demo/**`,
+`docs/community_reuse_record.md` and `docs/wiki_community_reuse_section.md` -- were taken back out of the
+tree at the team's request, before any of it reached a judge-facing page. What follows is what was measured
+and what it caught, which is the part worth keeping; the files themselves are recoverable from the history
+at `74cbb1b`. The pair-guide fix this work isolated STAYS IN (`bc5e741`), because that one is a defect in
+the field rather than a publication.
+
 The community-reuse page needed a record a reader could EXECUTE, and the honest inventory was thin. 2OIU is
 the only circular RNA here that has ever been through the force-field stage; the 2,013 nt artifact is
 DECODED (`artifacts/2013nt/provenance.json`: `"is_a_rerun": false`); and the one other candidate prepared

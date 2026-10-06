@@ -843,6 +843,11 @@ contacts against 1/12. A checkout can still run it -- the force field and the re
 are committed inside the record directory, and the bead frame falls back to the product's own P/C4'/N with
 `bead_frame_source` saying so -- but the numbers are a claim about that tree, and now say so.
 
+Taken back out of the repository the same day at the team's request: the docs, `artifacts/reuse_demo/**`
+and the two scripts are recoverable at `74cbb1b`, and the local copies sit under
+`results/plan_c/_reuse_record_parked/`. The pair-guide fix this work isolated stays in the code
+(`bc5e741`) -- it is a field defect, not a write-up.
+
 Three defects came out of writing it down: the demo's compact-start writer was off by TEN (Å read as nm,
 6,631 Å radius for a 706 nt circle, past the PDB columns -- now a refusal with the ~1,060 nt ceiling); the
 ring-plane scoreboard flipped normals to +e3 after forming the mean normal, so the deposit read +0.056 Å of
