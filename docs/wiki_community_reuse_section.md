@@ -27,7 +27,10 @@ re-derives all of it from the committed files:
 
 That check rebuilds the all-atom product from the recorded bead frame and compares it byte for byte,
 re-measures the geometry, and re-hashes every file. It needs NumPy alone — no GPU, no PyTorch, no
-ViennaRNA and no external predictor, and it passes from a clean checkout of the repository.
+ViennaRNA and no external predictor, and it passes from a clean checkout of the repository. What it
+supports is two claims: the prediction reproduces the experimental structure to 1.39 Å along the backbone
+and to within 2 % of its base-to-base distance, and every number quoted below is re-derivable from files in
+the repository rather than from our machine.
 
 A reader who does have a GPU can also repeat the prediction itself: the record carries the force-field
 tables the run used, and a clean checkout of the repository reproduces the recorded product byte for byte.
@@ -44,12 +47,13 @@ so any later divergence can be traced to a different source tree instead of gues
 | Helical steps judged stacked | 100 % | 58.3 % |
 | Watson–Crick key contacts within 3.6 Å | 12 / 12 | 1 / 12 |
 
-Two further rows in the record make those two numbers interpretable rather than merely honest, because both
-are reconstructions the software performs on the experimental structure itself. Handed the deposit's own
-coordinates, the reconstruction keeps 83.3 % of the stacking and only 2 of the 12 contacts; handed the
-deposit's own P trace, it keeps 5 of 12. The model pairs bases with a distance restraint and no orientation
-term, so most of the pairing gap belongs to a step that never targeted pairing geometry, and the 1.39 Å of
-drift measured above costs the rest: 83.3 % → 58.3 % of stacking, 2 → 1 contacts.
+The last two rows need one more comparison to be read correctly, and the record carries it. Handed the
+deposit's own bead frame, the shipped reconstruction keeps 91.7 % of the stacking and 5 of the 12 contacts;
+handed the deposit's own P trace — the best any P-trace-based tool can do, with zero sampling error — it
+keeps 83.3 % and 2 of 12. The model pairs bases with a distance restraint and has no orientation term, so
+the pairing criterion is already down to 2 of 12 before the sampler runs, and the sampler costs one contact
+on top of that. Stacking decomposes the other way: 100 % → 83.3 % is the reconstruction, and 83.3 % → 58.3 %
+is the 1.39 Å of drift.
 
 The record also states what it is not, because a reuse record that only lists successes is not checkable.
 It is a refinement that starts from the deposited trace, not a prediction from sequence alone. The base
