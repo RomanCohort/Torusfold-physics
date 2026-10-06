@@ -1728,6 +1728,47 @@ and no refine_mode, so the environment switch cannot reach it; and the three ref
 read per call, so a caller that wants two different protocols in one process must pass arguments rather than
 set variables.
 
+## Part 30 — The base placement repair: the right degree of freedom, and its measured ceiling (2026-10-05)
+
+The plan for the pairing gap was "an all-atom stage that optimises base placement against the pair list", and
+the degree of freedom is the one the rejected attempt in Part 28 did not have. That attempt turned the WHOLE
+rigid residue about the local backbone axis and moved the base's partner-relative position and orientation
+together, which is why it destroyed stacking. This one rotates only the BASE atoms -- about the glycosidic
+bond C1' -> N9/N1, which is the chi torsion, a real degree of freedom of the molecule -- and its objective has
+two terms:
+
+    E = SUM over that base's pairs of (key-contact excess over 3.2 A)^2
+      + w_keep * (1 - n . n_reconstruction)
+
+The first is the pairing geometry nothing in the chain of tools targets; the second is what keeps the fix from
+undoing the stacking the field produced. Both are needed, and the measurement says so.
+
+ON THE PIPELINE'S OWN PRODUCT (2OIU, switched by the five environment variables of Part 29), four
+Gauss-Seidel passes over a 5-degree sweep of each base's chi:
+
+| | key contacts | stacked | rise |
+| :-- | --: | --: | --: |
+| deposit | 12/12 | 100% | 3.40 A |
+| product, before | 1/12 | 58.3% | 3.42 A |
+| **product, after the repair** | **3/12** | **58.3%** | 2.54 A |
+
+**Forty bases rotate, two more pairs come into contact, and the stacked fraction does not move** -- which is
+the whole difference from the Part 28 attempt. The rise of the surviving stacked steps does fall (3.42 -> 2.54
+A), so the repair trades a little depth for the contacts; that is the honest cost and it is visible in the
+same row.
+
+WHAT IT CANNOT DO is close a POSITIONAL gap, and the remaining nine pairs are exactly that: their partners sit
+4 to 13 A apart, and no twist of a base can bring its edge to a base that far away. Closing those needs the two
+bases to move relative to each other, which is the CG model's pairing geometry -- a harmonic on the N-N
+distance with no orientation in it -- and so it is a model-level item, not a post-hoc one. That is the measured
+boundary of C, and it is the reason the answer to "how hard is it for the model to own its base frame" is
+"about a week of plumbing and a real question about whether the folding path needs it".
+
+WIRED, off by default: `TORUSFOLD_HBOND_REPAIR=1` applies the repair inside the bead-frame all-atom step and
+prints how many bases it moved. Tests in `tests/test_base_placement_repair.py` -- the important one being
+that an EMPTY PAIR LIST MOVES NOTHING, because a version that "repairs" without pairs would silently rotate
+every base of every product and no measurement with pairs in it would notice.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

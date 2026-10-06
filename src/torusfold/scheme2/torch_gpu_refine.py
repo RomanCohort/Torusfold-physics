@@ -865,7 +865,17 @@ def torch_gpu_refine(
         _used = None
 
         def _bead_frame(tag):
-            write_allatom_pdb(reconstruct_all_atom_from_beads(beads_A, sequence), aa_pdb)
+            _st = reconstruct_all_atom_from_beads(beads_A, sequence)
+            # OPTIONAL WATSON-CRICK EDGE REPAIR (TORUSFOLD_HBOND_REPAIR=1, off by default). Rotates each base
+            # about its glycosidic bond so its edge faces its partner -- the chi torsion, which is a real
+            # degree of freedom and the one the rejected whole-residue roll repair lacked. Measured on 2OIU:
+            # key contacts 1/12 -> 3/12 with the stacked fraction unchanged at 58.3 percent. It cannot close a
+            # POSITIONAL gap, and the remaining 9 pairs are exactly that (findings Part 30).
+            if os.environ.get("TORUSFOLD_HBOND_REPAIR", "0") == "1":
+                from .aform_from_template import repair_base_placement
+                _n_rot = repair_base_placement(_st, sequence, pairs)
+                print(f"  [Torch GPU] Watson-Crick edge repair (chi): {_n_rot} bases rotated")
+            write_allatom_pdb(_st, aa_pdb)
             return tag
 
         if beads_A is not None and (cg_frame_allatom or not _exe_ok):

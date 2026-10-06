@@ -49,13 +49,13 @@ correct `score_pdb()` implementation (it was never called in-tree).
 ## Far / long-range pair closure is still imperfect
 
 Distal (topologically far) pairing distances come out too large in early runs;
-RL MCTS + steering forces were added to pull them toward Watson闂傚倸鍊搁崐鎼佸磹閻戣姤鍤勯柛顐ｆ礀绾惧鏌曟繛鐐珔缁炬儳娼￠弻鐔虹磼濡桨鍒婇梺鎼炲€栧ú鐔煎蓟閿濆鏁勯柤鎭掑劜椤撶k
-geometry (C1闂傚倸鍊搁崐鎼佸磹閻戣姤鍤勯柛顐ｆ礀绾惧鏌曟繛鐐珔缁炬儳娼￠弻銈囧枈閸楃偛顫梺娲诲幖閻楁捇寮婚悢铏圭＜闁靛繒濮甸悘鍫ユ⒑缂佹ê绗掗柣蹇斿哺婵＄敻宕熼姘鳖唺閻庡箍鍎卞ù鍌毼ｉ鈧?闂?~10.5 闂? but this remains the main accuracy bottleneck for
+RL MCTS + steering forces were added to pull them toward Watson闂傚倸鍊搁崐鎼佸磹閹间礁纾归柣鎴ｅГ閸ゅ嫰鏌涢锝嗙缁炬儳顭烽弻鏇熺箾閻愵剚鐝旂紒鐐劤濞硷繝寮婚悢铏圭＜婵☆垵妗ㄩ崚濠囨⒑閹肩偛鈧牕煤閻旂厧钃熼柨婵嗩樈閺佸嫰鏌ら幁鎺戝姕妞ゆ挾顕玨
+geometry (C1闂傚倸鍊搁崐鎼佸磹閹间礁纾归柣鎴ｅГ閸ゅ嫰鏌涢锝嗙缁炬儳顭烽弻鏇熺箾閻愵剚鐝旂紒鐐劤濞硷繝寮婚妶鍥ф瀳闁告鍋涢～顐︽⒑濞茶骞栭柣妤佹崌瀵鎮㈤搹鍦紲闂侀潧绻掓慨鐢告倶閸儲鈷戠紓浣姑粭鎺楁煟韫囨柨鍝哄┑锛勬暬瀹曠喖顢涘槌栧敽闁诲骸绠嶉崕鍗灻归崒姣硷綁顢氶埀顒€顫?闂?~10.5 闂? but this remains the main accuracy bottleneck for
 long sequences. Not fully solved.
 
 ## CG planar collapse (fixed)
 
-Initialization collapsed to a flat disc (`z 闂?0.6 闂傚倸鍊搁崐鐑芥嚄閸洖鍌ㄧ憸鏃堝箖濞差亜惟鐟滃繘宕? because CG started with
+Initialization collapsed to a flat disc (`z 闂?0.6 闂傚倸鍊搁崐鎼佸磹閻戣姤鍤勯柛顐ｆ礀閸屻劎鎲搁弮鍫濈畺婵炲樊浜滄儫閻熸粌绻樺畷? because CG started with
 `z = 0` and the energy surface flattened it. Fixed by injecting helical `z`
 into the CG initialization and a `CustomExternalForce` `z`-restraint during
 refinement. Keep the restraint on; do not "clean up" the `z` patch.
@@ -776,7 +776,7 @@ every existing caller's product -- and the docstring now carries the measured di
 made with the number in hand. What is left of the gap (50 against 100, and 2 of 12 WC contacts) is the trace's
 1.6 A and the rigid template's idealisation, in that order.
 
-## 2026-10-05 (14) 閳?The pairing gap is not a twist
+## 2026-10-05 (14) 闁?The pairing gap is not a twist
 
 `scripts/diagnose_wc_contacts.py` prints every key-atom distance per reference pair: the deposit satisfies
 all 12, and each product satisfies **1** (worst contacts 6.6-12.7 A). The bases are not twisted, they are in
@@ -793,7 +793,7 @@ three points that do not determine a base plane. What is left is a model whose b
 defining a plane, or a fifth bead carrying a normal), or an all-atom stage that optimises base placement
 against the pair list with real hydrogen-bond terms -- the pipeline's amber path being where that would live.
 
-## 2026-10-05 (15) 鈥?The production switch, by environment only, and the live panel survives it
+## 2026-10-05 (15) 閳?The production switch, by environment only, and the live panel survives it
 
 The one production refinement caller (isrnaclong.py:1822) carries another session's uncommitted work, so
 instead of editing it, the two caveats the inventory raised were answered with environment routes:
@@ -808,3 +808,20 @@ product is 1551 atoms with **58.3 percent of helical steps stacked** and a rise 
 crystal's 3.40 -- versus 0.0 percent for the folding path and 25.0 for the P-trace reconstruction.
 
 Still unreachable: the OpenMM fallback at isrnaclong.py:1854 has its own entry point and no refine_mode.
+
+## 2026-10-05 (16) 鈥?The base placement repair: +2 contacts at no cost in stacking, and its ceiling
+
+The right degree of freedom was the chi torsion: rotate only the BASE atoms about the glycosidic bond
+(C1' -> N9/N1), not the whole residue. On the pipeline's own 2OIU product (the five environment variables of
+the Part 29 switch), four Gauss-Seidel passes over a 5-degree sweep per base take the key contacts from
+**1/12 to 3/12** with the stacked fraction **unchanged at 58.3 percent** -- forty bases rotated. The rise of
+the surviving steps falls 3.42 -> 2.54 A: a little depth traded for the contacts, stated as the cost.
+
+What it cannot do is close a POSITIONAL gap: the remaining nine pairs' partners sit 4-13 A apart and no twist
+brings an edge to a base that far away. That needs the two bases to move relative to each other, which is the
+CG model's pairing geometry -- a distance target with no orientation in it -- so it is a model-level item.
+That is the measured ceiling of the cheap repair, and the honest answer to "how hard is it for the model to
+own its base frame": about a week of plumbing, plus the question of whether the folding path needs it.
+
+Wired as `TORUSFOLD_HBOND_REPAIR=1` (off by default, prints how many bases it moved). Tests in
+tests/test_base_placement_repair.py, the important one being that an empty pair list moves nothing.

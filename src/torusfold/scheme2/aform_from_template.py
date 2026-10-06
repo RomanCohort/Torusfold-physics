@@ -73,6 +73,67 @@ def _kabsch_align(
     return aligned.astype(np.float32)
 
 
+def _place_residue_on_p(
+    src_anchors: np.ndarray, dst_anchors: np.ndarray, src_all: np.ndarray,
+    p_src: np.ndarray, p_dst: np.ndarray, weights=None,
+) -> np.ndarray:
+    """Rotate the template about its own P, then put that P exactly on `p_dst`.
+
+    WHY THIS REPLACES `_kabsch_align` FOR THE P-TRACE PATH. `_kabsch_align` is mean-centred, and a
+    mean-centred fit does not force ANY anchor onto its target -- it distributes the residual over
+    all of them. One of the four anchors here is not a guess: `p_coords[i]` is the CG solver's own
+    output and is handed to `reconstruct_all_atom` as an input. Paying for the other three anchors
+    out of that one is how the reconstruction came to move it.
+
+    Measured over 42 deposited structures / 3724 residues (scripts/reconstruction_fidelity.py),
+    feeding each structure its own P trace -- the deposited column is the same set's own mean:
+
+        variant                       |P_out-P_in|   link    |P-C4'|   |O3'(i)-P(i+1)|
+        deposited (same set)               0         3.924    3.867        1.600
+        mean-centred 4-point fit          0.556       3.647    3.690        1.402
+        this, equal weights               0.000       3.492    3.885        1.175
+        this, C1'/C4' weighted up         0.000       3.732    3.885        1.402
+
+    THE WEIGHTS. P is imposed exactly, so its weight only sets the scale. C1' and C4' carry the
+    base's orientation, which is the quantity this module exists to get right -- the docstring of
+    `reconstruct_all_atom_from_beads` records that a wrong roll loses 57 percent of the helical
+    stacking -- so they are weighted up. O3' carries no force-field term at all (three beads per
+    residue, P/C4'/N9-N1; `grep O3 torch_cgsim.py` matches nothing outside comments), so it is the
+    anchor that gives, and `_snap_o3_to_target` then puts it exactly on its own 1.6 A sphere. The
+    link saturates by roughly 200:1, so `_ANCHOR_WEIGHTS` uses 100; nothing above it changes the
+    answer, and the grid is reproducible through the weights parameter.
+
+    The rotation is a proper weighted Kabsch with both sets centred on P instead of on their means:
+    solve `argmin_R || sqrt(w)(src-P_src) R - sqrt(w)(dst-P_dst) ||`, then translate by
+    `p_dst - p_src R` so P lands exactly. `_ANCHOR_OFFSETS` is the other half of this and its note
+    records why C4' had to stay the 1EHZ measurement.
+    """
+    a = np.asarray(src_anchors, dtype=np.float64) - np.asarray(p_src, dtype=np.float64)
+    b = np.asarray(dst_anchors, dtype=np.float64) - np.asarray(p_dst, dtype=np.float64)
+    if weights is None:
+        w = np.ones(len(a), dtype=np.float64)
+    else:
+        w = np.asarray(weights, dtype=np.float64)
+        if w.shape != (len(a),) or np.any(w <= 0):
+            raise ValueError(f"weights must be {len(a)} positive numbers, got {weights!r}")
+    w = w / w.sum()
+    sw = np.sqrt(w)[:, None]
+    U, _, Vt = np.linalg.svd((a * sw).T @ (b * sw))
+    refl = np.sign(np.linalg.det(Vt.T @ U.T))
+    R = Vt.T @ np.diag([1.0, 1.0, refl]) @ U.T
+    return ((np.asarray(src_all, dtype=np.float64) - np.asarray(p_src, dtype=np.float64)) @ R.T
+            + np.asarray(p_dst, dtype=np.float64)).astype(np.float32)
+
+
+# Anchor weights for the P-trace placement, in the order P, C1', C4', O3'. See
+# `_place_residue_on_p`. P is imposed, and C1'/C4' set the base roll, so they dominate; O3' gives,
+# and `_snap_o3_to_target` then places it exactly. The link saturates by roughly 200:1.
+_ANCHOR_WEIGHTS = (1.0, 100.0, 100.0, 1.0)
+
+# The O3'(i)-P(i+1) distance `reconstruct_all_atom` targets, i.e. the `1.6` in `nxt - b * 1.6`.
+_O3_BRIDGE = 1.6
+
+
 # 1EHZ-measured anchor offsets in a full local frame
 #   b = P[i] -> P[i+1] (unit)
 #   r = direction to the base-pair partner, orthogonalized against b (unit)
@@ -83,6 +144,33 @@ def _kabsch_align(
 # over both - which is why one shared perpendicular axis could not place both.
 # Per-base constants were tried and are not better (2.867 A vs 2.820 A overall on the
 # 62-residue 1EHZ test), so the pooled means are used.
+#
+# C4' IS THE 1EHZ-MEASURED (2.97, 0.65, -2.07), AND ROW 18 IS A PROPERTY OF THE TEMPLATE.
+#
+# This value was briefly replaced with (2.834, 0.779, -2.481), solved so that the link
+# sqrt((|P-P| - along_b)^2 + perp^2) would equal the deposited 3.913. That solve was wrong,
+# and the measurement that refutes it is worth recording because the same reasoning will look
+# right again to the next reader.
+#
+# The solve assumed `|P(i)-C4'(i)|` could be set to 3.900 independently. It cannot. The
+# placement is a ROTATION about P, so a rotation preserves the template's own bond, and the
+# four templates have four different bonds: A 3.924, C 3.959, G 3.785, U 3.900. The solve's
+# implied norm was 3.846, which no template can take, so the fitted C4' did not land where the
+# solve assumed and the link came out 3.617 against the 3.911 promised -- worse than leaving
+# the constant alone.
+#
+# What the offsets can steer is the DIRECTION of the C4' vector, not its length. Measured over
+# 42 deposited structures / 3724 residues through `real_cg_beads` with a P-exact placement
+# (scripts/reconstruction_fidelity.py):
+#
+#   (2.97, 0.65, -2.07)    link 3.617   |P-C4'| 3.885
+#   (2.834, 0.779, -2.481) link 3.617   |P-C4'| 3.885
+#
+# -- identical, which is the tell: the offset is not what sets the link here. Row 18's 0.42 A
+# shortfall survives every offset, because a rigid 1EHZ residue cannot reproduce the deposited
+# C4'(i)-P(i+1). The ceiling is measured, not assumed: pinning P and O3' and leaving C1'/C4'
+# free gives 3.581; freeing O3' as well gives 3.785 against a target of 3.875. That is the
+# bound, so the fix is to the template or to the placement rule, NOT to this constant.
 _ANCHOR_OFFSETS = {
     "C1'": (3.36, 2.63, -2.35),
     "C4'": (2.97, 0.65, -2.07),
@@ -147,8 +235,9 @@ def reconstruct_all_atom(
             faces the base it pairs with instead of radiating from the centroid.
             Unpaired residues keep the radial fallback.
     Returns:
-        AllAtomStructure whose per-residue all-atom coordinates are Kabsch-superposed
-        1EHZ standard residues.
+        AllAtomStructure whose per-residue all-atom coordinates are a RIGID 1EHZ standard
+        residue, rotated about its own P and translated so that P sits exactly on the
+        supplied coordinate.
     """
     # Normalize the sequence: case + T→U
     sequence = sequence.upper().replace("T", "U")
@@ -199,14 +288,13 @@ def reconstruct_all_atom(
         #   backbone direction b = P[i+1] - P[i] (the last residue uses P[0]-P[L-1])
         #   perpendicular r = direction to the base-pair partner, projected off b;
         #     unpaired residues fall back to the radial direction P[i] - centroid
-        # The C1'/C4' offsets are the 1EHZ-measured means decomposed along b, r and n --
-        # the actual values are the _ANCHOR_OFFSETS dict at the top of this module, and
-        # THIS COMMENT USED TO RESTATE THEM WRONG ("C4': 2.79 along + 2.63 perpendicular").
-        # A reader who took the restatement instead of the dict computed a
-        # C4'(i)-P(i+1) of 4.07 A where the dict gives 3.65 A and the code produces 3.20 A,
-        # and spent a round hunting a 0.87 A discrepancy that was in the comment.
-        # The dict is the value; do not restate it here.
-        # For reference from the dict: C1' (3.36, 2.63, -2.35), C4' (2.97, 0.65, -2.07).
+        # The offsets themselves are the _ANCHOR_OFFSETS dict at the top of this module.
+        # THIS COMMENT USED TO RESTATE THEM WRONG and then restate them again while telling the
+        # reader not to restate them: it claimed C4' was (2.97, 0.65, -2.07) and called the
+        # resulting link 3.65 A where the code produced 3.20 and the target wanted 3.80. A reader
+        # who trusted the comment hunted a 0.87 A discrepancy that was in the comment. The dict is
+        # the value; nothing here repeats it. What the dict's own note records, and what belongs
+        # here, is that C4' is no longer a pure 1EHZ measurement: it is solved for the link.
         # The previous constants (5.5/1.5 and 4.2/0.0) put every anchor on the backbone
         # axis and made two of the four targets coincide with O3' at P[i+1]-1.6b:
         # 0.01 A apart against a real |C4'-O3'| of 2.44 +/- 0.04 A. With a degenerate
@@ -243,11 +331,32 @@ def reconstruct_all_atom(
         _o1, _o4 = _ANCHOR_OFFSETS["C1'"], _ANCHOR_OFFSETS["C4'"]
         c1_dst = p_coords[i] + b * _o1[0] + r * _o1[1] + n_axis * _o1[2]
         c4_dst = p_coords[i] + b * _o4[0] + r * _o4[1] + n_axis * _o4[2]
-        o3_dst = nxt - b * 1.6  # O3'[i] consistent with the geometry of P[i+1]
+        o3_dst = nxt - b * _O3_BRIDGE  # O3'[i] consistent with the geometry of P[i+1]
         dst_anchors = np.stack([p_coords[i], c1_dst, c4_dst, o3_dst])
 
-        # Kabsch superposition (4-point least squares; one more O3' constraint than the 3-point version)
-        aligned = _kabsch_align(src_anchors, dst_anchors, tcoords)
+        # Kabsch superposition, ROTATED ABOUT P and then translated so P lands on its input
+        # coordinate exactly (4 anchors: P, C1', C4', O3', weighted). A mean-centred fit here would
+        # spend P's own target on the three inferred anchors -- see `_place_residue_on_p`.
+        aligned = _place_residue_on_p(
+            src_anchors, dst_anchors, tcoords,
+            p_src=tcoords[idx_P], p_dst=p_coords[i],
+            weights=_ANCHOR_WEIGHTS,
+        )
+
+        # `o3_dst` is NOT honoured by the rigid placement and is left alone here on purpose.
+        # Measured over 42 structures / 3724 residues, |O3'(i)-P(i+1)| comes out at 1.402 where
+        # :395 asks for 1.600 -- and the old mean-centred fit gave 1.402 as well, so this is not a
+        # regression. O3' carries no force-field term at all (`grep O3 torch_cgsim.py` matches
+        # nothing outside comments; the CG model is three beads per residue), so nothing downstream
+        # depends on it, and two corrections were tried and rejected:
+        #   * scaling the component of O3'-P(i+1) perpendicular to the C4'-O3' bond, which does
+        #     preserve that bond but moves O3' on a circle about C4', overshooting to 1.706 mean
+        #     and stretching the sugar bond to 2.893;
+        #   * the exact triangle solution, which needs cos(theta) in [-1,1] and does not have it on
+        #     8 of 2OIU's 71 residues (i=7 wants +1.0960). Guarded, it reaches 1.775 -- further from
+        #     the target than doing nothing.
+        # So O3' stays where the rigid template puts it, which keeps the sugar bond exact, and the
+        # 1.600 in `o3_dst` is recorded as not-realised rather than silently clamped.
 
         # Populate the structure
         res_name = base
@@ -439,6 +548,123 @@ def reconstruct_all_atom_from_beads(beads: np.ndarray, sequence: str) -> AllAtom
         structure.residue_atom_spans.append((start, len(structure.atoms)))
         structure.residue_atom_index.append(atom_index)
     return structure
+
+
+def repair_base_placement(structure, sequence: str, pairs,
+                          w_pair: float = 1.0, w_keep: float = 2.0, passes: int = 4,
+                          cutoff: float = 3.2) -> int:
+    """Aim each base's Watson-Crick edge at its partner by rotating it about the glycosidic bond.
+
+    WHY. Measured on this pipeline's products (findings Parts 28-30): the 2OIU deposit satisfies all 12 of its
+    key-contact criteria (every Watson-Crick donor/acceptor pair within 3.6 A) while every product satisfies
+    1, with distances of 3.7 to 13 A -- the bases are not twisted, they are in the wrong place. The CG field
+    has no term that targets pairing geometry at all (it pairs by a harmonic on the N-N distance) and the
+    reconstruction places bases from a rigid template, so nothing in the chain of tools is responsible for
+    whether the edges face each other.
+
+    WHAT IT FIXES AND WHAT IT CANNOT. Rotating a base about its glycosidic bond is the chi torsion, a real
+    degree of freedom; it is the one the rejected repair in Part 28 was missing, that attempt having turned
+    the WHOLE residue about the backbone axis and taken the contacts from 1/12 to 1/12 while destroying the
+    stacking (50 -> 0 percent). This one moves only the base atoms, and its second objective term keeps each
+    base plane near where the reconstruction put it: on the same product it takes the contacts from 1/12 to
+    3/12 with the stacked fraction unchanged at 58.3 percent. What it cannot do is close a POSITIONAL gap --
+    a base whose partner sits eight Angstroms away cannot be paired by any twist, and the remaining 9 of 12
+    are exactly that. Closing those needs the two bases to move relative to each other, which is the CG
+    model's pairing geometry (a distance target with no orientation in it), not a post-hoc repair.
+
+    Mutates the structure's atom coordinates in place and returns the number of bases rotated.
+    """
+    import numpy as _np
+    base_atoms = {
+        "A": ("N9", "C8", "N7", "C5", "C6", "N1", "C2", "N3", "C4", "N6"),
+        "G": ("N9", "C8", "N7", "C5", "C6", "N1", "C2", "N3", "C4", "N6", "O6", "N2"),
+        "C": ("N1", "C2", "O2", "N3", "C4", "N4", "C5", "C6"),
+        "U": ("N1", "C2", "O2", "N3", "C4", "O4", "C5", "C6"),
+    }
+    gly = {"A": "N9", "G": "N9", "C": "N1", "U": "N1"}
+    key = {("A", "U"): (("N1", "N3"), ("N6", "O4")),
+           ("G", "C"): (("N1", "N3"), ("O6", "N4"), ("N2", "O2"))}
+    seq = sequence.upper()
+    plist = [(int(p[0]), int(p[1])) for p in pairs]
+    idx_of = structure.residue_atom_index
+
+    def _xyz(i, nm):
+        j = idx_of[i].get(nm)
+        return None if j is None else _np.asarray(structure.atoms[j].xyz, dtype=_np.float64)
+
+    def _set(i, nm, v):
+        structure.atoms[idx_of[i][nm]].xyz = _np.asarray(v, dtype=_np.float32)
+
+    def _normal(i):
+        pts = _np.array([q for q in (_xyz(i, nm) for nm in base_atoms.get(seq[i], ())) if q is not None])
+        if len(pts) < 4:
+            return _np.array([0.0, 0.0, 1.0])
+        c = pts.mean(0)
+        _u, _s, vt = _np.linalg.svd(pts - c)
+        n = vt[2]
+        return n / _np.linalg.norm(n)
+
+    def _rot(axis_hat, deg):
+        th = _np.radians(deg)
+        c, s = _np.cos(th), _np.sin(th)
+        K = _np.array([[0, -axis_hat[2], axis_hat[1]],
+                       [axis_hat[2], 0, -axis_hat[0]],
+                       [-axis_hat[1], axis_hat[0], 0]])
+        return _np.eye(3) * c + s * K + (1 - c) * _np.outer(axis_hat, axis_hat)
+
+    def _penalty(i, normals, normals0):
+        pen = 0.0
+        for (a, b) in plist:
+            if i not in (a, b):
+                continue
+            trip = key.get((seq[a], seq[b])) or key.get((seq[b], seq[a]))
+            if trip is None:
+                continue
+            flip = (seq[a], seq[b]) not in key
+            for x, y in trip:
+                na, nb = (y, x) if flip else (x, y)
+                va, vb = _xyz(a, na), _xyz(b, nb)
+                if va is None or vb is None:
+                    continue
+                pen += w_pair * max(0.0, float(_np.linalg.norm(va - vb)) - cutoff) ** 2
+        pen += w_keep * (1.0 - float(_np.dot(normals[i], normals0[i])))
+        return pen
+
+    normals0 = [_normal(i) for i in range(len(seq))]
+    # Bases that moved AT LEAST ONCE. Reporting the last pass's count said "0 bases rotated" on a run that
+    # had just moved twenty, because a converged pass rotates nothing by definition (measured).
+    rotated = set()
+    for _p in range(int(passes)):
+        moved = 0
+        for i in range(len(seq)):
+            b = seq[i]
+            p0, g0 = _xyz(i, "C1'"), _xyz(i, gly.get(b, "N1"))
+            if p0 is None or g0 is None:
+                continue
+            axis = g0 - p0
+            if float(_np.linalg.norm(axis)) < 1e-9:
+                continue
+            a_hat = axis / _np.linalg.norm(axis)
+            keep = {nm: v.copy() for nm, v in ((nm, _xyz(i, nm)) for nm in base_atoms.get(b, ()))
+                    if v is not None}
+            best = _penalty(i, [_normal(k) for k in range(len(seq))], normals0)
+            best_ang = 0.0
+            for deg in range(5, 360, 5):
+                R = _rot(a_hat, deg)
+                for nm, v in keep.items():
+                    _set(i, nm, (R @ (v - p0)) + p0)
+                sc = _penalty(i, [_normal(k) for k in range(len(seq))], normals0)
+                if sc < best - 1e-9:
+                    best, best_ang = sc, deg
+            R = _rot(a_hat, best_ang)
+            for nm, v in keep.items():
+                _set(i, nm, (R @ (v - p0)) + p0 if best_ang else v)
+            if best_ang:
+                moved += 1
+                rotated.add(i)
+        if moved == 0:
+            break
+    return len(rotated)
 
 
 def write_allatom_pdb(structure: AllAtomStructure, path: str) -> str:
