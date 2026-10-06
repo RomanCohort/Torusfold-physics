@@ -168,3 +168,55 @@ def test_the_entry_point_prints_the_note_it_gets_back():
     assert "if _refine_env_note:" in src, "the note must be printed, not only computed"
     assert 'print("  [Torch GPU] " + _refine_env_note)' in src, (
         "the resolved note has to reach stdout, which is the only place a run says what it ran")
+
+# ---------------------------------------------------------------------------------------------
+# TORUSFOLD_BEAD_SOURCE: where the refinement's INITIAL BASE FRAMES come from (added with the
+# environment-only production switch, findings Part 29). Measured on 2OIU: beads read from the
+# deposit keep a base-frame cosine of 0.897 and the product stacks 58.3 percent of its helical steps,
+# while beads FABRICATED from a P-only input give 0.607 and an unstacked product. The argument wins,
+# then the environment; a path that does not exist is refused loudly, because a silent fall-back to
+# fabricated beads is the failure this knob exists to prevent.
+
+
+def _bead_source(value=None):
+    import torusfold.scheme2.torch_gpu_refine as T
+    return T._resolve_bead_source(value)
+
+
+def test_bead_source_argument_wins(monkeypatch, tmp_path):
+    f = tmp_path / "deposit.pdb"
+    f.write_text("END\n", encoding="utf-8")
+    monkeypatch.setenv("TORUSFOLD_BEAD_SOURCE", str(tmp_path / "other.pdb"))
+    path, note = _bead_source(str(f))
+    assert path == str(f)
+    assert note == ""
+
+
+def test_bead_source_environment_is_used_and_reported(monkeypatch, tmp_path):
+    f = tmp_path / "deposit.pdb"
+    f.write_text("END\n", encoding="utf-8")
+    monkeypatch.setenv("TORUSFOLD_BEAD_SOURCE", str(f))
+    path, note = _bead_source(None)
+    assert path == str(f)
+    assert "TORUSFOLD_BEAD_SOURCE" in note
+
+
+def test_bead_source_absent_is_none(monkeypatch):
+    monkeypatch.delenv("TORUSFOLD_BEAD_SOURCE", raising=False)
+    path, note = _bead_source(None)
+    assert path is None and note == ""
+
+
+def test_bead_source_missing_file_is_refused(monkeypatch, tmp_path):
+    monkeypatch.setenv("TORUSFOLD_BEAD_SOURCE", str(tmp_path / "nope.pdb"))
+    with pytest.raises(SystemExit) as e:
+        _bead_source(None)
+    assert "TORUSFOLD_BEAD_SOURCE" in str(e.value)
+
+
+def test_refine_branch_reports_progress_to_on_report():
+    """The refine path must call on_report: the folding path hangs it on the REMD instance, which refine
+    mode never builds, so without this a live-panel consumer sits on the input coordinates."""
+    import torusfold.scheme2.torch_gpu_refine as T
+    assert "on_report(" in inspect.getsource(T._refine_langevin)
+    assert "on_report=on_report" in inspect.getsource(T.torch_gpu_refine)

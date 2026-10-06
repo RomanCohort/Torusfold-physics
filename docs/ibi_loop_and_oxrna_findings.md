@@ -1687,6 +1687,47 @@ plane, or a fifth bead carrying a normal), or an all-atom stage that optimises b
 pair list with real hydrogen-bond terms -- which is not the one-degree roll tested here but a genuine
 placement problem, and the pipeline's amber path is the place it would live.
 
+## Part 29 — The production switch, done with environment variables and no edited call site (2026-10-05)
+
+The call-site inventory closed with a recommendation to switch `isrnaclong.py:1822` (the one production
+caller that is a REFINEMENT) and two caveats: its live panel would go quiet, and its P-only round inputs mean
+the beads would still be fabricated unless `bead_source_pdb` is passed too. Both are now answered WITHOUT
+editing that file -- which matters, because it carries another session's uncommitted work:
+
+* **`TORUSFOLD_BEAD_SOURCE`** joins `TORUSFOLD_REFINE_MODE/_STEPS/_TEMP` as an environment route to the
+  initial base frames, with the same precedence (argument, then environment) and the same loud refusal of a
+  path that does not exist. A silent fall-back to fabricated beads is the failure it exists to prevent.
+* **The refine path now calls `on_report`**: the folding path hangs that callback on the BatchedREMD2D
+  instance, which refine mode never builds, so a live-panel consumer would have sat on the input coordinates
+  for the whole refinement. It is called per chunk of the trajectory (ten chunks) with the contract
+  BatchedREMD2D uses -- `(step, total, energy, P coordinates in Angstrom)`.
+
+THE VERIFICATION, switched by five environment variables and nothing else, run through the `verbose=False`
+path a predictor uses:
+
+    TORUSFOLD_CG_TABLES=results/production_tables.npz
+    TORUSFOLD_BASE_STACK=16.6:0,1,0.19
+    TORUSFOLD_REFINE_MODE=refine
+    TORUSFOLD_REFINE_STEPS=1000
+    TORUSFOLD_BEAD_SOURCE=artifacts/2oiu/2OIU.pdb
+
+| quantity | value | reference |
+| :-- | --: | --: |
+| the run says what changed | `CHANGED BY THE ENVIRONMENT: TORUSFOLD_REFINE_MODE=refine (was fold)` and the bead source | -- |
+| on_report calls | **10** `(100, 1000, 1524.0, (71, 3))` ... | the folding path's contract |
+| trace vs the deposit | **1.41 A** | -- |
+| beads: base_dist / base_rise / base_cos | 5.200 / +3.335 / **0.897** | 5.306 / +3.186 / 0.901 |
+| product | 1551 atoms, **58.3 percent of helical steps stacked**, rise 3.42 +- 0.54 A, normal angle 17.9 deg | crystal 100 percent, 3.40 +- 0.13 A, 7.8 deg |
+
+So the deployment question the inventory raised is now a deployment answer: setting five variables turns the
+production refinement into the protocol that produces a stacked, all-atom product, keeps the live panel
+alive, and says so in its own log. No call site had to be touched, and none was.
+
+WHAT IS STILL NOT REACHABLE: the OpenMM fallback at `isrnaclong.py:1854` has its own refinement entry point
+and no refine_mode, so the environment switch cannot reach it; and the three refine knobs plus this one are
+read per call, so a caller that wants two different protocols in one process must pass arguments rather than
+set variables.
+
 
 ## Part 11 — The delivered tables through the shipped refiner: 2OIU, fitted against analytic (2026-10-04)
 

@@ -226,7 +226,28 @@ def _cg_potential_kwargs():
     return _CG_TABLE_KW
 
 
-def _refine_langevin(beads_A, sequence, pairs, nsteps, temp, seed=None):
+BEAD_SOURCE_ENV = "TORUSFOLD_BEAD_SOURCE"
+
+
+def _resolve_bead_source(bead_source_pdb: Optional[str]) -> tuple:
+    """(path or None, note) for where the initial base frames come from.
+
+    Same shape and same reason as _resolve_refine_settings: the refinement's initial state matters as much
+    as its protocol (measured on 2OIU, beads read from the deposit keep a base-frame cosine of 0.907 while
+    beads FABRICATED from a P-only input give 0.607), and no call site passes bead_source_pdb -- the round
+    inputs are P-only -- so the switch has to be reachable without editing them.
+    """
+    if bead_source_pdb:
+        return bead_source_pdb, ""
+    env = os.environ.get(BEAD_SOURCE_ENV, "").strip()
+    if not env:
+        return None, ""
+    if not os.path.exists(env):
+        raise SystemExit(f"{BEAD_SOURCE_ENV}={env} does not exist")
+    return env, f"{BEAD_SOURCE_ENV}={env}"
+
+
+def _refine_langevin(beads_A, sequence, pairs, nsteps, temp, seed=None, on_report=None):
     """A short ROOM-TEMPERATURE Langevin trajectory, in nm, returning (final P in A, final beads in A).
 
     WHY IT IS HERE. torch_gpu_refine's CG stage is a FOLDING protocol: a six-stage 400 -> 300 K pre-fold and
@@ -269,15 +290,40 @@ def _refine_langevin(beads_A, sequence, pairs, nsteps, temp, seed=None):
             for c in ("bb_bond", "angle", "dihedral"):
                 if f"{c}__U" in z.files:
                     tab[c] = dict(tab[c], U=np.asarray(z[f"{c}__U"], dtype=float))
-    res = _IC.run_round(pos=pos, vel=_torch.zeros_like(pos), ij=ij, pw=pw,
-                        temps=_torch.full((1,), float(temp), dtype=_torch.float64), tab=tab,
-                        nsteps=int(nsteps), burn=0, stride=25, blocks=4, friction=1.0,
-                        force_cap=5000.0, pot_kw=_cg_potential_kwargs(),
-                        seed=(seed if seed is not None else 20261005), nrep=1, progress=False,
-                        constraints=_mk_con(L), relax=0, collect_positions=True,
-                        log=lambda *a, **k: None)
-    frames = res.positions.numpy()[:, 0].reshape(-1, 3 * L, 3)
-    final_nm = frames[-1]
+    # CHUNKED, so that on_report still fires. In the folding path the callback hangs off the REMD instance
+    # and is called every replica report; refine mode never builds that instance, and a caller whose live
+    # panel is driven by on_report (isrnaclong.py:1851) would otherwise sit on the input coordinates for the
+    # whole refinement. Ten chunks is enough for a progress bar and costs nothing: each chunk is the same
+    # Langevin run with the state and the velocities carried across, and the seed advances by the chunk
+    # index so the streams stay independent (the module docstring's rule for repeated calls).
+    from . import torch_cgsim as _C
+    n = int(nsteps)
+    n_chunks = max(1, min(10, n // 100)) if n >= 100 else 1
+    per = max(1, n // n_chunks)
+    pos_t = pos
+    vel_t = _torch.zeros_like(pos)
+    done = 0
+    final_nm = None
+    for k in range(n_chunks):
+        res = _IC.run_round(pos=pos_t, vel=vel_t, ij=ij, pw=pw,
+                            temps=_torch.full((1,), float(temp), dtype=_torch.float64), tab=tab,
+                            nsteps=per, burn=0, stride=25, blocks=4, friction=1.0,
+                            force_cap=5000.0, pot_kw=_cg_potential_kwargs(),
+                            seed=(None if seed is None else int(seed) + k), nrep=1, progress=False,
+                            constraints=_mk_con(L), relax=0, collect_positions=False,
+                            log=lambda *a, **k2: None)
+        pos_t, vel_t = res.pos, res.vel
+        final_nm = pos_t[0].detach().cpu().numpy().reshape(3 * L, 3)
+        done += per
+        if on_report is not None:
+            try:
+                with _torch.no_grad():
+                    _e = float(_C.cg_energy_forces(pos_t, ij, pw, force_cap=5000.0,
+                                                   **_cg_potential_kwargs())[0].mean())
+                # The same contract BatchedREMD2D uses: (step, total, energy, P coordinates in ANGSTROM).
+                on_report(done, n, _e, final_nm[0::3] * 10.0)
+            except Exception as _exc:
+                print(f"  [Torch GPU] refine progress callback failed: {_exc}")
     # The CG energy of the final state, so the caller's diag carries a real number: this path does not go
     # through the REMD block, which is the only other place final_e is set.
     import torch as _t2
@@ -465,19 +511,22 @@ def torch_gpu_refine(
     _beads_used = None
     if refine_mode == "refine":
         from .aform_from_template import real_cg_beads, beads_from_pdb
-        _beads_used = beads_from_pdb(bead_source_pdb or input_pdb)
+        _bead_src, _bead_note = _resolve_bead_source(bead_source_pdb)
+        if _bead_note:
+            print(f"  [Torch GPU] refinement settings CHANGED BY THE ENVIRONMENT: {_bead_note}")
+        _beads_used = beads_from_pdb(_bead_src or input_pdb)
         if _beads_used is None or _beads_used.shape[0] != len(sequence):
             _beads_used = real_cg_beads(np.asarray(final_p_coords, dtype=np.float64), sequence)
             print("  [Torch GPU] refine mode: initial beads FABRICATED from the P trace")
         else:
-            print(f"  [Torch GPU] refine mode: initial beads from {bead_source_pdb or input_pdb}")
+            print(f"  [Torch GPU] refine mode: initial beads from {_bead_src or input_pdb}")
         _t0 = time.time()
         # TORUSFOLD_SEED has to reach THIS sampler too: the folding path resolves the seed once and passes
         # it down, while this branch used to hand _refine_langevin the raw argument, whose default is None
         # and which then fell back to a hard-coded 20261005 -- so a seeded refinement was reproducible but
         # not the seed it was asked for. Found by the call-site inventory in docs/refine_mode_call_sites.md.
         _p_A, _b_A, _e_A = _refine_langevin(_beads_used, sequence, pairs, refine_steps, refine_temp,
-                                            seed=_resolve_seed(seed, False))
+                                            seed=_resolve_seed(seed, False), on_report=on_report)
         final_p_coords = _p_A
         final_e = _e_A
         import torch as _t
