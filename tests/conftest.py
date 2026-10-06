@@ -1,4 +1,4 @@
-"""Pytest configuration for the TorusFold-Hybrid test suite.
+﻿"""Pytest configuration for the TorusFold-Hybrid test suite.
 
 Two separate problems are handled here, both measured rather than assumed.
 
@@ -43,7 +43,7 @@ collected on its own in an environment with core deps and no torch, and these ar
 twenty that raised ModuleNotFoundError.
 
 They are skipped rather than deleted because without a GPU the suite on a developer
-machine is the full suite -- 282 passed, 2 skipped -- and every test here runs there.
+machine is the full suite -- 365 passed, 2 skipped -- and every test here runs there.
 Skipping only inside a torch-less environment keeps that true while making CI honest:
 a run reports what it actually exercised instead of dying at 1 s.
 

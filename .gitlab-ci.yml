@@ -42,12 +42,13 @@ default:
       - .cache/pip/
 
 # ── the gate ──────────────────────────────────────────────────────────────────
-# Scope, stated so the log is not read as more than it is. Measured 2026-10-02 in this
-# exact configuration: 36 test modules on disk, 24 excluded, 12 executed ->
-# **39 passed, 3 skipped in 4.4 s**. Of the 24 exclusions, 15 import torch (or call
-# importorskip("torch") at module level), 8 reach torch through something they import,
-# and 1 is the standalone script in the header. The full suite is 282 passed / 2 skipped
-# and needs torch; see README.md "Testing & CI".
+# Scope, stated so the log is not read as more than it is. Re-measured 2026-10-06 by
+# running these commands with `torch/` moved out of the interpreter, which reproduces the
+# runner's state without needing the runner: 45 test modules on disk, 24 excluded,
+# 21 executed -> **115 passed, 6 skipped in 3.4 s**. Of the 24 exclusions, 15 import torch
+# (or call importorskip("torch") at module level), 8 reach torch through something they
+# import, and 1 is the standalone script in the header. The full suite is 365 passed /
+# 2 skipped and needs torch; see README.md "Testing & CI".
 #
 # `pip install -e .` WITH dependencies, deliberately: the pins in pyproject.toml are the
 # intent, and --no-deps is what made them decorative. Verified in this configuration:

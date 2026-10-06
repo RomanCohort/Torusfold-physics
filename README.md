@@ -549,8 +549,9 @@ python scripts/audit_field_state.py                  # every live constant, and 
 python scripts/scan_unreturned_energies.py           # terms computed and never read
 ```
 
-`python -m pytest tests/` is 135 tests. Several of them exist to stop a constant moving away from
-the measurement above without the suite saying so.
+`python -m pytest tests/` is the full suite (365 passed, 2 skipped on this machine; see
+"Testing & CI" for the counts and for the one failure CI does not run). Several of its tests exist
+to stop a constant moving away from the measurement above without the suite saying so.
 
 The eighteen silent defects that were found and repaired in this field - a number this file and
 `docs/attribution.md` both used to state as nine, without a list - are indexed in
@@ -565,7 +566,7 @@ changed. Run these four and compare against the table below.
 
 ```
 python scripts/audit_field_state.py                  # every live constant, and which entry points are live
-python -m pytest tests/ -q                           # 135 tests; several pin the constants to their measurements
+python -m pytest tests/ -q                           # the full suite; several pin the constants to their measurements
 python scripts/ibi_round0.py 8 8000                  # the sim/ref residual, 8 replicas x 16 ps
 python scripts/check_field_after_fix.py 40.0 2 6000  # 40 ps of dynamics, then minimisation
 ```
@@ -745,11 +746,13 @@ GenBank as needed.
   say so, because two gates over one codebase that are allowed to diverge is the same
   defect `test_skills_in_sync.py` exists to catch. `python scripts/validate_ci_config.py`
   parses both locally: a pipeline file that does not parse fails silently from here.
-  - **Measured scope of the gate**: 36 test modules on disk, **24 excluded, 12
-    executed → 39 passed, 3 skipped in 4.4 s**. Of the 24, fifteen import torch (or call
+  - **Measured scope of the gate**: 45 test modules on disk, **24 excluded, 21
+    executed → 115 passed, 6 skipped in 3.4 s**. Of the 24, fifteen import torch (or call
     `importorskip("torch")` at module level), eight reach torch through something they
     import, and one is a standalone script. The CI runner has no torch and no GPU, so
-    this is a smoke gate, not the full suite.
+    this is a smoke gate, not the full suite. Re-measured 2026-10-06 by running the two
+    job scripts with `torch/` moved out of the interpreter, which reproduces the
+    runner's state: the counts above are from that run, not from a machine that has torch.
   - The exclusion list lives in `tests/conftest.py` with the measurement that produced
     it. A collection error aborts the run, which is what makes the gate trustworthy: a
     new module that cannot be collected fails CI rather than quietly reducing coverage.
@@ -761,14 +764,16 @@ GenBank as needed.
   `pytest`. `testpaths` in `pyproject.toml` scopes the bare command to `tests/`,
   which matters: `scripts/` holds seven standalone `test_*.py` diagnostics that
   raise on import, so a bare `pytest` used to exit on a failure that was not one.
-- **282 passed, 2 skipped, 56 s** on the reference environment
+- **365 passed, 2 skipped, 72 s** on the reference environment
   (`C:\ana\envs\comfyui`, Python 3.11.15 / torch 2.12.0a0+rocm7.13.0a20260313 /
-  OpenMM 8.5.2 / ViennaRNA 2.7.2). Re-measured 2026-10-02, replacing an earlier
-  "145 tests, 24 s" claim that had gone stale and then a "279 tests" count that the new
-  CI-gate test moved. One of the two skips is `test_ci_gate_is_visible.py`'s opt-in
+  OpenMM 8.5.2 / ViennaRNA 2.7.2), re-measured 2026-10-06, with one failure that is not
+  part of either count: `test_bond_constraints.py::test_an_ibi_round_excludes_the_constrained_coordinates`.
+  That module is on the torch-exclusion list, so CI never runs it; it fails on this
+  machine against the committed code and is not caused by the environment. One of the two
+  skips is `test_ci_gate_is_visible.py`'s opt-in
   stale-exclusion probe (~50 s, one interpreter per excluded module); set
   `TF_CHECK_CI_EXCLUSIONS=1` to run it. The sibling environment
-  `C:\ana\envs\circrna3d` runs the same suite as **282 passed, 2 skipped** — it lacks
+  `C:\ana\envs\circrna3d` runs the same suite — it lacks
   the `[ml]` extras, so the CUDA half of `test_table_potential_device.py` skips there.
   Both wall times were taken with an unrelated MD job occupying the same machine, so
   treat them as a spread rather than a benchmark. Most test files use

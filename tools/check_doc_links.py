@@ -32,14 +32,7 @@ DOCS = ROOT / "docs"
 
 SKIP_DIRS = {".git", "__pycache__", "_calib", "_strays", "results", "output_web",
              "output_2013nt", "_cgdata", "_civenv", "node_modules",
-             "_empty_strays", "_docs_video", "_park_20261002",
-             # `_iso/` is a second copy of this repository sitting inside the
-             # working tree -- 599 files, untracked, and not gitignored. The
-             # checker walks into it and reports its stale references as broken
-             # links in this repository: `_iso/scripts/ibi_armA_verdict.py:5` was
-             # blaming `docs/plan_c_basis_family.md`, which does not exist here
-             # in any file. A nested checkout is not part of this tree's links.
-             "_iso"}
+             "_empty_strays", "_docs_video", "_park_20261002"}
 SCAN_EXT = {".py", ".md", ".txt", ".yml", ".yaml", ".toml", ".js", ".cmd", ".bat",
             ".json", ".mermaid", ".cfg", ".lock"}
 
@@ -51,11 +44,38 @@ SELF = {"check_doc_links.py", "retire_docs.py", "finish_docs_retirement.py"}
 # `docs/foo.md`, `docs/archive/foo.md`, optionally with a :line suffix.
 PATH_RE = re.compile(r"docs/([A-Za-z0-9_./-]+\.[A-Za-z0-9]+)(?::(\d+))?")
 
+
+def _nested_repo_roots() -> set:
+    """Subdirectories of ROOT that are themselves git repositories.
+
+    WHY THIS RULE INSTEAD OF A LIST OF NAMES. This checkout has twice acquired a second
+    copy of the repository inside it -- `_iso/` first, then `_repro_check/` -- each
+    untracked, each not gitignored, each holding an older `scripts/ibi_armA_verdict.py`
+    whose `docs/plan_c_basis_family.md` reference was already repaired here. The checker
+    walked into both and reported those stale references as broken links in this
+    repository. Adding the name `_iso` fixed that copy and not the next one, which is the
+    failure mode of a blocklist: it only knows the copies someone already tripped over.
+
+    A nested working copy is never part of this tree's links, whatever it is called, so
+    the rule is the shape of the thing rather than its name. Its own files are read by
+    whoever owns it, in its own checkout.
+    """
+    out = set()
+    for d in ROOT.rglob(".git"):
+        if d.is_dir() and d.parent != ROOT:
+            out.add(d.parent)
+    return out
+
+
+_NESTED_REPOS = _nested_repo_roots()
+
 found = {}
 for f in sorted(ROOT.rglob("*")):
     if not f.is_file() or f.suffix not in SCAN_EXT:
         continue
     if SKIP_DIRS & set(f.parts) or f.name in SELF:
+        continue
+    if any(f == r or r in f.parents for r in _NESTED_REPOS):
         continue
     try:
         text = f.read_text(encoding="utf-8")

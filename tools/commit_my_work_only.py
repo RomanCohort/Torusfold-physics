@@ -105,6 +105,9 @@ MINE_NEW = '''                    # 鈹€鈹€ Energy-ratio diagnostics 鈹€
 
 MINE = [
     "README.md",
+    ".gitlab-ci.yml",
+    ".github/workflows/ci.yml",
+    "tests/conftest.py",
     "tools/check_doc_links.py",
     "tools/commit_my_work_only.py",
     "tools/find_broken_link_source.py",
