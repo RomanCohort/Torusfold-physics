@@ -134,3 +134,7 @@ output_web/uploaded.pdb
 # accumulate files that are not source, and a file that is deleted on one machine
 # and not another is worse than a file that is parked.
 _strays/
+
+# CG_to_allatom toolset copied to an ASCII path (see docs: non-ASCII paths break the exe)
+_isrnacirc_ascii/
+

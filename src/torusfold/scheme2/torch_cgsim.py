@@ -3449,8 +3449,37 @@ class BatchedREMD2D:
                           f"Tri/CG={tri_cg_ratio:.3f}{dE_diag} "
                           f"T-acc={[f'{a}/{t}' for a,t in zip(accT,attT)]}")
 
-                    # ⚠️ Energy-ratio diagnostics
-                    if tri_cg_ratio > 0.1:
+                    # ── Energy-ratio diagnostics ──
+                    #
+                    # These have to say WHICH situation they are in, because
+                    # Tri/CG = 0 has two very different causes and only one of
+                    # them is a problem the reader can act on:
+                    #
+                    #   tri_pot is None   the term is off, either because
+                    #                     use_trirnasp was False or because
+                    #                     TriRNASPTorch failed to load and the
+                    #                     handler above fell through to None.
+                    #                     Tri/CG is 0 BY CONSTRUCTION. Telling
+                    #                     the reader to "raise trirnasp_scale"
+                    #                     here points them at a knob that cannot
+                    #                     take effect.
+                    #   tri_pot is not None  the term is on and its share is
+                    #                     genuinely wrong, which is what the two
+                    #                     thresholds below are for.
+                    #
+                    # Measured on the 200 nt run of 2026-10-06: the warning
+                    # fired on every block while isrnaclong passed
+                    # use_trirnasp=False, and "TriRNASP statistical potential
+                    # loaded" never appeared in the log -- so the term was never
+                    # constructed and the advice was impossible to follow.
+                    if tri_pot is None:
+                        if rep == 0:
+                            reason = ("use_trirnasp=False" if not self.use_trirnasp
+                                      else "TriRNASPTorch failed to load; see the "
+                                           "'failed to load' line above")
+                            print(f"    [GPU-2D] TriRNASP: off ({reason}). "
+                                  f"Tri/CG=0 is expected, not a diagnostic.")
+                    elif tri_cg_ratio > 0.1:
                         print(f"    [GPU-2D] ⚠️ Tri energy share too high ({tri_cg_ratio:.1%}), "
                               f"may cause CG-Tri competition! Consider lowering trirnasp_scale")
                     elif tri_cg_ratio < 0.001:

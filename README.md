@@ -385,9 +385,28 @@ entry points to the module that implements it.
 
 ## Force-field constants: what each one is set by
 
-Every constant in `src/torusfold/scheme2/torch_cgsim.py` is set by one of four things, and the
-four are not equally strong. This is the index; the reasoning, the numbers and the failed attempts
-are in `docs/statistical_potentials_as_forces.md` and in the comment at each constant.
+**Which of the two refinement paths this section is about.** This repository carries two:
+
+- the **OpenMM path** (`openmm_gpu_refiner.py`), a drop-in replacement for the CPU MD
+  refinement in `IsRNAcirc.exe`, with a CUDA → OpenCL → CPU fallback chain. This is the path
+  the shipped model and the experimental check came from:
+  `artifacts/2013nt/provenance.json` records `REMARK 1 CREATED WITH OPENMM 8.5.2`, and
+  `docs/REPRODUCTION_RESOURCES.md` records the 2OIU force-field validity check (17 min CPU,
+  RMSD 1.83 Å to the crystal). That check carries its own caveat there, and it applies here:
+  the 1.83 Å is reached **when the relaxation starts from the crystal**, which is a statement
+  that the field does not distort a correct structure, not a de-novo accuracy claim.
+- the **custom Torch field** (`torch_cgsim.py`), added for AMD/ROCm acceleration without an
+  OpenMM GPU platform. `isrnaclong.py` prefers it when it imports and falls back to OpenMM
+  otherwise, so on a ROCm machine it is the path a new run takes.
+
+**The table and the notes below are about the custom field** — every constant named is in
+`torch_cgsim.py`. They are a record of tuning that field against the deposited-structure
+database. They are not a statement about the OpenMM path, and they are not a statement about
+the shipped artifact.
+
+Every constant below is set by one of four things, and the four are not equally strong. This is
+the index; the reasoning, the numbers and the failed attempts are in
+`docs/statistical_potentials_as_forces.md` and in the comment at each constant.
 
 | constant | value | set by | where the number comes from |
 | :-- | --: | :-- | :-- |
@@ -410,26 +429,42 @@ are in `docs/statistical_potentials_as_forces.md` and in the comment at each con
 | `GB_FORCE_CAP` | 50.0 | **guard** | caps the solvation gradient only |
 | `force_cap` | 5000.0 | **guard** | above the 4103.6 max force at native geometry |
 | `K_STACK` | 0.0 | **ablation** | exactly redundant with `K_BB` and `K_ANGLE` |
-| `K_PAIR` | 600.0 | **no measurement** | bracket [204.8, 2173.9]; see below |
+| `K_PAIR` | 600.0 | **criterion, then swept** | bracket [204.8, 2173.9]; a sweep that included 470 and 340 kept 600 (see the update log). The OpenMM path sets this same constant to 1500, and the ranking test that covers both is flat in it — noted below |
 | `K_BSJ_CONTACT` | 50.0 | **no criterion** | 17.3 percent of the energy at native geometry |
 
 The distinction that matters: **criterion** means `k = kBT/sigma^2` over the deposited-structure
 database, applied uniformly. **Transferability** means the value was inherited from a different
-coordinate by chemical identity. **No measurement** means exactly that.
+coordinate by chemical identity. **No criterion** means no measurement of that kind was available.
 
-### Known limits, stated so they are not rediscovered as surprises
+### Custom-field tuning: what is settled, what is not
 
-- **`K_PAIR` has a measured floor and a measured ceiling and nothing inside.** The floor is
+These are the open items in the custom Torch field's calibration. They are recorded so the next
+person does not rediscover them as surprises. They are properties of that field's state of
+tuning, not of the pipeline as a whole — the OpenMM path (see the top of this section) is the
+one the shipped model comes from, and it does not share these items.
+
+Each entry says what it bounds, so a reader can tell whether it touches their use.
+
+- **`K_PAIR` is bounded, not pinned, and the bound is the honest part.** The floor is
   `kBT/sigma_NN^2 = 204.8`; the ceiling is 2173.9, where a register-shift decoy starts preferring
-  the wrong pairing. Nothing measured separates 600 from 1500, and the reason is now known: the
-  database has **no thermal width** for this coordinate. 98.6 percent of its spread is
-  residue-to-residue inside one conformation, so the pooled sigma is not a thermal width and no
-  amount of statistics will make it one.
+  the wrong pairing. A sweep that included 470 and 340 put every alternative under the 10 percent
+  bar, so the field keeps 600 (update log, "Dev-machine round"). What is *not* available is a
+  measurement that discriminates inside the bracket, and the reason is now known: the database has
+  **no thermal width** for this coordinate. 98.6 percent of its spread is residue-to-residue
+  inside one conformation, so the pooled sigma is not a thermal width and no amount of statistics
+  will make it one.
+  *Scope:* this bounds the custom field's pair stiffness. The OpenMM path sets the same-named
+  constant to 1500. That difference is **open in both directions**, and it is known to be open:
+  `scripts/measure_pair_clash_bsj_constants.py` runs its ranking test over
+  `(kBT/sd_pooled^2, 600.0, 1500.0, 150000.0)` and reports that the test is flat in `K_PAIR`,
+  so it cannot tell the two apart either. Neither value is the better one on present evidence.
 - **`K_BSJ` and the two related terms are the only ones set without a measurement**, because no
-  deposited chain is covalently closed.
+  deposited chain is covalently closed. *Scope:* circular-molecule terms only; a linear run should
+  set all three to zero and say so in its provenance line.
 - **Three terms are 91.55 percent of the energy on a linear reference** (`bsj closure` 68.17,
-  `bsj contact` 23.46). They act on `P(0)-P(L-1)`, which only exists in a circular molecule. A run
-  on a linear chain should set all three to zero and say so in its provenance line.
+  `bsj contact` 23.46). They act on `P(0)-P(L-1)`, which only exists in a circular molecule.
+  *Scope:* this is why the same three must be zeroed for a linear chain — it is a statement about
+  what the terms act on, not a defect in them.
 - **The residual depends on the sampling window, and the converged window is much better.**
   `ibi_round0.py` used to throw away only the first 3.2 ps of a 16 ps run (`burn = NSTEPS // 5`),
   which reports a transient: joint 0.3263 on the corrected field, 0.2937 before it. With the burn
@@ -438,6 +473,8 @@ coordinate by chemical identity. **No measurement** means exactly that.
   1.010). Read `--blocks=N` and judge by the block spread: a cumulative number cannot tell
   a settled window from a lucky early one, which is how the 40-200 ps run read 0.0911 before
   climbing to 0.0968. Section 3ba.
+  *Scope:* this is how to read a residual, and it is the reason several earlier numbers in the
+  update log are marked as transients rather than as the field's equilibrium.
 - **The coupling does not push every coordinate the same way, and the deficits are real.** On the
   converged window bb_bond is 12 percent wide, while angle and dihedral are 10 and 29 percent
   NARROW. The obvious excuse -- that the reference is pooled over 126 chains while a run is
@@ -449,15 +486,22 @@ coordinate by chemical identity. **No measurement** means exactly that.
 - **200 ps is not yet a stationary distribution.** The block spread and a dihedral that is still
   narrowing between 40 and 200 ps both say so. Until the blocks agree, any residual is a mixture
   and is not a valid input to an IBI update.
-- **The minimiser in `check_field_after_fix.py` currently stalls.** Six restarts, max abs F
-  690.19 kJ/mol/nm against a 236.3 force floor, so that script's starting point is not a true
-  minimum. This is the one open item in the acceptance table below.
+  *Scope:* this is a limit on how far the current calibration data can be pushed, and it names
+  what would extend it (longer blocks that agree). It is not a limit on the field's use — the
+  converged-window numbers above stand.
 - **The excluded volume has one range for all bead types.** It presses outward on 167 of 2 022 024
   pairs. Per-type ranges were measured and rejected: they would remove 0.008 percent of contacts
   and the criterion cannot supply a per-type stiffness.
-- **`cg_energy_forces` is the production field.** Four other entry points in the same module
-  compute different potentials under the same constant names; they raise unless
-  `ALLOW_ALTERNATE_FIELDS` is set.
+  *Scope:* a measured design choice, not an unfinished item — the alternative was tried and the
+  measurement said no.
+- **`cg_energy_forces` is the production entry point of this field.** Four other entry points in
+  the same module compute different potentials under the same constant names, so they raise
+  unless `ALLOW_ALTERNATE_FIELDS` is set. That guard is deliberate: it is what stops a caller
+  from evaluating a different potential while reading these constants as if it were this one.
+
+Two items that were listed here are progress on the tooling rather than properties of the field,
+and they have moved to the update log: the `check_field_after_fix.py` minimiser stall, and the
+`audit_field_state.py` crash at its five-path comparison.
 
 ### Reproducing any of it
 
@@ -478,7 +522,7 @@ python scripts/scan_unreturned_energies.py           # terms computed and never 
 `python -m pytest tests/` is 135 tests. Several of them exist to stop a constant moving away from
 the measurement above without the suite saying so.
 
-The sixteen silent defects that were found and repaired in this field - a number this file and
+The eighteen silent defects that were found and repaired in this field - a number this file and
 `docs/attribution.md` both used to state as nine, without a list - are indexed in
 `docs/silent_defects.md`, one row each, with the measurement that found it and the test that
 now holds it. The index exists so the count can be checked.
@@ -534,6 +578,13 @@ arc -- 134 commits over six days, phase by phase, with the commit that carried e
 `docs/timeline.md`.
 
 ### Dev-machine round (findings reported back, not run here)
+
+One tooling item lives here rather than in the tuning section above, because it describes the
+state of a checking script rather than of the field.
+
+**The minimiser in `check_field_after_fix.py` currently stalls.** Six restarts, max abs F
+690.19 kJ/mol/nm against a 236.3 force floor, so that script's starting point is not a true
+minimum. This is the one open item in the acceptance table below.
 
 `ibi_round0.py`'s default window is `burn = NSTEPS // 5`, which throws away only the first
 3.2 ps of a 16 ps run. On the same field, the same seed, changing only the window:
@@ -592,11 +643,31 @@ The minimiser row is the open item, and it is why the drift row is not yet meani
 descends with a halving step, so six restarts say the method stalls on this landscape, not that a
 690 force is unbalanced. Section 3ay has the full comparison and the curvature arithmetic.
 
-**The defect count now has a list behind it.** `docs/silent_defects.md` indexes **sixteen** silent
+**The defect count now has a list behind it.** `docs/silent_defects.md` indexes **eighteen** silent
 defects, one row each, with the measurement that found it and the test that now holds it. This file
-and `docs/attribution.md` both used to say "nine" with no list behind it. Fifteen of the
-sixteen were producing a wrong number; the sixteenth is four independent copies of the
+and `docs/attribution.md` both used to say "nine" with no list behind it. Seventeen of the
+eighteen were producing a wrong number; the other is four independent copies of the
 excluded-volume law, which agreed at the time and would have gone stale on the next edit.
+Row 17 — the pair guide measuring a P-P distance against the N-bead target — was activated by
+row 13's sign fix and carried 100 percent of a 2135 kJ/mol gap between the 2OIU crystal and the
+field's own output. Row 18 is the P-trace-to-3-bead reconstruction, and it turned out to be two
+defects stacked. The first: the placement was a **mean-centred** four-point fit, which moved the
+one anchor that was not a guess — P is the CG solver's own input — by 0.556 A on average (33.99 A
+at worst, over 42 deposited structures / 3724 residues). `_place_residue_on_p` makes P exact, which
+lifts `C4'(i)-P(i+1)` from 3.647 to 3.719 against the deposited 3.924 and `|P(i)-C4'(i)|` from
+3.690 to 3.885 against the field's own SHAKE value of 3.900. The second: the C4' **radial** is a
+base-dependent observable (A 2.319, C 2.445, G 2.355, U 2.335 over 42 structures) that a single
+prescribed offset can never represent — and the sampler does produce it. Measured on 2OIU over 12
+runs of 5000 steps at 300 K, the refinement returns a radial of **2.382 ± 0.024** from a deposition
+at 2.393, where fabricating from the P trace gives 2.269 and the template constant is 2.169.
+`carry_beads_along_trace` preserves it exactly, and `torch_gpu_refine` was throwing it away between
+rounds. `carry_beads`, `diag["beads"]` and `_initial_beads` close that. The all-atom product built
+from carried beads gets `C4'(i)-P(i+1)` = 3.797 against the deposition's 3.769; the bead path
+reaches a 0.48 deg base-roll error where the P-trace path gets 42.82 deg. See
+`scripts/reconstruction_fidelity.py`, `scripts/reconstruction_bead_path.py`,
+`scripts/sampled_bead_radial_2oiu.py`, `scripts/carry_beads_2oiu.py`,
+`scripts/crystal_energy_2oiu.py`, `scripts/deposited_beads_2oiu.py`,
+`tests/test_p_trace_is_preserved.py` and `tests/test_carry_beads_precedence.py`.
 
 **`GB_FORCE_CAP` is a guard, measured rather than assumed.** `scripts/check_gb_cap_heating.py` runs
 the same 20 ps at cap 50, 500 and 1e9 and gets the same mean kinetic temperature (311.5 K) and the
