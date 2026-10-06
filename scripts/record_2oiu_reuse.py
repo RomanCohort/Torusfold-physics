@@ -43,6 +43,7 @@ import json
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -73,6 +74,21 @@ ENV_ROUTE = {
     "TORUSFOLD_SEED": "20261005",
 }
 CONTACT_CUTOFF = 3.6
+# The source files whose bytes decide what this run produces. A record is only as reproducible as the tree
+# it came from, and at the time of writing three of these were DIRTY -- uncommitted edits in a shared
+# working tree -- which is exactly the fact a reader comparing hashes needs before blaming their GPU. So
+# the record carries the fingerprint and says which entries are not in a commit.
+TREE_FILES = (
+    "src/torusfold/scheme2/torch_gpu_refine.py",
+    "src/torusfold/scheme2/torch_cgsim.py",
+    "src/torusfold/scheme2/aform_from_template.py",
+    "src/torusfold/scheme2/openmm_gpu_refiner.py",
+    "src/torusfold/scheme2/base_frames.py",
+    "src/torusfold/scheme2/base_stacking.py",
+    "scripts/cg_potentials.py",
+    "scripts/ibi_core.py",
+    "scripts/measure_base_stacking.py",
+)
 
 
 # ---------------------------------------------------------------- small machinery
@@ -115,6 +131,20 @@ def git_commit():
                               text=True, timeout=20).stdout.strip() or None
     except Exception:                                                      # noqa: BLE001
         return None
+
+
+def tree_fingerprint():
+    """(files, uncommitted) -- sha256 of every file whose bytes decide the run, and which are not committed."""
+    files = []
+    for rel in TREE_FILES:
+        p = REPO / rel
+        if not p.exists():
+            files.append({"path": rel, "sha256": None, "committed": False, "note": "absent"})
+            continue
+        dirty = bool(subprocess.run(["git", "status", "--porcelain", "--", rel], cwd=str(REPO),
+                                    capture_output=True, text=True).stdout.strip())
+        files.append({"path": rel, "sha256": sha256_file(p), "committed": not dirty})
+    return files, [f["path"] for f in files if not f["committed"]]
 
 
 def deposit_reference():
@@ -325,6 +355,33 @@ def read_spec(spec_path, deposit_seq):
                                     "path": None, "sha256": None}
 
 
+def _find_tables(explicit, out):
+    """The CG tables the run needs, from wherever they can be found.
+
+    results/ is git-ignored here, so a fresh clone has no production_tables.npz; the record commits a
+    byte-identical copy next to the product, and this is the order it looks in. The first version only
+    looked beside the output directory, which failed the moment the reader re-ran into a different output
+    directory -- which is exactly what re-running means.
+    """
+    name = Path(ENV_ROUTE["TORUSFOLD_CG_TABLES"]).name
+    dirs = []
+    if explicit:
+        e = Path(explicit)
+        dirs.append(e.parent if e.is_file() or not e.exists() else e)
+    dirs.append(REPO / "results")
+    dirs.append(Path(out))
+    dirs.extend(sorted((REPO / "artifacts" / "reuse_demo").glob("*/")))
+    # BOTH FILES, in one directory: the refiner takes the dynamics from production_tables.npz and its
+    # reference binning grids from refit_smooth5_with_base.npz, and it looks for the second one NEXT TO
+    # whichever TORUSFOLD_CG_TABLES it was given (_refine_langevin). A directory with only the first is
+    # therefore not a usable answer, which is how the first version of this search failed.
+    for d in dirs:
+        p = Path(d) / name
+        if p.exists() and (Path(d) / "refit_smooth5_with_base.npz").exists():
+            return p
+    return None
+
+
 def _execute(start, out_dir, seq, ss, name, steps, stream, calls):
     """One call to the shipped stage, with everything it prints going to the given stream."""
     from torusfold.scheme2.torch_gpu_refine import torch_gpu_refine
@@ -369,6 +426,32 @@ def run(args):
     env["TORUSFOLD_REFINE_STEPS"] = str(args.steps)
     if args.repair:
         env["TORUSFOLD_HBOND_REPAIR"] = "1"
+
+    # THE FIELD HAS TO TRAVEL WITH THE RECORD. results/ is git-ignored in this repository, so a reader who
+    # clones it has no production_tables.npz at all -- and a record whose command cannot be run from the
+    # repository it ships in is not a record. The tables are 26 KB, so a byte-identical copy goes beside
+    # the product and the run falls back to that copy when the source is missing.
+    tables_src = _find_tables(args.tables, out)
+    if tables_src is None:
+        raise SystemExit(
+            "no CG tables found. The run needs production_tables.npz AND refit_smooth5_with_base.npz in one "
+            "directory (the refiner takes the dynamics from the first and its reference grids from the "
+            "second). Looked in results/, the output directory and artifacts/reuse_demo/*/. Pass --tables "
+            "<production_tables.npz>, or put a copy where the record expects it.")
+    tables_copy = out / tables_src.name
+    refit_copy = out / "refit_smooth5_with_base.npz"
+    for src, dst in ((tables_src, tables_copy),
+                     (tables_src.parent / "refit_smooth5_with_base.npz", refit_copy)):
+        if src.resolve() != dst.resolve():
+            shutil.copyfile(src, dst)
+    if tables_src.resolve() != (REPO / ENV_ROUTE["TORUSFOLD_CG_TABLES"]).resolve():
+        env["TORUSFOLD_CG_TABLES"] = _rel(tables_copy)
+        print("  NOTE: running from the CG tables at %s" % _rel(tables_copy))
+    tables_info = {"run_used": env["TORUSFOLD_CG_TABLES"], "found_at": _rel(tables_src),
+                   "production_tables": {"path": _rel(tables_copy), "sha256": sha256_file(tables_copy)},
+                   "refit_smooth5_with_base": {"path": _rel(refit_copy),
+                                               "sha256": sha256_file(refit_copy)}}
+
     for k, v in env.items():
         os.environ[k] = v
     resolved = {k: str((REPO / v).resolve()) if not Path(v).is_absolute() else v
@@ -408,8 +491,18 @@ def run(args):
     # THE SAMPLED FRAME, not the P trace: the base level is scored on the beads the run actually moved.
     beads_A = diag.get("beads") if isinstance(diag, dict) else None
     if beads_A is None:
-        raise SystemExit("the run returned no sampled bead frame (diag['beads'] is None), so the base "
-                         "level cannot be scored on it; refusing to substitute a fabricated frame")
+        # A CLEAN CHECKOUT LANDS HERE, and it must not refuse. At the time of writing, the sampled frame
+        # leaving the refiner in diag["beads"] was an UNCOMMITTED change in a shared working tree, so the
+        # committed pipeline returns a diag without it. The product is the same either way -- this script
+        # does not feed the sampler -- and the frame the product was actually built from is recoverable
+        # from the product's own P/C4'/N atoms, which is what parse_side already read. Which route was
+        # taken is a field in the record, and --verify-only checks the one the record claims.
+        beads_A = prod_beads
+        bead_frame_source = ("read from the product's own P/C4'/N atoms, because the run's diag carried no "
+                            "sampled frame (uncommitted at the time of this record)")
+        print("  NOTE: " + bead_frame_source)
+    else:
+        bead_frame_source = "diag['beads'] -- the frame the run sampled"
     beads_A = np.asarray(beads_A, dtype=float).reshape(L, 3, 3)
     # What the repair did, straight out of the run's own log, and the pair list it was given. The pair list
     # is the DOT-BRACKET's, because that is what the refiner derives internally (_dotbracket_to_pairs) and
@@ -434,6 +527,8 @@ def run(args):
                 "(scripts/prep_2oiu_input.py). --check-spec re-folds the deposit and compares.",
     })
 
+    tree_files, tree_dirty = tree_fingerprint()
+
     record = {
         "what": "2OIU through the shipped CG stage, from the deposit, with the calibrated protocol",
         "generated": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -449,7 +544,15 @@ def run(args):
             "start_pdb": {"path": _rel(start), "sha256": sha256_file(start)},
             "spec": spec_info,
             "spec_copy": {"path": _rel(spec_copy), "sha256": sha256_file(spec_copy)},
+            "cg_tables": tables_info,
         },
+        "bead_frame_source": bead_frame_source,
+        # WHAT TREE THIS CAME FROM. Not decoration: the fingerprint is what lets a reader who gets a
+        # different product find out it is a different source tree rather than guess.
+        "tree": {"files": tree_files, "uncommitted_files": tree_dirty},
+        "tree_note": ("a file listed in uncommitted_files was not in any commit when this record was "
+                      "made; a run from the commit alone is a DIFFERENT code path and will not reproduce "
+                      "these bytes"),
         "circrna": {"name": "2OIU", "length": L, "sequence": seq, "secondary_structure": ss,
                     "spec_pairs": len(pairs_w), "deposit_wc_pairs": len(ref["pairs"]),
                     "deposit_bsj_A": bsj_A},
@@ -478,6 +581,9 @@ def run(args):
     record["measured"]["product"]["radius_of_gyration_A"] = float(
         np.sqrt(((p_only - p_only.mean(0)) ** 2).sum(1).mean()))
     write_json(out / "record.json", record)
+    print("\ntree: %d files fingerprinted, %d uncommitted%s"
+          % (len(tree_files), len(tree_dirty), (" (" + ", ".join(Path(p).name for p in tree_dirty) + ")")
+             if tree_dirty else ""), flush=True)
 
     d, p = record["measured"]["deposit"], record["measured"]["product"]
     print("\n%-26s %8s %8s" % ("", "deposit", "product"))
@@ -526,18 +632,26 @@ def verify(args):
     # which is what the record's sha256 covers.
     from torusfold.scheme2.aform_from_template import (reconstruct_all_atom_from_beads,
                                                       repair_base_placement, write_allatom_pdb)
-    st = reconstruct_all_atom_from_beads(beads_A, seq)
-    if rec["environment"].get("TORUSFOLD_HBOND_REPAIR") == "1":
-        n_rot = repair_base_placement(st, seq, [(int(i), int(j)) for i, j in rec["dotbracket_pair_list"]])
-        want_rot = rec["run"].get("bases_rotated_by_the_repair")
-        checks.append(("the repair rotates the recorded number of bases", n_rot == want_rot,
-                       "recomputed %d, record %s" % (n_rot, want_rot)))
-    tmp = out / "_verify_rebuild.pdb"
-    write_allatom_pdb(st, str(tmp))
-    rebuilt = sha256_file(tmp)
-    tmp.unlink()
-    checks.append(("rebuilding from the recorded bead frame reproduces the product byte for byte",
-                   rebuilt == rec["products"]["allatom"]["sha256"], rebuilt[:16]))
+    if str(rec.get("bead_frame_source", "")).startswith("diag"):
+        st = reconstruct_all_atom_from_beads(beads_A, seq)
+        if rec["environment"].get("TORUSFOLD_HBOND_REPAIR") == "1":
+            n_rot = repair_base_placement(st, seq,
+                                          [(int(i), int(j)) for i, j in rec["dotbracket_pair_list"]])
+            want_rot = rec["run"].get("bases_rotated_by_the_repair")
+            checks.append(("the repair rotates the recorded number of bases", n_rot == want_rot,
+                           "recomputed %d, record %s" % (n_rot, want_rot)))
+        tmp = out / "_verify_rebuild.pdb"
+        write_allatom_pdb(st, str(tmp))
+        rebuilt = sha256_file(tmp)
+        tmp.unlink()
+        checks.append(("rebuilding from the recorded bead frame reproduces the product byte for byte",
+                       rebuilt == rec["products"]["allatom"]["sha256"], rebuilt[:16]))
+    else:
+        # The record says its bead frame was READ FROM the product, so the check that binds them is that
+        # the committed file still reads back to the same three atoms per residue.
+        dev = float(np.max(np.abs(np.asarray(prod_beads, dtype=float) - beads_A)))
+        checks.append(("the product still reads back the recorded bead frame (max dev)",
+                       dev <= 1e-9 * max(1.0, float(np.abs(beads_A).max())), "%.3e A" % dev))
 
     fresh = side_report(beads_A, prod_res, seq, pairs)
     fresh["trace_rmsd_to_deposit_A"] = float(M.kabsch_rmsd(np.asarray(prod_p, dtype=float), ref["p"]))
@@ -630,6 +744,8 @@ def main():
     ap.add_argument("--steps", type=int, default=1000, help="TORUSFOLD_REFINE_STEPS")
     ap.add_argument("--repair", action="store_true", help="also switch on TORUSFOLD_HBOND_REPAIR=1")
     ap.add_argument("--name", default="2oiu_reuse")
+    ap.add_argument("--tables", default=None,
+                    help="production_tables.npz to run with, when results/ is not present")
     ap.add_argument("--repeat", type=int, default=0,
                     help="re-run the same protocol N more times into a scratch directory and record "
                          "whether the product reproduces byte for byte")

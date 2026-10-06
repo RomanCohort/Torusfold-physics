@@ -836,6 +836,13 @@ including rebuilding the product from the bead frame and comparing it byte for b
 identical runs); Part 29's artifact differs because that run fixed no seed, with the geometry agreeing to
 three decimals.
 
+The record also fingerprints the nine source files that decide its output, because three of them were
+UNCOMMITTED when it was made: the same command from a clean worktree of the recorded commit gives 2638.3
+kJ/mol against 1499.4, 3.15 A of trace deviation against 1.386, 25.0 percent stacked against 58.3 and 0/12
+contacts against 1/12. A checkout can still run it -- the force field and the refine mode's reference grids
+are committed inside the record directory, and the bead frame falls back to the product's own P/C4'/N with
+`bead_frame_source` saying so -- but the numbers are a claim about that tree, and now say so.
+
 Three defects came out of writing it down: the demo's compact-start writer was off by TEN (Å read as nm,
 6,631 Å radius for a 706 nt circle, past the PDB columns -- now a refusal with the ~1,060 nt ceiling); the
 ring-plane scoreboard flipped normals to +e3 after forming the mean normal, so the deposit read +0.056 Å of

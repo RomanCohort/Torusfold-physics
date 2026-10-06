@@ -29,6 +29,8 @@ is not evidence.
 | `2oiu_reuse_cg.pdb` | The CG P trace the run ended on | `2dfe598427bed0b8…` |
 | `run_output.txt` | The run's own stdout, including the lines that say what the environment changed (named `.txt` because the repository ignores `*.log`) | — |
 | `record.json` | Every number below, plus the sampled bead frame, both pair lists, the host, the environment and every hash | — |
+| `production_tables.npz` | The force field the run used, copied here because `results/` is git-ignored | see `record.json` |
+| `refit_smooth5_with_base.npz` | The reference binning grids the refine mode reads **from the directory of the tables file** | see `record.json` |
 | `artifacts/2oiu/2OIU.pdb` | The deposit itself, the reference row, hashed by the record | `fee585a743a98272…` |
 
 `artifacts/reuse_demo/2oiu_repair/` holds the same thing with `TORUSFOLD_HBOND_REPAIR=1`.
@@ -80,6 +82,22 @@ amount: the first is the fixed linear map the field itself scores on, the second
 of the reconstructed atoms. On the deposit they differ by 0.41 Å of rise; findings Part 25 has the
 explanation.
 
+## The tree the run came from, and what a clean checkout gives
+
+A record is only as reproducible as the source it came from, so `record.json` carries a fingerprint: the
+SHA-256 of the nine files whose bytes decide what the run produces, and a flag for each saying whether it
+was in a commit. Three of them were **not** in a commit when this record was made — uncommitted edits in a
+shared working tree — and the record names them.
+
+This was measured rather than assumed. The same command, run from a clean worktree of the commit the record
+names, produced a *different* product: energy 2638.3 against 1499.4 kJ/mol, trace deviation 3.15 Å against
+1.386 Å, 25.0 % of helical steps stacked against 58.3 %, and 0 of 12 key contacts against 1. Verification is
+unaffected — it re-derives every number from the committed files and passes there too — but "repeat the run
+and compare hashes" is a claim about the tree the fingerprint describes, not about the commit alone. That is
+the honest form of the claim, and the fingerprint is what makes it checkable rather than a footnote. It is
+also the reason the copies of the force field above are in this directory: without them, a checkout has no
+field at all, because `results/` is git-ignored.
+
 ## How to check it: no GPU, no torch import, no ViennaRNA
 
 ```
@@ -113,6 +131,10 @@ is the check that is both strong and true.
   with the repair. The remaining pairs are 4–13 Å apart: a positional gap that no rotation of a base can
   close (findings Part 30).
 * **The protocol is 21 seconds long.** It reproduces a structure; it is not a converged ensemble.
+* **The run needs the tree, not just the commit.** Three source files were uncommitted when the record
+  was made; their hashes are in `record.json`, and a run from the commit alone gives a visibly worse
+  product (3.15 Å, 25.0 % stacked, 0/12 contacts — measured, above). Verification does not care: it is a
+  function of the committed record and passes on a clean checkout.
 * **The start format has a ceiling.** The compact circular start the pipeline generates for a new sequence
   cannot be written past about 1,060 nt at the shipped 5.9 Å per step, because the PDB coordinate columns
   (31–54, `8.3f`) overflow and the loader's whitespace fallback cannot recover merged fields. Longer chains

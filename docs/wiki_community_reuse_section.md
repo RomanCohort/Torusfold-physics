@@ -27,9 +27,12 @@ re-derives all of it from the committed files:
 
 That check rebuilds the all-atom product from the recorded bead frame and compares it byte for byte,
 re-measures the geometry, and re-hashes every file. It needs NumPy alone — no GPU, no PyTorch, no
-ViennaRNA and no external predictor. A reader who does have a GPU can instead repeat the prediction and
-compare their product's hash with the one in the record; we ran it three times and all three products were
-byte-identical, so the recorded seed reproduces the run and not merely the protocol.
+ViennaRNA and no external predictor, and it passes from a clean checkout of the repository.
+
+A reader who does have a GPU can also repeat the prediction itself. The record carries the force-field
+tables the run used and a fingerprint (path and SHA-256) of every source file that decided its output, so a
+different result can be traced to a different source tree rather than guessed at; the recorded run repeated
+three times gave byte-identical products, so its seed reproduces the run and not merely the protocol.
 
 | Quantity | 2OIU deposit | Predicted product |
 |---|---|---|

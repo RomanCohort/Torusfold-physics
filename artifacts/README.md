@@ -17,8 +17,8 @@ thing a third party could check was a still image.
 | `2013nt/provenance.json` | Hashes and the decode path, so the files above can be checked rather than trusted | <1 KB |
 | `2013nt/quality.json` | Every number the viewer's stat panel displays, with whether a third party can re-derive it and, when they cannot, what the blocker is | 7 KB |
 | `2oiu/2OIU.pdb` | The one experimentally resolved circRNA structure (chain P, ≈100 nt) — the input to the force-field check | 84 KB |
-| `reuse_demo/2oiu/` | An executable reuse record: 2OIU through the shipped CG stage, with the command, the six environment settings, the product, every measured number and a SHA-256 of every file — plus a verifier that needs no GPU | 156 KB |
-| `reuse_demo/2oiu_repair/` | The same run with `TORUSFOLD_HBOND_REPAIR=1`: the optional Watson-Crick edge repair, its 39 rotated bases, and what it does and does not fix | 156 KB |
+| `reuse_demo/2oiu/` | An executable reuse record: 2OIU through the shipped CG stage, with the command, the six environment settings, the product, every measured number and a SHA-256 of every file — plus a verifier that needs no GPU. Carries the force field it ran with (`production_tables.npz` and the refine mode's `refit_smooth5_with_base.npz`, both git-ignored under `results/`) | 340 KB |
+| `reuse_demo/2oiu_repair/` | The same run with `TORUSFOLD_HBOND_REPAIR=1`: the optional Watson-Crick edge repair, its 39 rotated bases, and what it does and does not fix | 340 KB |
 
 ## How these files came to be here, stated plainly
 

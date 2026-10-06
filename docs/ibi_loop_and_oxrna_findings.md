@@ -1891,6 +1891,19 @@ WHAT WRITING IT DOWN CAUGHT, which is the argument for doing it:
    template onto three points, so the template's own atoms do not land back on their anchors (Part 25's
    residual). Replaced by the stronger and true check -- rebuild from the beads and compare bytes.
 
+4. **The repository could not re-run its own run, and the record was the first thing to notice.** A
+   record is only as good as the tree it came from, so `record.json` now fingerprints the nine source files
+   whose bytes decide the output. Three of them were UNCOMMITTED at the time (`torch_gpu_refine.py`,
+   `torch_cgsim.py`, `aform_from_template.py` -- another session's and this one's in-flight work). The
+   measurement that makes it a finding rather than a caveat: the same command from a clean worktree of the
+   recorded commit gives energy 2638.3 against 1499.4 kJ/mol, 3.15 A of trace deviation against 1.386, 25.0
+   percent stacked against 58.3, and 0/12 key contacts against 1/12. Two further gaps were closed so that a
+   checkout CAN run it at all: `results/` is git-ignored, so the force field and the refine mode's reference
+   binning grids (read from the directory of `TORUSFOLD_CG_TABLES`) now travel as byte-identical copies
+   inside the record directory, and the sampled bead frame -- also uncommitted at the time -- falls back to
+   the product's own P/C4'/N with the route recorded in `bead_frame_source`. Verification never needed any
+   of this.
+
 TWO CORRECTIONS it also produced: the Part 29 table's "1,551 atoms" is 1,550 ATOM records in the file the
 run actually writes, and Part 30's "rise 3.42 -> 2.54 A" is the mean over ALL helical steps while this
 record's `rise_stacked` is the mean over the stacked ones. Both definitions are now fields in

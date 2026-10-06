@@ -1,7 +1,7 @@
 {
   "what": "2OIU through the shipped CG stage, from the deposit, with the calibrated protocol",
-  "generated": "2026-10-06T16:58:58+08:00",
-  "git_commit": "c7990a5be4c61538e8e9aac767e4db7379fa98ce",
+  "generated": "2026-10-06T17:20:45+08:00",
+  "git_commit": "c70e29cc3520083604930385a1d74f1fc81887d9",
   "host": {
     "platform": "Windows-10-10.0.26200-SP0",
     "python": "3.11.15",
@@ -40,8 +40,76 @@
     "spec_copy": {
       "path": "artifacts/reuse_demo/2oiu/spec.json",
       "sha256": "7aea3dea790319cd22f3731fe16d5cc5d6c232aca258d22691b8cf445fd52ce7"
+    },
+    "cg_tables": {
+      "run_used": "results/production_tables.npz",
+      "found_at": "results/production_tables.npz",
+      "production_tables": {
+        "path": "artifacts/reuse_demo/2oiu/production_tables.npz",
+        "sha256": "0d8f6e03b6d25e91a42d89e1f65f62b546d414ecba58c5b1380b905b09d74ba8"
+      },
+      "refit_smooth5_with_base": {
+        "path": "artifacts/reuse_demo/2oiu/refit_smooth5_with_base.npz",
+        "sha256": "42505968d112b8f87a349bb8e8e6369dda4ace718565cb6f6eade422f65fce76"
+      }
     }
   },
+  "bead_frame_source": "diag['beads'] -- the frame the run sampled",
+  "tree": {
+    "files": [
+      {
+        "path": "src/torusfold/scheme2/torch_gpu_refine.py",
+        "sha256": "d38a0a7500dfb9e7a24442a8ab7aef5a7b7a2f53e26f828ac3231ec39e6158d4",
+        "committed": false
+      },
+      {
+        "path": "src/torusfold/scheme2/torch_cgsim.py",
+        "sha256": "897642429faf97f1c3e0dfbed04b38531d3794d7b60b32d6d84f7be69c9fa634",
+        "committed": false
+      },
+      {
+        "path": "src/torusfold/scheme2/aform_from_template.py",
+        "sha256": "2dd123afe8b591ee23c174e0d054ad7eedac7b2a5cca9609904c9c186a7c0743",
+        "committed": false
+      },
+      {
+        "path": "src/torusfold/scheme2/openmm_gpu_refiner.py",
+        "sha256": "8119d8228e419a2a1e7f40d828f48c9bf9d6ba4576869e3e2c0a2596111d7c6f",
+        "committed": true
+      },
+      {
+        "path": "src/torusfold/scheme2/base_frames.py",
+        "sha256": "ae76c90a08dadac35db8e62bf8e14f4792ffa0e40211fe3de4e4598d3db82108",
+        "committed": true
+      },
+      {
+        "path": "src/torusfold/scheme2/base_stacking.py",
+        "sha256": "74b3fd57e7c455002ef8a877f966cb3856bba5fa0dc4dc7ab25ceb2d8c254250",
+        "committed": true
+      },
+      {
+        "path": "scripts/cg_potentials.py",
+        "sha256": "59c4acdb98e70ed8238f3699590398200d0bcd50c21425caf332bdef932db430",
+        "committed": true
+      },
+      {
+        "path": "scripts/ibi_core.py",
+        "sha256": "18de3ef71516efe91ea14a729d13bcfa287603ce784863c1e17739f587dd615d",
+        "committed": true
+      },
+      {
+        "path": "scripts/measure_base_stacking.py",
+        "sha256": "51e5920cc931d156015edd5c02643ab227e26fc81ee88cd4fe79155e2c85d828",
+        "committed": true
+      }
+    ],
+    "uncommitted_files": [
+      "src/torusfold/scheme2/torch_gpu_refine.py",
+      "src/torusfold/scheme2/torch_cgsim.py",
+      "src/torusfold/scheme2/aform_from_template.py"
+    ]
+  },
+  "tree_note": "a file listed in uncommitted_files was not in any commit when this record was made; a run from the commit alone is a DIFFERENT code path and will not reproduce these bytes",
   "circrna": {
     "name": "2OIU",
     "length": 71,
@@ -56,20 +124,20 @@
       {
         "sha256": "8619bb95849012e57fa5e01887a1c7cebd9ad4d9166992e09822e51857b87c12",
         "energy_kJ_per_mol": 1499.4403057153431,
-        "wall_seconds": 21.37256908416748,
+        "wall_seconds": 21.193279504776,
         "identical_to_the_recorded_product": true
       },
       {
         "sha256": "8619bb95849012e57fa5e01887a1c7cebd9ad4d9166992e09822e51857b87c12",
         "energy_kJ_per_mol": 1499.4403057153431,
-        "wall_seconds": 21.3668794631958,
+        "wall_seconds": 21.44035792350769,
         "identical_to_the_recorded_product": true
       }
     ],
     "the_seed_reproduces_the_product_byte_for_byte": true
   },
   "run": {
-    "wall_seconds": 21.33598041534424,
+    "wall_seconds": 21.491639852523804,
     "energy_kJ_per_mol": 1499.4403057153431,
     "product_atoms": 1550,
     "on_report_calls": 10,
