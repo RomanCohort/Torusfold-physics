@@ -30,7 +30,7 @@ consulted. `collect_ignore` is the mechanism that skips a file without importing
 ===============================================================================
 
 `.gitlab-ci.yml` installs the core dependencies and nothing else, so the CI runner has
-no torch. Twenty-three of the forty-eight modules in tests/ import it -- directly, or
+no torch. Twenty-four of the fifty modules in tests/ import it -- directly, or
 indirectly by importing a script from scripts/ that does -- and a module-level import
 that raises during collection is not a skipped test. pytest aborts the run:
 
@@ -43,7 +43,7 @@ collected on its own in an environment with core deps and no torch, and these ar
 twenty-three that raised ModuleNotFoundError.
 
 They are skipped rather than deleted because without a GPU the suite on a developer
-machine is the full suite -- 409 passed, 2 skipped -- and every test here runs there.
+machine is the full suite -- 430 passed, 2 skipped -- and every test here runs there.
 Skipping only inside a torch-less environment keeps that true while making CI honest:
 a run reports what it actually exercised instead of dying at 1 s.
 
@@ -100,6 +100,7 @@ _TORCH_IMPORT_MODULES = [
     "test_relax_entry_point.py",
     "test_table_potential_device.py",
     "test_table_potential_injection.py",
+    "test_torch_compat.py",               # imports torch to exercise the shims
 ]
 
 _TORCH_TRANSITIVE_MODULES = [

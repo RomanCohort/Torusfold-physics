@@ -191,8 +191,8 @@ variables (no hard-coded machine paths in this repository):
 
 | Variable | Purpose |
 |---|---|
-| `RNABPFLOW_ROOT` | RNAbpFlow checkout dir (`checkpoint/RNA3DB.ckpt`, `inference_rocm.py`) |
-| `RNABPFLOW_PYTHON` | Python used to launch RNAbpFlow (default: current interpreter) |
+| `RNABPFLOW_ROOT` | RNAbpFlow checkout dir (`checkpoint/RNA3DB.ckpt`, `inference.py`; the team's `inference_rocm.py` is used instead when present) |
+| `RNABPFLOW_PYTHON` | Python used to launch RNAbpFlow (default: current interpreter; must be the GPU one) |
 | `TRRNA2_RUNNER` | path to the trRosettaRNA2 runner script |
 | `RHOFOLD_ROOT` | RhoFold+ checkout dir (`pretrained/rhofold_pretrained_params.pt`) |
 | `ISRNACIRC_BIN_DIR` | dir containing `CG_to_allatom.exe` + DLLs (Windows, ASCII path) |
@@ -549,7 +549,7 @@ python scripts/audit_field_state.py                  # every live constant, and 
 python scripts/scan_unreturned_energies.py           # terms computed and never read
 ```
 
-`python -m pytest tests/` is the full suite (409 passed, 2 skipped on this machine; see
+`python -m pytest tests/` is the full suite (430 passed, 2 skipped on this machine; see
 "Testing & CI" for the counts and for the one failure CI does not run). Several of its tests exist
 to stop a constant moving away from the measurement above without the suite saying so.
 
@@ -746,8 +746,8 @@ GenBank as needed.
   say so, because two gates over one codebase that are allowed to diverge is the same
   defect `test_skills_in_sync.py` exists to catch. `python scripts/validate_ci_config.py`
   parses both locally: a pipeline file that does not parse fails silently from here.
-  - **Measured scope of the gate**: 48 test modules on disk, **24 excluded, 24
-    executed → 159 passed, 6 skipped in ~10 s**. Of the 24, fifteen import torch (or call
+  - **Measured scope of the gate**: 50 test modules on disk, **25 excluded, 25
+    executed → 166 passed, 6 skipped in ~7 s**. Of the 25, sixteen import torch (or call
     `importorskip("torch")` at module level), eight reach torch through something they
     import, and one is a standalone script. The CI runner has no torch and no GPU, so
     this is a smoke gate, not the full suite. Re-measured 2026-10-14 by running the two
@@ -764,7 +764,7 @@ GenBank as needed.
   `pytest`. `testpaths` in `pyproject.toml` scopes the bare command to `tests/`,
   which matters: `scripts/` holds seven standalone `test_*.py` diagnostics that
   raise on import, so a bare `pytest` used to exit on a failure that was not one.
-- **409 passed, 2 skipped, 104 s** on the reference environment
+- **430 passed, 2 skipped, 116 s** on the reference environment
   (`C:\ana\envs\comfyui`, Python 3.11.15 / torch 2.12.0a0+rocm7.13.0a20260313 /
   OpenMM 8.5.2 / ViennaRNA 2.7.2), re-measured 2026-10-14, with one failure that is not
   part of either count: `test_bond_constraints.py::test_an_ibi_round_excludes_the_constrained_coordinates`.

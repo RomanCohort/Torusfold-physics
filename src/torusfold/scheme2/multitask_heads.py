@@ -67,19 +67,26 @@ class StructRFMEncoder(nn.Module):
     def _load(self):
         if self._model is not None:
             return
+        # Before `transformers` is touched, because on a torch built without distributed
+        # `from transformers import AutoModel` cannot succeed and `import transformers`
+        # can -- see `torusfold.torch_compat` for the import chain and the measurement.
+        try:
+            from torusfold import torch_compat
+            _shim = torch_compat.install()
+            if not all(v.startswith("not needed") for v in _shim.values()):
+                print("  [structRFM] %s" % torch_compat.describe(_shim))
+        except ImportError:
+            pass                                   # not fatal; the import below decides
         try:
             from transformers import AutoTokenizer, AutoModel
         except ImportError as exc:
             raise ImportError(
-                "structRFM needs `transformers`, and it could not be imported. On "
-                "Windows the usual cause is not a missing package: transformers 5.x "
-                "imports torch DTensor to build GenerationMixin, and a torch built "
-                "with distributed compiled out has no torch._C._distributed_c10d, "
-                "so `from transformers import AutoModel` fails even though "
-                "`import transformers` succeeds. Check with "
-                "`python -c \"from transformers import AutoModel\"` and use an "
-                "interpreter whose torch reports "
-                "`hasattr(torch._C, '_c10d_init')` as True."
+                "structRFM needs `transformers`, and it could not be imported even "
+                "after torusfold.torch_compat installed its shims. Check the real "
+                "cause with `python -c \"from transformers import AutoModel\"` and see "
+                "`torusfold/torch_compat.py` for which torch builds need the shim "
+                "(it is a torch compiled without distributed: "
+                "`hasattr(torch._C, '_c10d_init')` is False)."
             ) from exc
         path = self.model_path or os.environ.get("TF_STRUCTRFM_MODEL", "")
         if not path:

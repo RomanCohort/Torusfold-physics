@@ -229,6 +229,66 @@ checkpoint's *name* and none of its contents is what a killed download leaves be
 > can be present, complete, and still unusable. `tools/configure_deps.py` reports this
 > as a `BROKEN transformers` row with the failing statement, not as `OK`.
 
+### RNAbpFlow — 3D flow prediction (ensemble member)
+
+Upstream is a hydra-free script with no command-line arguments: `inference.py` hardcodes
+`CONFIG_FILE_PATH = "configs/inference.yaml"` and drives everything from that file plus
+the working directory. This repository used to require `inference_rocm.py`, a team-held
+adaptation that adds a CLI; that file is not in any upstream release and there is no URL
+for it, so a checkout upstream considers complete was reported as a missing tool.
+
+Two routes, tried in this order by `ensemble_predictor._run_rnabpflow`:
+
+1. `$RNABPFLOW_ROOT/inference_rocm.py` — used unchanged when present.
+2. `tools/rnabpflow_runner.py` — this repository's adapter. It writes
+   `configs/inference.yaml` under the caller's scratch directory, puts the checkout on
+   `sys.path`, installs the torch shims below, and calls `inference.run_inference()`.
+
+```bash
+export RNABPFLOW_ROOT=/path/to/RNAbpFlow
+export RNABPFLOW_PYTHON=/path/to/python    # must be the GPU interpreter
+```
+
+Verified here at 71 nt / 1 sample / 50 timesteps: 38 s on the ROCm GPU, producing
+`Predictions/seq/Sample_0.pdb` and a `(71, 3)` coordinate array through
+`_run_rnabpflow` itself. The 203 MB checkpoint is `checkpoint/RNA3DB.ckpt`, from Zenodo
+record 18305861.
+
+### `torusfold.torch_compat` — why the two optional predictors need a shim here
+
+The GPU torch on the reference machine is a ROCm build compiled **without distributed
+support**:
+
+    torch._C._has_distributed()      -> False
+    torch.distributed.is_available() -> False
+    torch.cuda.get_device_name(0)    -> AMD Radeon(TM) 8060S Graphics
+
+The GPU is fine; distributed is absent. Two optional predictors import into that gap
+incidentally — neither performs a collective:
+
+* **structRFM**: `transformers.generation.utils` → `continuous_batching` →
+  `from torch.distributed.tensor.device_mesh import DeviceMesh` → `torch/distributed/
+  tensor/__init__.py` → … → `from torch._C._distributed_c10d import (...)`, which does
+  not exist. `import transformers` succeeds; `from transformers import AutoModel` raises
+  `ModuleNotFoundError: No module named 'torch._C._distributed_c10d'`.
+* **RNAbpFlow**: its model is a `pytorch_lightning` module, and `pytorch_lightning` →
+  `torchmetrics` → `torchmetrics.functional.text.bert` → `from transformers import
+  AutoModel` hits the same wall, so the model class cannot be imported at all.
+
+`src/torusfold/torch_compat.py` installs two stand-ins, each only when the real thing is
+truly absent, and each refusing rather than guessing:
+
+| shim | why it is safe | how it refuses |
+|---|---|---|
+| `torch.distributed.tensor.device_mesh` | `continuous_batching/distributed.py` uses `DeviceMesh` for one annotation plus code guarded by `dist.is_available()`, which is False | constructing the placeholder raises `RuntimeError` |
+| `torch_scatter` | RNAbpFlow calls exactly two functions, both `dim=0` with a 1-D index, which `Tensor.index_add_` computes exactly (error 0.0 against an explicit loop) | any other `dim` or `reduce` raises `NotImplementedError` |
+
+No package in the interpreter is modified, and the GPU stays in use. `configure_deps.py`
+reports this in two places at once, deliberately: the plain import really does fail
+(which matters to anything else on the machine, ComfyUI's nodes included), and
+`+ reachable through torusfold.torch_compat` records that this repository can still get
+there.
+
 ### Infernal / Rfam (optional MSA)
 
 `run_2013nt.py` accepts `RFAM_CM` for cmsearch-based covariance models:

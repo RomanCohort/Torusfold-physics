@@ -93,12 +93,18 @@ TOOLS = [
         # script and nothing else. The 1.3 GB of checkpoints are data the installer
         # fetches separately, and requiring them for the path to count would report
         # a working checkout as missing.
-        "probe": "inference_rocm.py",
+        # `inference_rocm.py` is the team-held adaptation the wrapper used to require.
+        # It is absent here and has no upstream URL, but upstream's own `inference.py`
+        # plus its config can be driven instead -- `tools/rnabpflow_runner.py` does
+        # that. So the requirement is the UPSTREAM entry point, not the adaptation, and
+        # `_rnabpflow_verdict` reports which of the two routes is available.
+        "probe": None,
+        "require": ["inference.py", "configs/inference.yaml"],
         "levels": "Level 1 segmented 3D prediction",
         "required": False,
-        "note": "The upstream repository ships inference.py, which takes no "
-                "arguments; the wrapper runs inference_rocm.py with flags, so that "
-                "file is the requirement. Checkpoints come from Zenodo record 18305861.",
+        "note": "Upstream ships inference.py, which takes no arguments and is driven by "
+                "configs/inference.yaml; the team's inference_rocm.py adds a CLI and is "
+                "used when present. Checkpoints come from Zenodo record 18305861.",
         "hints": ["RNAbpFlow", "rnabpflow"],
     },
     {
@@ -208,6 +214,24 @@ PACKAGE_IMPORT_PROBES = {
     "transformers": "from transformers import AutoModel, AutoTokenizer",
     "openmm": "import openmm.app",
 }
+
+
+def shim_import_probes() -> Dict[str, str]:
+    """The same question, asked through the repository's own compatibility path.
+
+    Reported SEPARATELY from `PACKAGE_IMPORT_PROBES`, never instead of it. If plain
+    `from transformers import AutoModel` fails, that is true and it matters to anything
+    on this machine outside this repository -- ComfyUI's own nodes included. What
+    `torusfold.torch_compat` does is make it work for the code here, and the report
+    should show both facts rather than pick the flattering one.
+    """
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
+    return {
+        "transformers": (
+            "import sys; sys.path.insert(0, %r); "
+            "from torusfold import torch_compat; torch_compat.install(); "
+            "from transformers import AutoModel, AutoTokenizer" % src),
+    }
 
 # Packaged tools that are separate executables rather than importable modules.
 BINARIES = [
@@ -404,9 +428,11 @@ def probe_package_imports(python: Optional[str], timeout: float = 240.0,
     return {}
 
 
-def check_packages(probes: Optional[Dict[str, Dict]] = None) -> List[Dict]:
+def check_packages(probes: Optional[Dict[str, Dict]] = None,
+                   shim_probes: Optional[Dict[str, Dict]] = None) -> List[Dict]:
     out = []
     probes = probes or {}
+    shim_probes = shim_probes or {}
     for module, label, why, required in PACKAGES:
         spec = None
         try:
@@ -423,6 +449,7 @@ def check_packages(probes: Optional[Dict[str, Dict]] = None) -> List[Dict]:
             except Exception:                      # noqa: BLE001 — import side effects
                 version = None
         probe = probes.get(module) or {}
+        shim = shim_probes.get(module) or {}
         out.append({
             "module": module, "label": label, "why": why, "required": required,
             "found": spec is not None, "version": str(version) if version else None,
@@ -431,6 +458,11 @@ def check_packages(probes: Optional[Dict[str, Dict]] = None) -> List[Dict]:
             "usable": probe.get("ok"),
             "import_why": probe.get("why"),
             "import_probe": PACKAGE_IMPORT_PROBES.get(module),
+            # Whether the repository's own compatibility path reaches it. Only ever
+            # consulted when `usable` is False, so a working plain import is never
+            # reported as "needs a shim".
+            "shim_usable": shim.get("ok"),
+            "shim_why": shim.get("why"),
         })
     return out
 
@@ -588,6 +620,53 @@ def _isrnacirc_tree_root(path: str) -> str:
         return path
     parent = os.path.dirname(os.path.abspath(path))
     return parent if os.path.isdir(parent) else path
+
+
+def _rnabpflow_verdict(root: str, transformers_ok: Optional[bool]) -> Tuple[bool, str]:
+    """Which entry point will RNAbpFlow be driven through, and does it need anything?
+
+    Two routes, in the order `ensemble_predictor._run_rnabpflow` prefers them:
+
+    1. `inference_rocm.py` -- the team's CLI adaptation. Unchanged behaviour when it is
+       there; it was previously the only accepted answer, and demanding it made a
+       checkout that upstream ships look like a missing tool.
+    2. `tools/rnabpflow_runner.py` -- this repository's adapter, which drives upstream's
+       `inference.py` through `configs/inference.yaml` and installs the torch shims that
+       build needs. Available whenever the upstream files are.
+
+    The checkpoint is deliberately NOT part of this verdict: it is 194 MB of data the
+    installer fetches separately (Zenodo record 18305861), and requiring it here would
+    report a working checkout as missing.
+    """
+    if not os.path.isdir(root):
+        return False, "not a directory"
+    rocm = os.path.join(root, "inference_rocm.py")
+    upstream = os.path.join(root, "inference.py")
+    cfg = os.path.join(root, "configs", "inference.yaml")
+
+    if os.path.isfile(rocm):
+        return True, "inference_rocm.py present (the team's CLI adaptation)"
+    if not os.path.isfile(upstream):
+        return False, ("neither inference_rocm.py nor upstream's inference.py is here, "
+                       "so there is no entry point to drive")
+    if not os.path.isfile(cfg):
+        return False, ("inference.py is present but configs/inference.yaml is not, and "
+                       "inference.py reads its inputs from that file")
+
+    ckpt = os.path.join(root, "checkpoint", "RNA3DB.ckpt")
+    parts = ["driven through tools/rnabpflow_runner.py -> upstream inference.py "
+             "(inference_rocm.py is absent)"]
+    if os.path.isfile(ckpt):
+        parts.append("checkpoint %.0f MB" % (os.path.getsize(ckpt) / 1e6))
+    else:
+        parts.append("checkpoint NOT fetched yet (Zenodo record 18305861)")
+    if transformers_ok is False:
+        # pytorch_lightning pulls torchmetrics, which pulls transformers. Without a
+        # route to transformers the model class cannot even be imported.
+        return True, ("; ".join(parts) + "; but pytorch_lightning -> torchmetrics -> "
+                      "transformers cannot be imported here, so the model class will "
+                      "not load. See the BROKEN package row.")
+    return True, "; ".join(parts)
 
 
 def _structrfm_verdict(root: str, transformers_ok: Optional[bool]) -> Tuple[bool, str]:
@@ -791,10 +870,17 @@ def discover(roots: List[str], verbose: bool = False,
     # must not pay that on every start.
     chosen_python = (result["interpreter"] or {}).get("path")
     probes = probe_package_imports(chosen_python) if probe_imports else {}
-    result["packages"] = check_packages(probes)
+    shim_probes = (probe_package_imports(chosen_python, probes=shim_import_probes())
+                   if probe_imports else {})
+    result["packages"] = check_packages(probes, shim_probes)
     result["import_probes_run"] = bool(probes)
-    transformers_usable = next((p.get("usable") for p in result["packages"]
-                                if p["module"] == "transformers"), None)
+    transformers_row = next((p for p in result["packages"]
+                             if p["module"] == "transformers"), {})
+    # What the optional predictors actually need: transformers reachable by SOME route.
+    # The package row still reports the plain import's own verdict separately.
+    transformers_usable = transformers_row.get("usable")
+    if transformers_usable is False and transformers_row.get("shim_usable"):
+        transformers_usable = True
 
     for tool in TOOLS:
         entry = dict(tool)
@@ -957,6 +1043,20 @@ def discover(roots: List[str], verbose: bool = False,
             ok, why = _structrfm_verdict(resolved, transformers_usable)
             entry["reason"] = why
             entry["verdict"] = why
+            if not ok:
+                resolved = None
+                source = None
+
+        # RNAbpFlow: which of the two entry points is available, and is the chain that
+        # loads the model class importable at all.
+        if tool["key"] == "rnabpflow" and resolved:
+            ok, why = _rnabpflow_verdict(resolved, transformers_usable)
+            entry["reason"] = why
+            entry["verdict"] = why
+            entry["route"] = ("inference_rocm.py"
+                              if os.path.isfile(os.path.join(resolved,
+                                                             "inference_rocm.py"))
+                              else "tools/rnabpflow_runner.py")
             if not ok:
                 resolved = None
                 source = None
@@ -1276,6 +1376,17 @@ def render(result: Dict) -> str:
                               % (p.get("import_probe") or p["module"],
                                  p.get("import_why") or "unknown reason"), 66):
                 out.append("          ! %s" % line)
+            # Two separate facts. The plain import really is broken, and this
+            # repository can nevertheless reach the package. Printing only the first
+            # reads as "install something"; printing only the second hides a real
+            # environment defect from anyone using transformers outside this code.
+            if p.get("shim_usable"):
+                out.append("          + reachable through torusfold.torch_compat "
+                           "(verified in the chosen interpreter)")
+            elif p.get("shim_usable") is False:
+                for line in _wrap("and the torusfold.torch_compat route failed too: %s"
+                                  % (p.get("shim_why") or "unknown reason"), 66):
+                    out.append("          ! %s" % line)
 
     out.append("")
     out.append("Command-line tools")
@@ -1299,7 +1410,11 @@ def render(result: Dict) -> str:
     if broken:
         # Not the same as missing: reinstalling will not fix it, and an optional tool
         # that depends on the package is silently unusable until it is.
-        out.append("  NOT IMPORTABLE : %s" % ", ".join(p["label"] for p in broken))
+        worked_around = [p["label"] for p in broken if p.get("shim_usable")]
+        suffix = (" (%s reachable through torusfold.torch_compat)"
+                  % ", ".join(worked_around)) if worked_around else ""
+        out.append("  NOT IMPORTABLE : %s%s"
+                   % (", ".join(p["label"] for p in broken), suffix))
     if not result.get("import_probes_run"):
         out.append("  (import probes not run: --fast, or the chosen interpreter "
                    "could not be started)")

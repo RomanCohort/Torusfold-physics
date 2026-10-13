@@ -482,14 +482,43 @@ def _run_rnabpflow(
     for name in ["map1.npy", "map2.npy", "map3.npy"]:
         np.save(os.path.join(inp_dir, name), np.zeros((L, L), dtype=np.float32))
 
-    # Invoke inference_rocm.py
-    script = os.path.join(os.environ.get("RNABPFLOW_ROOT", ""), "inference_rocm.py")
+    # Which entry point to drive.
+    #
+    # `inference_rocm.py` is a team-held adaptation of upstream's script: it takes
+    # `--name/--checkpoint/--device` and is what this function used to require. It is
+    # NOT on this machine and has no upstream URL. What upstream ships is
+    # `inference.py`, which takes no arguments and is driven by a config file plus the
+    # working directory -- so when the ROCm script is missing we drive that instead,
+    # through `tools/rnabpflow_runner.py`, which also installs the torch compatibility
+    # shims this build needs. See `torusfold.torch_compat`.
+    root = os.environ.get("RNABPFLOW_ROOT", "")
+    rocm_script = os.path.join(root, "inference_rocm.py")
+    if os.path.isfile(rocm_script):
+        script = rocm_script
+        route = "inference_rocm.py"
+    else:
+        repo_src = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))              # .../src
+        repo = os.path.dirname(repo_src)
+        script = os.path.join(repo, "tools", "rnabpflow_runner.py")
+        route = "tools/rnabpflow_runner.py -> upstream inference.py"
+        if not os.path.isfile(script):
+            raise FileNotFoundError(
+                "neither %s nor %s exists, so RNAbpFlow has no entry point"
+                % (rocm_script, script))
+        if not os.path.isfile(os.path.join(root, "inference.py")):
+            raise FileNotFoundError(
+                "%s does not drive upstream inference.py, which is missing from %s"
+                % (script, root))
+
     out_dir = os.path.join(output_dir or tempfile.gettempdir(), "rnabpflow_out")
+    if verbose:
+        print(f"  [Ensemble] RNAbpFlow via {route}")
 
     result = subprocess.run(
         [os.environ.get("RNABPFLOW_PYTHON", "python"),
          script, "--name", "seq", "--checkpoint", checkpoint, "--device", "cuda"],
-        capture_output=True, text=True, timeout=None,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=None,
         cwd=tmp_dir,
     )
 
@@ -504,7 +533,15 @@ def _run_rnabpflow(
                 break
 
     if not os.path.exists(pdb_path):
-        raise FileNotFoundError(f"RNAbpFlow output not found: {pdb_path}")
+        # Say what the subprocess said. The previous version raised with only the
+        # missing path, which turned every cause -- a missing ROCm script, a missing
+        # torch_scatter, a CUDA failure -- into the same unhelpful sentence.
+        tail = "\n".join((result.stderr or "").strip().splitlines()[-12:])
+        raise FileNotFoundError(
+            "RNAbpFlow output not found: %s\n"
+            "route      : %s\n"
+            "exit code  : %s\n"
+            "stderr tail:\n%s" % (pdb_path, route, result.returncode, tail or "(empty)"))
 
     # Parse PDB -> P coordinates
     coords = _parse_pdb_p_coords(pdb_path, L)
