@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """TorusFold Web Server — SSE streaming + Predict API + static files
 
-Usage: python serve.py [port]
+Usage: python serve.py [port] [--host ADDR]
 Default port: 8877
+Default host: 127.0.0.1 (loopback only); TORUSFOLD_HOST overrides it. Pass
+--host 0.0.0.0 only to expose the server on purpose.
 """
 import os
 import sys
@@ -1360,6 +1362,33 @@ _active_connections = [0]
 _conn_lock = threading.Lock()
 
 
+def _confine(candidate, root):
+    """realpath(candidate) when it resolves strictly inside realpath(root), else None.
+
+    WHY THIS EXISTS. os.path.join does not confine anything: os.path.join(ROOT, "../../Windows/x")
+    resolves outside ROOT, and the static fallback below handed the URL's own path straight to it. On
+    this machine, before the guard: a request for /../../Windows/System32/drivers/etc/hosts answered
+    200 with the file's 4,908 bytes, and GET /.env.local answered 200 with 1,652 bytes of SMTP
+    credentials. The same server binds 0.0.0.0 out of the box, so an unauthenticated GET was a
+    whole-machine file read. /api/structure already had this check (:2506); the static path did not,
+    and it is the one that takes an arbitrary path rather than a registry name.
+
+    DOT-PREFIXED COMPONENTS ARE REFUSED TOO, because everything they reach is configuration rather
+    than a page: .env.local (mail credentials, tool paths), .git/config (remote URLs). Nothing in
+    src/torusfold/web requests one, so the interface does not notice.
+    """
+    root_real = os.path.realpath(root)
+    cand = os.path.realpath(candidate)
+    # normcase: this runs on Windows, where realpath can keep the request's letter case.
+    if os.path.normcase(cand) != os.path.normcase(root_real) and \
+            not os.path.normcase(cand).startswith(os.path.normcase(root_real) + os.sep):
+        return None
+    rel = os.path.relpath(cand, root_real)
+    if any(part.startswith(".") for part in rel.split(os.sep)):
+        return None
+    return cand
+
+
 class TorusFoldServer(ThreadingHTTPServer):
     """ThreadingHTTPServer with a ceiling on concurrent connections.
 
@@ -1558,15 +1587,17 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             self._handle_score_pdb_sse(path)
             return
 
-        # Static files: served from WEB_DIR or ROOT
+        # Static files: served from WEB_DIR or ROOT. Both go through _confine, because the path here
+        # comes from the URL and os.path.join would resolve "../../" straight out of the root -- the
+        # measured consequence is in _confine's docstring.
         if path.startswith("/web/"):
-            file_path = os.path.join(WEB_DIR, path[5:])
+            file_path = _confine(os.path.join(WEB_DIR, path[5:]), WEB_DIR)
         elif path == "" or path == "/":
             file_path = os.path.join(WEB_DIR, "index.html")
         else:
-            file_path = os.path.join(ROOT, path.lstrip("/"))
+            file_path = _confine(os.path.join(ROOT, path.lstrip("/")), ROOT)
 
-        if os.path.isfile(file_path):
+        if file_path and os.path.isfile(file_path):
             self._serve_file(file_path)
         else:
             self.send_error(404, f"File not found: {path}")
@@ -3256,8 +3287,35 @@ def _wrap_text(text, width):
     return lines or [""]
 
 
+def _resolve_host_port(argv):
+    """(host, port) from the command line and TORUSFOLD_HOST.
+
+    WHERE IT LISTENS, and why the default changed. This used to be hard-coded to ("0.0.0.0", port) --
+    every interface. For a server reached over an ssh reverse tunnel the only client is the ssh client
+    on this host, which connects to 127.0.0.1, so the wider bind was exposure with no benefit; and on
+    the machine this was measured on the exposure was real, because the firewall carried ten inbound
+    Allow rules for python.exe on the Private and Public profiles, which put 8877 on the LAN. Loopback
+    is the default now and anything else announces itself in the startup banner.
+    """
+    host = (os.environ.get("TORUSFOLD_HOST") or "127.0.0.1").strip() or "127.0.0.1"
+    port = 8877
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--host" and i + 1 < len(argv):
+            host = argv[i + 1]
+            i += 2
+            continue
+        if a.startswith("--host="):
+            host = a.split("=", 1)[1]
+        elif a.isdigit():
+            port = int(a)
+        i += 1
+    return host, port
+
+
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8877
+    host, port = _resolve_host_port(sys.argv[1:])
     os.chdir(ROOT)
 
     # Reading the pipeline's defaults means importing it, which pulls in torch and
@@ -3289,9 +3347,14 @@ def main():
     # So: refuse past a limit instead of exhausting, and close connections that
     # have gone quiet. A refused request is a visible 503; an exhausted thread
     # table is a dead process and a dead run.
-    server = TorusFoldServer(("0.0.0.0", port), TorusFoldHandler)
+    server = TorusFoldServer((host, port), TorusFoldHandler)
     server.daemon_threads = True
-    print(f"TorusFold server: http://127.0.0.1:{port}/")
+    print(f"TorusFold server: http://{host}:{port}/")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        # Loud on purpose: this is the one line that tells whoever started it that the service is
+        # reachable from something other than this machine, which is a decision rather than a default.
+        print(f"  ! bound to {host}: other machines on this network can reach it. "
+              f"The reverse tunnel does not need this; use 127.0.0.1.")
     print(f"  Static root: {ROOT}")
     print(f"  Web dir: {WEB_DIR}")
     print(f"  Concurrent connections: at most {MAX_CONNECTIONS}, "
