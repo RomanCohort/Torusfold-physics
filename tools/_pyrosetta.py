@@ -38,16 +38,40 @@ LICENCE_NOTE = (
 _IMPORT = "import pyrosetta; print(pyrosetta.__file__)"
 
 
+def _decode_wsl_output(raw: bytes) -> str:
+    """Decode wsl.exe's stdout, which carries two encodings at once.
+
+    The command's output is UTF-8; wsl.exe appends its own diagnostic as UTF-16LE on
+    the same stream ("wsl: 检测到 localhost 代理配置..."). NUL is valid UTF-8, so
+    decoding the lot as UTF-8 does not fail and leaves real NUL bytes in the text --
+    which then raise `ValueError: embedded null character` from CreateProcess when that
+    text is fed back into a later wsl.exe call. See the longer note in
+    `rsrnasp_quality._decode_wsl_output`.
+    """
+    for marker in (b"w\x00s\x00l\x00:\x00", b"W\x00S\x00L\x00:\x00"):
+        cut = raw.find(marker)
+        if cut != -1:
+            raw = raw[:cut]
+    text = raw.replace(b"\x00", b"").decode("utf-8", errors="replace")
+    return "\n".join(line for line in text.splitlines()
+                     if not line.lstrip().lower().startswith("wsl:"))
+
+
 def _run_in_wsl(command: str, timeout: float = 180.0):
     """Run one bash command inside WSL. Returns (ok, output)."""
     try:
+        # Bytes, not text=True: the locale here is cp936 and wsl.exe emits UTF-8 mixed
+        # with a UTF-16LE banner, so a locale decode raised UnicodeDecodeError inside
+        # subprocess's reader thread and turned a successful probe into an empty one --
+        # reported as "not available", with no exception anywhere.
         p = subprocess.run(["wsl.exe", "-e", "bash", "-lc", command],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "timed out"
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)[:200]
-    return p.returncode == 0, ((p.stdout or "") + (p.stderr or "")).strip()
+    return p.returncode == 0, (_decode_wsl_output(p.stdout or b"")
+                               + _decode_wsl_output(p.stderr or b"")).strip()
 
 
 def _distro() -> Optional[str]:

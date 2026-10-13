@@ -306,7 +306,7 @@ tools**; it does **not** train them, and it ships no trained weights:
 | RhoFold+ | Wang et al., *Nat. Methods* 2024 | per-chunk 3D prediction (`rhofold_wrapper`) | external checkpoint |
 | trRosettaRNA2 | Li et al., *Nat. Commun.* 2021;12:5934 | per-chunk 3D prediction (`trrna2_wrapper`) | external checkpoint |
 | RNAbpFlow | Bhattacharya-Lab/RNAbpFlow | 3D flow prediction / distance evidence (`ensemble_predictor`) | `RNA3DB.ckpt` (trained on RNA3DB/bpRNA), archived separately |
-| structRFM | inspired by Zhai et al., *Nat. Commun.* 2024 | optional multi-task heads (`multitask_heads`) | external checkpoint |
+| structRFM | Zhu H, Li R, Zhang F, Tang F, Ye T, Li X, Gu Y, Xiong P, Zhou S K. *A fully-open structure-guided RNA foundation model for robust structural and functional inference.* bioRxiv 2025.08.06.668731 (doi:10.1101/2025.08.06.668731); weights `heqin-zhu/structRFM` (MIT) | optional multi-task heads (`multitask_heads`) | external checkpoint |
 | DivideFold | external RNA folding predictor — Omnes L, Angel E, Tahi F. *DivideFold+: an AI-based tool for RNA secondary structure prediction...* J Mol Biol. 2026;438(18):169865 (doi:10.1016/j.jmb.2026.169865); team checkout named `DivideFold-main` | SS evidence for the Level 0 consensus (`ss_divide`, CPU subprocess) | external checkout (`DivideFold-main`; `TF_DIVIDEFOLD_ROOT`) |
 
 The folding/refinement core of this repository is **physics-based
@@ -549,7 +549,7 @@ python scripts/audit_field_state.py                  # every live constant, and 
 python scripts/scan_unreturned_energies.py           # terms computed and never read
 ```
 
-`python -m pytest tests/` is the full suite (381 passed, 2 skipped on this machine; see
+`python -m pytest tests/` is the full suite (409 passed, 2 skipped on this machine; see
 "Testing & CI" for the counts and for the one failure CI does not run). Several of its tests exist
 to stop a constant moving away from the measurement above without the suite saying so.
 
@@ -746,8 +746,8 @@ GenBank as needed.
   say so, because two gates over one codebase that are allowed to diverge is the same
   defect `test_skills_in_sync.py` exists to catch. `python scripts/validate_ci_config.py`
   parses both locally: a pipeline file that does not parse fails silently from here.
-  - **Measured scope of the gate**: 46 test modules on disk, **24 excluded, 22
-    executed → 131 passed, 6 skipped in ~3 s**. Of the 24, fifteen import torch (or call
+  - **Measured scope of the gate**: 48 test modules on disk, **24 excluded, 24
+    executed → 159 passed, 6 skipped in ~10 s**. Of the 24, fifteen import torch (or call
     `importorskip("torch")` at module level), eight reach torch through something they
     import, and one is a standalone script. The CI runner has no torch and no GPU, so
     this is a smoke gate, not the full suite. Re-measured 2026-10-14 by running the two
@@ -764,7 +764,7 @@ GenBank as needed.
   `pytest`. `testpaths` in `pyproject.toml` scopes the bare command to `tests/`,
   which matters: `scripts/` holds seven standalone `test_*.py` diagnostics that
   raise on import, so a bare `pytest` used to exit on a failure that was not one.
-- **381 passed, 2 skipped, 90 s** on the reference environment
+- **409 passed, 2 skipped, 104 s** on the reference environment
   (`C:\ana\envs\comfyui`, Python 3.11.15 / torch 2.12.0a0+rocm7.13.0a20260313 /
   OpenMM 8.5.2 / ViennaRNA 2.7.2), re-measured 2026-10-14, with one failure that is not
   part of either count: `test_bond_constraints.py::test_an_ibi_round_excludes_the_constrained_coordinates`.

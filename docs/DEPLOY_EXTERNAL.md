@@ -183,16 +183,51 @@ python tools/install_deps.py --skip-downloads --skip-git
 ### structRFM — multi-task DL heads
 
 `multitask_heads.py` loads a pretrained structRFM checkpoint for the
-SS / pair / BSJ / clash heads:
+SS / pair / BSJ / clash heads. It is off by default (`use_structrfm=False`).
 
 ```bash
-export TF_STRUCTRFM_MODEL=/path/to/structrfm/model/dir
+export TF_STRUCTRFM_MODEL=/path/to/structRFM      # a HuggingFace checkpoint directory
 ```
 
-> **Upstream:** structRFM-style multi-task heads (see
-> `src/torusfold/scheme2/multitask_heads.py`), inspired by Zhai et al.,
-> *Nature Communications* 2024. The pretrained checkpoint is a moving target —
-> point `TF_STRUCTRFM_MODEL` at a compatible structRFM release.
+The directory must contain `config.json`, `tokenizer.json` and either
+`model.safetensors` or `pytorch_model.bin`. `tools/configure_deps.py` checks exactly
+that and reports the weights filename and size, because a directory with the
+checkpoint's *name* and none of its contents is what a killed download leaves behind.
+
+> **Upstream:** Zhu H, Li R, Zhang F, Tang F, Ye T, Li X, Gu Y, Xiong P, Zhou S K.
+> *A fully-open structure-guided RNA foundation model for robust structural and
+> functional inference.* bioRxiv 2025.08.06.668731, doi:10.1101/2025.08.06.668731.
+> Code `github.com/heqin-zhu/structRFM`, weights `huggingface.co/heqin-zhu/structRFM`
+> (MIT, `model.safetensors`, 344 MB), also released as
+> `github.com/heqin-zhu/structRFM/releases/latest/download/structRFM_checkpoint.tar.gz`
+> (319 MB). This section previously cited "Zhai et al., *Nature Communications* 2024";
+> there is no such paper, and the model card names Zhu as the author of both the
+> repository and the checkpoint.
+>
+> **Getting it, on a slow link.** `python tools/fetch_structrfm.py` downloads the
+> checkpoint into `TorusFold-tools/structRFM` beside the repository — the place
+> `configure_deps.py` searches first. It exists because `huggingface_hub` did not work
+> here: the installed version has moved to Xet, the `HF_HUB_ENABLE_HF_TRANSFER` route is
+> deprecated, and Xet against a mirror does not move. Ranged GETs through
+> `hf-mirror.com` do, and in parallel they are much faster — 69 KB/s on one connection
+> versus 369 KB/s on eight, measured on the same 344 MB file, which is the difference
+> between 84 and 16 minutes. The assembled file is checked against the Hub's published
+> LFS sha256 and set aside as `.BAD` on mismatch.
+>
+> **ModelScope does not have it.** Checked 2026-10-14 against
+> `PUT modelscope.cn/api/v1/dolphin/models`: `structRFM`, `struct-rfm`, `heqin`,
+> `BPfold` and `trRosettaRNA` all return `TotalCount: 0`, while `RNAErnie` returns 3 —
+> so the query works and the answer is genuinely no. On a network where the Hub is
+> slow, `HF_ENDPOINT=https://hf-mirror.com` is the route that works.
+>
+> **A torch built without distributed disables this whole path.** structRFM is loaded
+> through `transformers`, and transformers 5.x imports torch DTensor while building
+> `GenerationMixin`, so under a torch where `hasattr(torch._C, "_c10d_init")` is False
+> (the ROCm build used here is one) `import transformers` succeeds and
+> `from transformers import AutoModel` raises
+> `ModuleNotFoundError: No module named 'torch._C._distributed_c10d'`. The checkpoint
+> can be present, complete, and still unusable. `tools/configure_deps.py` reports this
+> as a `BROKEN transformers` row with the failing statement, not as `OK`.
 
 ### Infernal / Rfam (optional MSA)
 

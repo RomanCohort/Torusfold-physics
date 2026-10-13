@@ -134,6 +134,10 @@ TOOLS = [
         "required": False,
         "note": "Opt-in only; loaded through transformers AutoModel.",
         "hints": ["structRFM", "structrfm"],
+        # A directory called structRFM is not a checkpoint. Without this, the search
+        # accepts any non-empty directory of that name -- including a download that
+        # stopped at 7 percent -- and reports it as found.
+        "require": ["config.json", "tokenizer.json"],
     },
     {
         "key": "rsrnasp1",
@@ -186,6 +190,24 @@ PACKAGES = [
     ("transformers", "transformers", "structRFM multi-task heads", False),
     ("pandas", "pandas", "analysis scripts", False),
 ]
+
+# Importability, not presence. `find_spec` answers whether a distribution is
+# installed; it does not answer whether the statement the code actually runs will
+# succeed, and on this machine those two disagree in a way the report called green.
+#
+# `transformers` 5.x imports torch DTensor on the way to building GenerationMixin, so
+# under a torch built with distributed compiled out (`hasattr(torch._C, "_c10d_init")`
+# is False) `import transformers` succeeds while `from transformers import AutoModel`
+# raises ModuleNotFoundError: No module named 'torch._C._distributed_c10d'. A report
+# that consulted only find_spec printed "OK transformers 5.9.0" for an interpreter in
+# which no AutoModel can ever be constructed.
+#
+# Only entries whose real import is NARROWER than the module name belong here. For the
+# rest, importing the module is the probe.
+PACKAGE_IMPORT_PROBES = {
+    "transformers": "from transformers import AutoModel, AutoTokenizer",
+    "openmm": "import openmm.app",
+}
 
 # Packaged tools that are separate executables rather than importable modules.
 BINARIES = [
@@ -336,8 +358,55 @@ def pick_interpreter(interpreters: List[Dict]) -> Optional[Dict]:
     return (gpu or usable)[0]
 
 
-def check_packages() -> List[Dict]:
+def probe_package_imports(python: Optional[str], timeout: float = 240.0,
+                          probes: Optional[Dict[str, str]] = None) -> Dict[str, Dict]:
+    """Run each real import statement in `python` and report which ones work.
+
+    One subprocess for all of them, under the interpreter the checker CHOSE. That
+    matters: `check_packages` reports what the running process can import, which is
+    the wrong interpreter whenever configure_deps is started with a different one —
+    and the whole point of this script is to describe the interpreter the pipeline
+    will actually use.
+
+    `probes` defaults to `PACKAGE_IMPORT_PROBES`; it is a parameter so the tests can
+    ask about a statement whose answer is known in advance.
+    """
+    import subprocess
+    if not python or not os.path.isfile(python):
+        return {}
+    probes = PACKAGE_IMPORT_PROBES if probes is None else probes
+    if not probes:
+        return {}
+    helper = (
+        "import json, sys\n"
+        "probes = json.loads(sys.argv[1])\n"
+        "out = {}\n"
+        "for key, stmt in probes.items():\n"
+        "    try:\n"
+        "        exec(compile(stmt, '<import probe>', 'exec'), {})\n"
+        "        out[key] = {'ok': True, 'why': None}\n"
+        "    except BaseException as exc:\n"
+        "        out[key] = {'ok': False,\n"
+        "                    'why': '%s: %s' % (type(exc).__name__, exc)}\n"
+        "print(json.dumps(out))\n"
+    )
+    try:
+        p = subprocess.run([python, "-c", helper, json.dumps(probes)],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return {}
+    for line in reversed((p.stdout or "").strip().splitlines()):
+        try:
+            return json.loads(line)
+        except ValueError:
+            continue
+    return {}
+
+
+def check_packages(probes: Optional[Dict[str, Dict]] = None) -> List[Dict]:
     out = []
+    probes = probes or {}
     for module, label, why, required in PACKAGES:
         spec = None
         try:
@@ -353,9 +422,15 @@ def check_packages() -> List[Dict]:
                     version = getattr(mod, "version", lambda: None)()
             except Exception:                      # noqa: BLE001 — import side effects
                 version = None
+        probe = probes.get(module) or {}
         out.append({
             "module": module, "label": label, "why": why, "required": required,
             "found": spec is not None, "version": str(version) if version else None,
+            # None means "not asked" (no probe for this package, or the probe was
+            # skipped), which renders differently from a probe that failed.
+            "usable": probe.get("ok"),
+            "import_why": probe.get("why"),
+            "import_probe": PACKAGE_IMPORT_PROBES.get(module),
         })
     return out
 
@@ -446,6 +521,12 @@ def _run_smoke(exe: str, timeout: float = 25.0) -> Tuple[bool, str]:
 CG_COEFF_FILES = ("AA_baseA.dat", "AA_baseG.dat", "AA_baseC.dat",
                   "AA_baseU.dat", "AA_backbone.dat")
 
+# The files a HuggingFace checkpoint has to have before `AutoModel.from_pretrained`
+# can build anything from it. The weights filename is not fixed across checkpoints,
+# so either spelling is accepted; see `_structrfm_verdict`.
+STRUCTRFM_REQUIRED_FILES = ("config.json", "tokenizer.json")
+STRUCTRFM_WEIGHT_FILES = ("model.safetensors", "pytorch_model.bin")
+
 
 def find_cg_coeff_dir(root: str) -> Optional[str]:
     """Where CG_to_allatom's coefficient files are, found rather than assumed.
@@ -507,6 +588,41 @@ def _isrnacirc_tree_root(path: str) -> str:
         return path
     parent = os.path.dirname(os.path.abspath(path))
     return parent if os.path.isdir(parent) else path
+
+
+def _structrfm_verdict(root: str, transformers_ok: Optional[bool]) -> Tuple[bool, str]:
+    """Is a directory a loadable structRFM checkpoint, and what should be said?
+
+    `probe: None` for this tool, because HuggingFace checkpoint layouts vary, so the
+    search accepts any non-empty directory named structRFM — including a half-finished
+    download, which is exactly what a first attempt at fetching this one produced
+    (24 MB of 344 MB before the transfer died). "A directory exists" is not "the
+    checkpoint is there", and the difference is 344 MB.
+
+    A complete checkpoint is `config.json` + `tokenizer.json` + a weights file. Which
+    of the two weight filenames it uses is not fixed, so both are accepted — but one
+    of them has to be present.
+    """
+    missing = [n for n in STRUCTRFM_REQUIRED_FILES
+               if not os.path.isfile(os.path.join(root, n))]
+    if missing:
+        return False, ("a directory named structRFM exists but has no %s, so it is "
+                       "not a checkpoint transformers can load"
+                       % ", ".join(missing))
+    weights = [n for n in STRUCTRFM_WEIGHT_FILES
+               if os.path.isfile(os.path.join(root, n))]
+    if not weights:
+        return False, ("config.json and tokenizer.json are present but neither %s -- "
+                       "that is the layout without the weights"
+                       % " nor ".join(STRUCTRFM_WEIGHT_FILES))
+    size_mb = os.path.getsize(os.path.join(root, weights[0])) / 1e6
+    if transformers_ok is False:
+        # The checkpoint is fine; the interpreter cannot load it. Saying which of the
+        # two is wrong is the whole point of this row — see the package table.
+        return True, ("checkpoint complete (%s, %.0f MB), but NOT loadable in the "
+                      "chosen interpreter: transformers cannot be imported there. "
+                      "See the BROKEN package row." % (weights[0], size_mb))
+    return True, "checkpoint complete (%s, %.0f MB)" % (weights[0], size_mb)
 
 
 def _isrnacirc_verdict(cg_ok: bool, coeff: Optional[str], refinement_ok: bool,
@@ -663,10 +779,22 @@ def _search_roots(tool: Dict, roots: List[str], max_depth: int = 4,
     return found
 
 
-def discover(roots: List[str], verbose: bool = False) -> Dict:
-    result = {"tools": [], "packages": check_packages(), "binaries": check_binaries()}
+def discover(roots: List[str], verbose: bool = False,
+             probe_imports: bool = True) -> Dict:
+    result = {"tools": [], "binaries": check_binaries()}
     result["interpreters"] = check_interpreters()
     result["interpreter"] = pick_interpreter(result["interpreters"])
+    # Interpreters first, so the import probes run in the interpreter that was CHOSEN
+    # rather than in whichever one started this script. `probe_imports=False` is the
+    # launcher's --fast path: a probe costs one interpreter start plus whatever the
+    # probed packages import on the way (torch alone is seconds), and the launcher
+    # must not pay that on every start.
+    chosen_python = (result["interpreter"] or {}).get("path")
+    probes = probe_package_imports(chosen_python) if probe_imports else {}
+    result["packages"] = check_packages(probes)
+    result["import_probes_run"] = bool(probes)
+    transformers_usable = next((p.get("usable") for p in result["packages"]
+                                if p["module"] == "transformers"), None)
 
     for tool in TOOLS:
         entry = dict(tool)
@@ -733,6 +861,12 @@ def discover(roots: List[str], verbose: bool = False) -> Dict:
         candidates = []
         if not resolved:
             candidates = _search_roots(tool, roots)
+            # The searched roots overlap -- the drive root contains the repository's
+            # parent, which contains the repository -- so the same directory comes back
+            # once per root and the report printed it as "also found" beside itself.
+            _seen = set()
+            candidates = [c for c in candidates
+                          if not (os.path.normcase(c) in _seen or _seen.add(os.path.normcase(c)))]
             # Rank by explicit intent, then by preference. An environment variable
             # the user already set is the strongest signal, and a copy this tool
             # downloaded into its own staging directory is the weakest — that one
@@ -740,10 +874,18 @@ def discover(roots: List[str], verbose: bool = False) -> Dict:
             # the machine.
             staged = os.path.normcase(os.path.join(os.path.dirname(REPO), "TorusFold-tools"))
             usable = []
+            seen = set()
             for hit in candidates:
                 ok, _why = _looks_like_tool(hit, tool)
                 if not ok:
                     continue
+                # The searched roots overlap -- the drive root contains the repository's
+                # parent, which contains the repository -- so the same directory comes
+                # back once per root and the report printed it as "also found" beside
+                # itself.
+                if os.path.normcase(hit) in seen:
+                    continue
+                seen.add(os.path.normcase(hit))
                 rank = 2
                 if os.path.normcase(hit).startswith(staged):
                     rank = 3
@@ -803,6 +945,18 @@ def discover(roots: List[str], verbose: bool = False) -> Dict:
                                         entry.get("isrnacirc_why", "unusable"),
                                         layout["bin_dir"])
             entry["reason"] = why
+            entry["verdict"] = why
+            if not ok:
+                resolved = None
+                source = None
+
+        # structRFM is a HuggingFace checkpoint directory, so the question is not
+        # whether a folder exists but whether it holds a loadable model. A half
+        # finished download passes every presence check that only looks at the name.
+        if tool["key"] == "structrfm" and resolved:
+            ok, why = _structrfm_verdict(resolved, transformers_usable)
+            entry["reason"] = why
+            entry["verdict"] = why
             if not ok:
                 resolved = None
                 source = None
@@ -1050,13 +1204,13 @@ def render(result: Dict) -> str:
         out.append("  %s %-38s %s" % (mark, t["title"][:38], t.get("source") or ""))
         if t.get("resolved"):
             out.append("          %s" % t["resolved"])
-            if t["key"] == "isrnacirc" and t.get("reason"):
-                # A resolved isRNAcirc still has something worth saying: which of
-                # its sub-steps work. Its MD refinement binary is a separate
-                # optional piece, and a bare path would hide that it is absent —
-                # the same omission that once printed BLOCKING for a working
-                # install, in a different shape.
-                out.append("          %s" % t["reason"])
+            # A resolved tool can still have something worth saying: for isRNAcirc,
+            # which of its two sub-steps work; for structRFM, the weights filename and
+            # size, which is how a 24 MB download is told apart from a 344 MB one. A
+            # bare path is the same omission that once printed BLOCKING for a working
+            # install, in a different shape.
+            if t.get("verdict"):
+                out.append("          %s" % t["verdict"])
         elif t.get("layout"):
             lay = t["layout"]
             if lay.get("cg_to_aa"):
@@ -1105,9 +1259,23 @@ def render(result: Dict) -> str:
     out.append("Python packages in the running interpreter")
     out.append("-" * 74)
     for p in result["packages"]:
-        mark = "OK     " if p["found"] else ("MISSING" if p["required"] else "absent ")
+        # Three states, not two. "installed" and "importable" are different questions
+        # and the report used to answer only the first while printing OK.
+        if p["found"] and p.get("usable") is False:
+            mark = "BROKEN "
+        elif p["found"]:
+            mark = "OK     "
+        elif p["required"]:
+            mark = "MISSING"
+        else:
+            mark = "absent "
         ver = (" %s" % p["version"]) if p["version"] else ""
         out.append("  %s %-16s %-28s%s" % (mark, p["label"][:16], p["why"][:28], ver))
+        if p.get("usable") is False:
+            for line in _wrap("the code's own import failed -- %s : %s"
+                              % (p.get("import_probe") or p["module"],
+                                 p.get("import_why") or "unknown reason"), 66):
+                out.append("          ! %s" % line)
 
     out.append("")
     out.append("Command-line tools")
@@ -1127,6 +1295,14 @@ def render(result: Dict) -> str:
     pk = [p for p in result["packages"] if not p["found"] and p["required"]]
     if pk:
         out.append("  MISSING PACKAGES: %s" % ", ".join(p["label"] for p in pk))
+    broken = [p for p in result["packages"] if p["found"] and p.get("usable") is False]
+    if broken:
+        # Not the same as missing: reinstalling will not fix it, and an optional tool
+        # that depends on the package is silently unusable until it is.
+        out.append("  NOT IMPORTABLE : %s" % ", ".join(p["label"] for p in broken))
+    if not result.get("import_probes_run"):
+        out.append("  (import probes not run: --fast, or the chosen interpreter "
+                   "could not be started)")
     out.append("")
     return "\n".join(out)
 
@@ -1163,7 +1339,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.action == "check":
         return _check_wrappers()
 
-    result = discover(roots)
+    result = discover(roots, probe_imports=not args.fast)
     if args.json_out or args.action == "json":
         print(json.dumps(result, indent=2, ensure_ascii=False))
         return 0

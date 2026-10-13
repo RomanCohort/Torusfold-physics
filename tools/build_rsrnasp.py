@@ -47,13 +47,29 @@ DEFAULT_WSL_ROOT = "~/tools/rsRNASP1"
 
 def _wsl(args, timeout=600.0) -> Tuple[bool, str]:
     try:
+        # bytes + an explicit decode: wsl.exe emits the command's UTF-8 output and then
+        # its own diagnostic as UTF-16LE on the same stream, and NUL survives a UTF-8
+        # decode. See `rsrnasp_quality._decode_wsl_output` for the measurement.
         p = subprocess.run(["wsl.exe", "-e", "bash", "-lc", args],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "timed out"
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)[:200]
-    return p.returncode == 0, ((p.stdout or "") + (p.stderr or "")).strip()
+
+    def dec(raw: bytes) -> str:
+        # wsl.exe appends its own message in UTF-16LE after the command's UTF-8 output;
+        # cut at that signature rather than trying to filter it out line by line, since
+        # the decoded banner contains newlines of its own.
+        for marker in (b"w\x00s\x00l\x00:\x00", b"W\x00S\x00L\x00:\x00"):
+            cut = raw.find(marker)
+            if cut != -1:
+                raw = raw[:cut]
+        text = raw.replace(b"\x00", b"").decode("utf-8", errors="replace")
+        return "\n".join(l for l in text.splitlines()
+                         if not l.lstrip().lower().startswith("wsl:"))
+
+    return p.returncode == 0, (dec(p.stdout or b"") + dec(p.stderr or b"")).strip()
 
 
 def _distro() -> Optional[str]:

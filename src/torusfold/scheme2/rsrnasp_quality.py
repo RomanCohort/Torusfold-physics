@@ -77,25 +77,65 @@ def _wsl_distro() -> Optional[str]:
     """
     try:
         p = subprocess.run(["wsl.exe", "-e", "bash", "-lc", "echo $WSL_DISTRO_NAME"],
-                           capture_output=True, text=True, timeout=60)
+                           capture_output=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
         return None
     if p.returncode != 0:
         return None
-    name = (p.stdout or "").strip().splitlines()[-1:] or [""]
+    name = (_decode_wsl_output(p.stdout or b"")).strip().splitlines()[-1:] or [""]
     return name[0] or None
+
+
+def _decode_wsl_output(raw: bytes) -> str:
+    """Decode wsl.exe's stdout, which carries TWO encodings at once.
+
+    Measured on this machine: the command's own output is UTF-8 (`ls -d ...` gives
+    `b'/home/ocr/tools/rsRNASP1\\n'`), and wsl.exe then appends its own diagnostic as
+    UTF-16LE on the same stream:
+
+        b"...\\nw\\x00s\\x00l\\x00:\\x00 \\x00<hKm0R \\x00l\\x00o\\x00c\\x00a\\x00l\\x00h\\x00o\\x00s\\x00t\\x00..."
+
+    ("wsl: 检测到 localhost 代理配置，但未镜像到 WSL。NAT 模式下的 WSL 不支持
+    localhost 代理"). Two ways this bites, both seen here:
+
+    1. Decoding the whole buffer as UTF-8 does not fail, because 0x00 is valid UTF-8,
+       so the NULs survive as NULs. A caller doing `out.splitlines()[-1]` then picks up
+       the banner, and passing that text back into a later `wsl.exe` call raises
+       `ValueError: embedded null character` from CreateProcess. That surfaced as
+       "check failed: embedded null character" for rsRNASP1 -- a probe that had been
+       passing.
+    2. Deleting the NULs is not enough on its own: the banner decodes to mojibake that
+       contains newlines of its own, so a line filter does not isolate it and it ends up
+       glued onto the real value ("rsRNASP1 not found at N/ec localhost ...").
+
+    Cutting at the banner's own signature -- "wsl:" in UTF-16LE -- removes it exactly,
+    and leaves the UTF-8 half byte-for-byte intact.
+    """
+    for marker in (b"w\x00s\x00l\x00:\x00", b"W\x00S\x00L\x00:\x00"):
+        cut = raw.find(marker)
+        if cut != -1:
+            raw = raw[:cut]
+    text = raw.replace(b"\x00", b"").decode("utf-8", errors="replace")
+    return "\n".join(line for line in text.splitlines()
+                     if not line.lstrip().lower().startswith("wsl:"))
 
 
 def _run_bash(command: str, timeout: float = 300.0):
     """Run one bash command inside WSL. Returns (ok, stdout+stderr)."""
     try:
+        # Bytes, not text=True: this machine's locale is cp936 and wsl.exe emits UTF-8
+        # mixed with a UTF-16LE banner (see _decode_wsl_output above). Decoding with the
+        # locale raised UnicodeDecodeError inside subprocess's reader thread, which left
+        # p.stdout as None while the process had in fact succeeded -- reported as
+        # "rsRNASP1 is not installed".
         p = subprocess.run(["wsl.exe", "-e", "bash", "-lc", command],
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return False, "timed out after %.0fs" % timeout
     except (OSError, subprocess.SubprocessError) as exc:
         return False, str(exc)[:200]
-    out = ((p.stdout or "") + (p.stderr or "")).strip()
+    out = (_decode_wsl_output(p.stdout or b"")
+           + _decode_wsl_output(p.stderr or b"")).strip()
     return p.returncode == 0, out
 
 

@@ -7,7 +7,13 @@ Four prediction heads share one encoder:
   3. BSJ closure head: whether circularization is productive
   4. Clash prediction head: per-position clash probability
 
-Inspiration: structRFM (Zhai et al. 2024, Nature Communications)
+Inspiration: structRFM -- "A fully-open structure-guided RNA foundation model for
+robust structural and functional inference", Zhu H, Li R, Zhang F, Tang F, Ye T,
+Li X, Gu Y, Xiong P, Zhou S K. bioRxiv 2025.08.06.668731, doi 10.1101/2025.08.06.668731.
+Code and weights: github.com/heqin-zhu/structRFM, HuggingFace `heqin-zhu/structRFM`
+(MIT). This line read "Zhai et al. 2024, Nature Communications" for some time; there is
+no such paper, the author of both the repository and the checkpoint is Zhu, and the
+preprint is 2025 -- corrected against the model card, which is the primary source.
   - per-nucleotide independent classifiers
   - structural condition input (embedding_struct)
   - multi-task loss (MLM + SS + NSP)
@@ -33,8 +39,21 @@ BASE_TYPES = ["A", "U", "G", "C", "N"]
 class StructRFMEncoder(nn.Module):
     """Wrapper around a pretrained structRFM encoder.
 
-    Returns 768-dim per-nucleotide features.
-    max_length=514; long sequences are chunked automatically.
+    Returns 768-dim per-nucleotide features, one row per residue.
+
+    LENGTHS. The checkpoint's own limits are 514: `config.json` says
+    `max_position_embeddings: 514` and the tokenizer says `model_max_length: 514`.
+    The per-chunk size below is 510 rather than 514 so that a chunk cannot trip
+    truncation if a tokenizer ever does inject special tokens. The earlier comment
+    here called 512 "structRFM length cap", which was neither limit.
+
+    ONE ROW PER RESIDUE. `tokenizer.json` declares a ByteLevel post-processor and no
+    template, so `tokenizer(seq)` emits exactly len(seq) ids and adds no [CLS]/[SEP]
+    -- measured, not assumed: 24 nt -> 24 ids, 510 nt -> 510 ids, 800 nt -> 800 ids,
+    identical with `add_special_tokens` True and False. That is what makes the
+    `[:L]` slice in `forward` correct rather than an off-by-one. If a future
+    tokenizer revision starts injecting specials, this class silently misaligns
+    every residue by one, so `tests/test_multitask_heads.py` pins the token count.
     """
 
     def __init__(self, model_path: str = None):
@@ -43,19 +62,35 @@ class StructRFMEncoder(nn.Module):
         self._model = None
         self._tokenizer = None
         self.feature_dim = 768
-        self.max_length = 512  # structRFM length cap
+        self.max_length = 512  # chunk size; see the length note above
 
     def _load(self):
         if self._model is not None:
             return
-        from transformers import AutoTokenizer, AutoModel
+        try:
+            from transformers import AutoTokenizer, AutoModel
+        except ImportError as exc:
+            raise ImportError(
+                "structRFM needs `transformers`, and it could not be imported. On "
+                "Windows the usual cause is not a missing package: transformers 5.x "
+                "imports torch DTensor to build GenerationMixin, and a torch built "
+                "with distributed compiled out has no torch._C._distributed_c10d, "
+                "so `from transformers import AutoModel` fails even though "
+                "`import transformers` succeeds. Check with "
+                "`python -c \"from transformers import AutoModel\"` and use an "
+                "interpreter whose torch reports "
+                "`hasattr(torch._C, '_c10d_init')` as True."
+            ) from exc
         path = self.model_path or os.environ.get("TF_STRUCTRFM_MODEL", "")
         if not path:
             raise ValueError(
                 "A pretrained structRFM model path is required "
                 "(pass model_path=... or set TF_STRUCTRFM_MODEL).")
-        self._tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
-        self._model = AutoModel.from_pretrained(path, trust_remote_code=True)
+        # No `trust_remote_code`: the checkpoint's config.json declares no `auto_map`
+        # and ships no modelling file, so there is no remote code to load and the flag
+        # could only ever widen what a substituted model directory is allowed to run.
+        self._tokenizer = AutoTokenizer.from_pretrained(path)
+        self._model = AutoModel.from_pretrained(path)
         self._model.eval()
         for p in self._model.parameters():
             p.requires_grad = False
@@ -67,6 +102,17 @@ class StructRFMEncoder(nn.Module):
         Long sequences are chunked, max_length-2 tokens per chunk.
         """
         self._load()
+        # The checkpoint's vocabulary is {A,U,C,G,N} plus the five specials, spelled in
+        # upper case. Anything else maps to [UNK] without complaint, so a lower-case
+        # caller would get a whole sequence of [UNK] embeddings and no error anywhere.
+        # Normalise, then refuse what the vocabulary genuinely cannot represent.
+        sequence = sequence.upper()
+        unknown = sorted(set(sequence) - set("ACGUN"))
+        if unknown:
+            raise ValueError(
+                "structRFM's vocabulary is A/U/C/G/N only; got %r. Those bases would "
+                "silently tokenize to [UNK]." % ("".join(unknown),))
+
         L = len(sequence)
         all_features = []
 

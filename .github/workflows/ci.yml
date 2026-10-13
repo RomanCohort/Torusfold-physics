@@ -65,11 +65,11 @@ jobs:
 
       # Scope, stated so the log is not read as more than it is. Re-measured 2026-10-14 by
       # running these commands with `torch/` moved out of the interpreter, which
-      # reproduces the runner's state without needing the runner: 46 test modules on
-      # disk, 24 excluded, 22 executed -> 131 passed, 6 skipped in ~3 s. Of the 24
+      # reproduces the runner's state without needing the runner: 48 test modules on
+      # disk, 24 excluded, 24 executed -> 159 passed, 6 skipped in ~10 s. Of the 24
       # exclusions, 15 import torch (or call importorskip("torch") at module level),
       # 8 reach torch through something they import, and 1 is a standalone script. The
-      # full suite is 381 passed / 2 skipped (plus one pre-existing failure in
+      # full suite is 409 passed / 2 skipped (plus one pre-existing failure in
       # tests/test_bond_constraints.py, which is on the exclusion list and so is not run
       # here). README.md "Testing & CI".
       #
