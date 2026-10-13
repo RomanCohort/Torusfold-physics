@@ -310,7 +310,7 @@ def check_interpreters() -> List[Dict]:
                  "py": None, "resolved": None}
         try:
             p = subprocess.run([exe, "-c", helper], capture_output=True, text=True,
-                               timeout=180)
+                               encoding="utf-8", errors="replace", timeout=180)
             if p.returncode == 0 and p.stdout.strip():
                 last = p.stdout.strip().splitlines()[-1]
                 data = json.loads(last)
@@ -415,7 +415,14 @@ def _run_smoke(exe: str, timeout: float = 25.0) -> Tuple[bool, str]:
     if not os.path.isfile(exe):
         return False, "not present"
     try:
-        p = subprocess.run([exe], capture_output=True, text=True, timeout=timeout,
+        # `errors="replace"` is not cosmetic. text=True decodes with the locale
+        # encoding, and this machine's is cp936; these binaries print bytes that
+        # are not valid cp936, so the decode raised UnicodeDecodeError inside
+        # subprocess's reader thread. That thread swallows nothing, but it
+        # poisons the result: p.stdout can come back None and the caller sees a
+        # bare return code with no idea what the program said.
+        p = subprocess.run([exe], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=timeout,
                            cwd=os.path.dirname(exe) or None)
     except subprocess.TimeoutExpired:
         # A program that hangs waiting for arguments has loaded successfully.
@@ -473,6 +480,77 @@ def find_cg_coeff_dir(root: str) -> Optional[str]:
         if has_all(base):
             return base
     return None
+
+
+# The directory names that hold isRNAcirc's pieces rather than being its root.
+# A directory called `bin/` is one component of a tree that also has `Data/`.
+_ISRNACIRC_COMPONENT_DIRS = ("bin", "CGtools", "cg2aa_bin")
+
+
+def _isrnacirc_tree_root(path: str) -> str:
+    """Widen a component directory to the tree that holds the other pieces.
+
+    The search below looks for *directories*, and it has no probe file to go on
+    for isRNAcirc — its tree root contains no filename that names the tool — so
+    the first non-empty directory it meets wins, and that is usually `bin/`.
+    Every piece was then looked for from inside `bin/`, where the sibling
+    `Data/` is invisible and the coefficient files are invisible, and a complete,
+    working installation was reported as PARTIAL with `Data/` "not found".
+
+    Walking up one level when (and only when) the name says "I am a component"
+    is the narrow version of that fix: it cannot promote an unrelated directory,
+    because the name has to be one of isRNAcirc's own component names.
+    """
+    if not path or not os.path.isdir(path):
+        return path
+    if os.path.basename(os.path.abspath(path)) not in _ISRNACIRC_COMPONENT_DIRS:
+        return path
+    parent = os.path.dirname(os.path.abspath(path))
+    return parent if os.path.isdir(parent) else path
+
+
+def _isrnacirc_verdict(cg_ok: bool, coeff: Optional[str], refinement_ok: bool,
+                       has_data: bool, cg_why: str, exe_why: str,
+                       bin_dir: Optional[str]) -> Tuple[bool, str]:
+    """Does isRNAcirc count as installed, and what should the report say?
+
+    Separated from `discover` because it is the rule that was wrong and it was
+    unreachable from a test: no module in tests/ imported this file at all, so the
+    rule could only be exercised by running a whole-machine scan.
+
+    WHAT THE RULE IS. "Installed" means what the pipeline actually calls:
+    CG_to_allatom.exe loading, plus its five coefficient files. Nothing else.
+
+    WHAT IT USED TO BE, and why that was wrong. It also required the bundled MD
+    refinement binary (IsRNAcirc.exe / IsRNAcirc.out). That file is not on the
+    distributed package's bin/ directory, and `isrnacirc_refine()` in
+    `isrnacirc_wrapper.py` -- the only thing that would run it -- is defined and
+    never called: level-2 refinement goes through the Torch field or OpenMM
+    instead. So a complete, working CG->all-atom installation was printed as
+
+        BLOCKING      : isrnacirc
+
+    in the summary, and the conversion it was supposedly blocking ran end to end
+    (2400 atoms from a 200 nt input). A report that sends someone to fix a working
+    tool is worse than one that says nothing.
+    """
+    if not cg_ok:
+        return False, ("CG_to_allatom.exe %s (in %s)"
+                       % (cg_why, bin_dir or "?"))
+    if not coeff:
+        return False, (
+            "CG_to_allatom.exe launches but its coefficient files (%s) "
+            "are nowhere in the tree, so the conversion cannot run: it "
+            "exits with \"Wrong coeffDIR\". They are usually in "
+            "Data/data/IsRNA2/." % ", ".join(CG_COEFF_FILES[:2]))
+    if not refinement_ok:
+        return True, ("CG->all-atom usable (coeff: %s); the bundled IsRNAcirc "
+                      "refinement binary is not (%s), which no code path invokes"
+                      % (coeff, exe_why))
+    if not has_data:
+        return True, ("CG->all-atom usable (coeff: %s); Data/ is absent, which the "
+                      "refinement binary needs and the conversion does not" % coeff)
+    return True, "CG->all-atom and refinement both usable"
 
 
 def _isrnacirc_layout(root: str) -> Dict[str, Optional[str]]:
@@ -686,6 +764,10 @@ def discover(roots: List[str], verbose: bool = False) -> Dict:
         # reported as PARTIAL, not as found — otherwise the report sends the user to
         # configure an environment variable that cannot help.
         if tool["key"] == "isrnacirc" and resolved:
+            # The search frequently lands on `bin/` rather than on the tree (see
+            # `_isrnacirc_tree_root`). Widen before looking for anything, or the
+            # pieces that live beside `bin/` are unreachable from here.
+            resolved = _isrnacirc_tree_root(resolved)
             layout = _isrnacirc_layout(resolved)
             entry["layout"] = layout
             cg_ok = False
@@ -715,36 +797,15 @@ def discover(roots: List[str], verbose: bool = False) -> Dict:
             # failed with "Wrong coeffDIR".
             coeff = find_cg_coeff_dir(resolved)
             entry["cg_coeff_dir"] = coeff
-            if not cg_ok:
+            ok, why = _isrnacirc_verdict(cg_ok, coeff, entry.get("isrnacirc_usable"),
+                                        bool(layout["data"]),
+                                        entry.get("cg_to_allatom_why", ""),
+                                        entry.get("isrnacirc_why", "unusable"),
+                                        layout["bin_dir"])
+            entry["reason"] = why
+            if not ok:
                 resolved = None
                 source = None
-                entry["reason"] = ("CG_to_allatom.exe %s (in %s)"
-                                   % (entry["cg_to_allatom_why"],
-                                      layout["bin_dir"] or "?"))
-            elif not coeff:
-                resolved = None
-                source = None
-                entry["reason"] = (
-                    "CG_to_allatom.exe launches but its coefficient files (%s) "
-                    "are nowhere in the tree, so the conversion cannot run: it "
-                    "exits with \"Wrong coeffDIR\". They are usually in "
-                    "Data/data/IsRNA2/."
-                    % ", ".join(CG_COEFF_FILES[:2]))
-            elif not layout["data"]:
-                # Launching and having coefficients is still not the whole tool:
-                # the MD refinement path needs Data/ as well.
-                entry["reason"] = ("CG->all-atom ready (coeff: %s); Data/ is "
-                                   "absent so the isRNAcirc refinement path is not"
-                                   % coeff)
-            elif not entry.get("isrnacirc_usable"):
-                # The CG->all-atom path works; the MD refinement path does not.
-                # That is a partial result, and saying so is more useful than
-                # calling the whole tool missing.
-                entry["reason"] = ("CG->all-atom usable (coeff: %s); IsRNAcirc "
-                                   "refinement %s"
-                                   % (coeff, entry.get("isrnacirc_why", "unusable")))
-            else:
-                entry["reason"] = "CG->all-atom and refinement both usable"
 
         # Some wrappers execute a FILE rather than point at a directory. Resolve
         # that here, so what gets written to the environment is runnable.
@@ -757,6 +818,10 @@ def discover(roots: List[str], verbose: bool = False) -> Dict:
                 entry["reason"] = ("found %s but no runner script in it "
                                    "(%s)" % (resolved, ", ".join(tool["script_names"])))
 
+        # `entry["reason"]` is the more specific statement when a branch above
+        # wrote one — for isRNAcirc it holds which sub-step works and which does
+        # not, and overwriting it with the generic search note threw that away.
+        reason = entry.get("reason") or reason
         entry.update({"resolved": resolved, "source": source, "reason": reason,
                       "candidates": candidates[:8],
                       "env_to_set": (tool["env"][0] if resolved else None)})
@@ -985,6 +1050,13 @@ def render(result: Dict) -> str:
         out.append("  %s %-38s %s" % (mark, t["title"][:38], t.get("source") or ""))
         if t.get("resolved"):
             out.append("          %s" % t["resolved"])
+            if t["key"] == "isrnacirc" and t.get("reason"):
+                # A resolved isRNAcirc still has something worth saying: which of
+                # its sub-steps work. Its MD refinement binary is a separate
+                # optional piece, and a bare path would hide that it is absent —
+                # the same omission that once printed BLOCKING for a working
+                # install, in a different shape.
+                out.append("          %s" % t["reason"])
         elif t.get("layout"):
             lay = t["layout"]
             if lay.get("cg_to_aa"):

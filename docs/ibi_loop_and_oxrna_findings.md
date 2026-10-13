@@ -1843,7 +1843,7 @@ Chebyshev was a seven-chain number), and there is no arm-level evidence for K=16
 
 **REMOVED FROM THE REPOSITORY, the same day.** The script and the files this Part describes --
 `scripts/record_2oiu_reuse.py`, `scripts/demo_circrna_reuse.py`, `artifacts/reuse_demo/**`,
-`docs/community_reuse_record.md` and `docs/wiki_community_reuse_section.md` -- were taken back out of the
+`community_reuse_record.md` and `wiki_community_reuse_section.md` (both were in `docs/`) -- were taken back out of the
 tree at the team's request, before any of it reached a judge-facing page. What follows is what was measured
 and what it caught, which is the part worth keeping; the files themselves are recoverable from the history
 at `74cbb1b`. The pair-guide fix this work isolated STAYS IN (`bc5e741`), because that one is a defect in

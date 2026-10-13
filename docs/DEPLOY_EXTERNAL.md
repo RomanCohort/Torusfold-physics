@@ -129,7 +129,19 @@ the exe cannot load DLLs from a path containing non-ASCII characters):
 ```bash
 export ISRNACIRC_BIN_DIR="C:/path/to/IsRNAcirc/standalone/bin"   # contains CG_to_allatom.exe
 export CG_TO_ALLATOM_COEFF="C:/path/to/IsRNA2/coeff"             # coefficient dir
+export ISRNACIRC_ROOT="C:/path/to/IsRNAcirc/standalone"          # optional; $BIN_DIR/.. is assumed
 ```
+
+The coefficient directory is `Data/data/IsRNA2/` in the distributed package — *not*
+`Data/`. Pointing `CG_TO_ALLATOM_COEFF` at `Data/` looks right and fails at run time
+with `Wrong coeffDIR`, because the five `AA_*.dat` templates are one level below it.
+`python tools/configure_deps.py discover` finds them wherever they are and prints which
+of isRNAcirc's sub-steps work; `python tools/configure_deps.py write` records the result
+in `.env.local` / `activate_deps.bat`. `IsRNAcirc.exe` (the CPU MD refinement binary) is
+**not** needed: it is absent from the distributed `bin/` and nothing in this repository
+invokes it — Level 2 refinement runs through the Torch field or `openmm_gpu_refiner.py`.
+An earlier version of `configure_deps.py` required it and reported a complete install as
+`BLOCKING`.
 
 > **Upstream:** Jiang H, Xu Y, Tong Y, Zhang D, Zhou R. *IsRNAcirc: 3D structure
 > prediction of circular RNAs based on coarse-grained molecular dynamics simulation.*

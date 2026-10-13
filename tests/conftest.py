@@ -1,4 +1,4 @@
-﻿"""Pytest configuration for the TorusFold-Hybrid test suite.
+"""Pytest configuration for the TorusFold-Hybrid test suite.
 
 Two separate problems are handled here, both measured rather than assumed.
 
@@ -30,7 +30,7 @@ consulted. `collect_ignore` is the mechanism that skips a file without importing
 ===============================================================================
 
 `.gitlab-ci.yml` installs the core dependencies and nothing else, so the CI runner has
-no torch. Twenty of the thirty-six modules in tests/ import it -- directly, or
+no torch. Twenty-three of the forty-six modules in tests/ import it -- directly, or
 indirectly by importing a script from scripts/ that does -- and a module-level import
 that raises during collection is not a skipped test. pytest aborts the run:
 
@@ -40,24 +40,24 @@ that raises during collection is not a skipped test. pytest aborts the run:
 So the gate failed for a reason that says nothing about the code under test, which is
 the worst kind of red. The list below is the MEASURED set: every module in tests/ was
 collected on its own in an environment with core deps and no torch, and these are the
-twenty that raised ModuleNotFoundError.
+twenty-three that raised ModuleNotFoundError.
 
 They are skipped rather than deleted because without a GPU the suite on a developer
-machine is the full suite -- 365 passed, 2 skipped -- and every test here runs there.
+machine is the full suite -- 381 passed, 2 skipped -- and every test here runs there.
 Skipping only inside a torch-less environment keeps that true while making CI honest:
 a run reports what it actually exercised instead of dying at 1 s.
 
 WHY NOT `pytest.importorskip("torch")` IN EACH FILE. It is the usual answer and it was
-tried first, but it is wrong here for two reasons. It is twenty edits to files that
+tried first, but it is wrong here for two reasons. It is twenty-three edits to files that
 other work is editing concurrently, and the signal is not uniform: some modules import
 torch for real, others import a helper that does, so the guard would have to go in
 different places per file. And one of them, test_kinetic_temperature_dof.py, DOES call
 importorskip and still fails, because its module-level `import torch` runs first -- so
 "does this file mention importorskip" is not even a reliable way to find the files that
-need the guard. One list in one place is checkable; twenty scattered guards are not.
+need the guard. One list in one place is checkable; twenty-three scattered guards are not.
 
 The `[[tool.mypy.overrides]]`-style alternative, a marker, was also considered: it
-still requires editing twenty files to add the marker. This does not.
+still requires editing twenty-three files to add the marker. This does not.
 """
 
 import importlib.util

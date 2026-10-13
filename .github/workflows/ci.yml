@@ -63,13 +63,15 @@ jobs:
         run: |
           python -c "import openmm, numpy, scipy; print('openmm', openmm.version.version, '| numpy', numpy.__version__, '| scipy', scipy.__version__)"
 
-      # Scope, stated so the log is not read as more than it is. Re-measured 2026-10-06 by
+      # Scope, stated so the log is not read as more than it is. Re-measured 2026-10-14 by
       # running these commands with `torch/` moved out of the interpreter, which
-      # reproduces the runner's state without needing the runner: 45 test modules on
-      # disk, 24 excluded, 21 executed -> 115 passed, 6 skipped in 3.4 s. Of the 24
+      # reproduces the runner's state without needing the runner: 46 test modules on
+      # disk, 24 excluded, 22 executed -> 131 passed, 6 skipped in ~3 s. Of the 24
       # exclusions, 15 import torch (or call importorskip("torch") at module level),
       # 8 reach torch through something they import, and 1 is a standalone script. The
-      # full suite is 365 passed / 2 skipped and needs torch. README.md "Testing & CI".
+      # full suite is 381 passed / 2 skipped (plus one pre-existing failure in
+      # tests/test_bond_constraints.py, which is on the exclusion list and so is not run
+      # here). README.md "Testing & CI".
       #
       # A collection error aborts this step, and that is the property the gate relies
       # on: a new test module that cannot be collected fails here rather than quietly

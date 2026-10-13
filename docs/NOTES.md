@@ -855,4 +855,5 @@ rise instead of +3.598; and one verification asserted that the product's P/C4'/N
 which is false by 0.76 Å on a correct product because the reconstruction fits a template onto three anchors.
 Two numbers were also corrected: the Part 29 product is 1,550 atoms (not 1,551), and Part 30's "rise" was
 the all-step mean (3.43 -> 2.56 Å) while this record's stacked-step mean is 3.29 -> 3.22 Å. See findings
-Part 31, `docs/community_reuse_record.md`, and the paste-ready `docs/wiki_community_reuse_section.md`.
+Part 31; the reuse record and the paste-ready wiki section it produced were taken back out of the tree the
+same day, so neither is a path in this repository any more.
