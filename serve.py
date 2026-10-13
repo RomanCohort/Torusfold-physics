@@ -10,7 +10,9 @@ import os
 import sys
 import io
 import json
+import ctypes
 import re
+import subprocess
 import time
 import uuid
 import hashlib
@@ -1111,6 +1113,117 @@ def normalise_params(raw):
 
 # ── stdout/stderr capture for pipeline output ────────────────────
 
+# ── Stop machinery: a run that can be cancelled without restarting the process ──
+#
+# A prediction runs as a THREAD INSIDE this process, and its resume state lives in output_web/, so
+# the only previous way to stop one was to kill the server -- which took the finished levels in-memory
+# state with it. Two different things have to stop, and they need two mechanisms:
+#
+#   * THE MAIN LINE. There is no callback to hang a flag on: the pipeline is 2000 lines and prints a
+#     [Level X.Y] banner at every stage boundary. The tee that already sits on the pipeline's stdout
+#     (_TeeWriter, installed for the duration of the run) is therefore where the flag is consulted; the
+#     next print after a request raises _StopRequested and unwinds the run from wherever it is. That is
+#     what 'the main line checks at the level boundary and exits' means here, without threading a
+#     callback through the pipeline.
+#   * THE LEVEL'S CHILD PROCESSES. DivideFold, the PyRosetta server, the trRosetta runner -- they never
+#     see the flag. Every Popen created while a job is running registers itself below, and /api/stop
+#     terminates them (terminate() first, taskkill /T /F to take the tree).
+_stop_requested = threading.Event()
+_stop_done = threading.Event()
+_stop_state = {"job_id": None, "requested_at": None, "killed": []}
+_CHILDREN = []                 # (pid, label) for processes started during the running job
+_CHILDREN_LOCK = threading.Lock()
+STOP_WAIT_SECONDS = 20.0       # how long /api/stop waits for the run to leave its level before answering
+
+
+class _StopRequested(BaseException):
+    """Raised in the prediction thread once /api/stop has been honoured.
+
+    BaseException, NOT Exception, and that is deliberate: the pipeline is full of `except Exception`
+    blocks around the stages that fail most often (the ensembles, the subprocess fallbacks), and a stop
+    raised inside one of them was swallowed -- measured: with it derived from Exception, a stop request
+    during Level 1's ensemble wait left the run 'running' 20 seconds later, because each RhoFold+/
+    RNAbpFlow failure handler caught the stop and carried on. KeyboardInterrupt is derived from
+    BaseException for the same reason. The handler in _run_prediction names this class explicitly.
+    """
+
+
+class _TrackedPopen(subprocess.Popen):
+    """subprocess.Popen that registers itself while a prediction is running.
+
+    Installed as subprocess.Popen at import. Every call site in this repository spells it
+    subprocess.Popen(...) -- including the ones inside isrnaclong.py -- so they are all tracked, and so
+    is subprocess.run(), whose own body looks Popen up in the subprocess module namespace. Registration
+    only happens while a job is running, so the installer and the startup probes are unaffected.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        try:
+            if _predict_state.get("status") == "running":
+                label = " ".join(str(a) for a in args[:1])[:100]
+                with _CHILDREN_LOCK:
+                    _CHILDREN.append((self.pid, label or "child"))
+        except Exception:
+            pass                      # tracking is a convenience; it must never break a real spawn
+
+
+subprocess.Popen = _TrackedPopen
+
+
+def _kill_children(reason=""):
+    """Terminate every child a level started, and report which pids went away.
+
+    /T /F rather than terminate() alone because a level can start a launcher (a python wrapper or a
+    shell) that owns the process doing the work: killing the parent and leaving the grandchild is the
+    leftover this exists to prevent.
+    """
+    with _CHILDREN_LOCK:
+        kids = list(_CHILDREN)
+        _CHILDREN.clear()
+    killed = []
+    for pid, label in kids:
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15)
+            killed.append(pid)
+        except Exception:
+            pass
+    with _CHILDREN_LOCK:
+        _CHILDREN.clear()             # taskkill itself is tracked while status is still running
+    if killed:
+        _emit_log("warn", "stopped %d child process(es)%s: %s"
+                  % (len(killed), (" " + reason) if reason else "",
+                     ", ".join(str(k) for k in killed)))
+    return killed
+
+
+def _inject_stop_into(thread_ident):
+    """Make another thread raise _StopRequested at its next bytecode boundary (CPython).
+
+    WHY A SECOND MECHANISM. The cooperative flag needs the pipeline to PRINT, and a stage can run for
+    minutes without printing: measured, the request was still 'running' 20 s after being accepted while
+    Level 1 waited on an ensemble subprocess. This is the hard stop -- PyThreadState_SetAsyncExc, the
+    same mechanism a ctypes watchdog has used for years. What it cannot do is interrupt a C call that
+    never returns (a long ViennaRNA partition function), which is why the cooperative flag stays and why
+    the reply reports whether the run actually left.
+    """
+    try:
+        rc = ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(int(thread_ident)),
+                                                        ctypes.py_object(_StopRequested))
+        # 0 means no thread state carried that id; >1 means the call was undone and the interpreter is
+        # left alone (the documented failure mode). Both are worth a line in the log: a stop that does
+        # nothing and says nothing is the worst outcome for whoever pressed the button.
+        (_PROCESS_STDERR or sys.stderr).write("[stop] async exc -> thread %s rc=%s\n"
+                                             % (thread_ident, rc))
+        if rc != 1:
+            _emit_log("warn", "async stop to thread %s not delivered (rc=%s)" % (thread_ident, rc))
+        return rc == 1
+    except Exception as exc:
+        _emit_log("warn", "async stop failed: %s" % exc)
+        return False
+
+
 class _LogMirror:
     """Append every line the process writes to a file, as it is written.
 
@@ -1204,6 +1317,13 @@ class _TeeWriter:
         self.errors = "replace"
 
     def write(self, s):
+        # THE STOP CHECK. This object is installed as sys.stdout/sys.stderr for the duration of a run, so
+        # every stage banner the pipeline prints passes through here -- which makes it the one place a
+        # cancel flag can be consulted without threading a callback through 2000 lines of pipeline code.
+        # Raising at the next write unwinds the run from wherever it is, at the boundary it has reached.
+        # The check is FIRST, so nothing is written after the request.
+        if _stop_requested.is_set():
+            raise _StopRequested("stop requested via /api/stop")
         if isinstance(s, (bytes, bytearray)):
             s = bytes(s).decode(self.encoding, self.errors)
         if self._orig:
@@ -1217,6 +1337,8 @@ class _TeeWriter:
                 _emit_log(self._level, line)
 
     def flush(self):
+        if _stop_requested.is_set():
+            raise _StopRequested("stop requested via /api/stop")
         if self._orig:
             self._orig.flush()
         if self._buf.strip():
@@ -1362,6 +1484,21 @@ _active_connections = [0]
 _conn_lock = threading.Lock()
 
 
+class _ResultShim:
+    """What _build_result_dict needs from the pipeline's return value, when the pipeline ran in a child.
+
+    The child (tools/run_pipeline_job.py) cannot hand back a live object, so it writes the pieces: the
+    details dict plus the three scalars this file reads off the result. A stop button that leaves the
+    result schema behind is not worth having, and this keeps _build_result_dict unchanged.
+    """
+
+    def __init__(self, payload):
+        self.details = (payload or {}).get("details") or {}
+        self.closure_error = (payload or {}).get("closure_error", 0)
+        self.pair_rate = (payload or {}).get("pair_rate", 0)
+        self.method = (payload or {}).get("method", "rhofoldcirclong")
+
+
 def _confine(candidate, root):
     """realpath(candidate) when it resolves strictly inside realpath(root), else None.
 
@@ -1494,6 +1631,8 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
 
         if path in ("/api/predict", "/predict"):
             self._handle_predict()
+        elif path in ("/api/stop", "/stop"):
+            self._handle_stop()
         elif path in ("/api/upload", "/upload"):
             self._handle_upload()
         elif path in ("/api/score-pdb", "/api/score-pdb"):
@@ -2325,6 +2464,15 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
 
     def _run_prediction(self, sequence, params):
         global _predict_state
+        # A run starts from a clean stop state: a flag left set by an earlier stop would abort this run at
+        # its first print.
+        _stop_requested.clear()
+        _stop_done.clear()
+        _stop_state.update({"job_id": _predict_state.get("job_id"), "requested_at": None,
+                            "killed": [], "thread_ident": threading.get_ident(),
+                            "hard_stop": False})
+        with _CHILDREN_LOCK:
+            _CHILDREN.clear()
         _note_stage("0", "Secondary structure prediction")
 
         _emit_log("step", "=== TorusFold Pipeline Started ===")
@@ -2400,13 +2548,9 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             _emit_log("info", "parameters: " + ", ".join(
                 f"{k}={call_kwargs[k]}" for k in sorted(call_kwargs) if k != "verbose"))
 
-            from torusfold.scheme2.isrnaclong import isrnaclong_pipeline
-            result = isrnaclong_pipeline(
-                sequence=sequence,
-                secondary_structure=ss,
-                output_dir=out_dir,
-                **call_kwargs,
-            )
+            # IN A CHILD PROCESS, so /api/stop can really kill it: see _run_pipeline_child.
+            result_payload = self._run_pipeline_child(sequence, ss, out_dir, call_kwargs,
+                                                      _stdout_mirror)
 
             elapsed = time.time() - _predict_state["start_time"]
             _emit_log("success", f"Pipeline complete in {elapsed:.1f}s")
@@ -2419,12 +2563,20 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
                     pdb_text = f.read()
 
             # Build comprehensive result JSON
-            details = getattr(result, "details", {}) or {}
-            result_dict = _build_result_dict(
-                result=result, details=details, pdb_text=pdb_text,
-                sequence=sequence, ss=ss, mfe=mfe, elapsed=elapsed,
-                pdb_path=pdb_path, out_dir=out_dir,
-            )
+            details = (result_payload or {}).get("details") or {}
+            try:
+                result_dict = _build_result_dict(
+                    result=_ResultShim(result_payload), details=details, pdb_text=pdb_text,
+                    sequence=sequence, ss=ss, mfe=mfe, elapsed=elapsed,
+                    pdb_path=pdb_path, out_dir=out_dir,
+                )
+            except Exception as exc:                 # noqa: BLE001
+                # The run SUCCEEDED; its result schema is what failed. A missing key in the child's JSON
+                # must not turn a finished prediction into a failed one, so the products on disk stay
+                # the answer and the panel is told what could not be assembled.
+                _emit_log("warn", "result assembly failed: %s" % exc)
+                result_dict = {"status": "done", "sequence_length": len(sequence),
+                               "pdb_path": pdb_path, "warning": "result assembly failed: %s" % exc}
 
             _publish_final("done", "Complete")
             _predict_state["progress"] = 100.0
@@ -2433,12 +2585,188 @@ class TorusFoldHandler(SimpleHTTPRequestHandler):
             _predict_state["stage_label"] = "Complete"
             _predict_state["result"] = result_dict
 
+        except _StopRequested:
+            # A STOP IS NOT A FAILURE. The boundary it left from is reported; the checkpoint and the logs
+            # of the finished levels stay where they are (nothing here deletes artifacts); and the state
+            # goes back to idle, so the next /api/health reports job_status: idle and a new prediction is
+            # accepted rather than refused with 409.
+            _kill_children("(left after the stop)")
+            _emit_log("warn", "STOPPED by request at Level %s. Finished levels keep their checkpoint in "
+                              "output_web; the next run resumes from it."
+                      % (_predict_state.get("level_name") or "?"))
+            _publish_final("stopped", "Stopped by request")
+            with _JOB_LOCK:
+                _JOB_ID["current"] = None
+            _predict_state.update({"status": "idle", "error": None,
+                                   "message": "Stopped by request", "job_id": None})
         except Exception as exc:
             _emit_log("error", f"Pipeline failed: {exc}")
             _publish_final("error", str(exc), error=str(exc))
         finally:
             sys.stdout = orig_stdout
             sys.stderr = orig_stderr
+            # Whatever happened, the flag must not survive into the next run, and /api/stop may be waiting
+            # on this event to answer.
+            _stop_requested.clear()
+            _stop_done.set()
+
+    def _run_pipeline_child(self, sequence, ss, out_dir, call_kwargs, mirror):
+        """Run the pipeline as a CHILD PROCESS and stream its output into this panel.
+
+        WHY NOT A THREAD ANY MORE. It was a thread, and a stop then had to be cooperative: the tee raised
+        _StopRequested at the next print. That is enough for a stage that prints, and it is not enough for
+        Level 1: the work happens in a ThreadPoolExecutor and the calling thread waits in a C-level wait,
+        where a pending async exception is not delivered. Measured: 24 injections into the right thread
+        (rc=1) over 20 s changed nothing; only killing the server stopped the run. A child process can be
+        killed outright -- taskkill /T /F takes its whole thread pool -- while the server keeps the port,
+        the panel and the SSE stream. tools/run_pipeline_job.py is the child.
+
+        The child's stdout is fed through the same _TeeWriter the in-process run used, so the stage
+        banners still drive the progress bar, the lines still reach the SSE panel and the job log, and
+        the stop check still happens in one place.
+        """
+        job_id = _predict_state.get("job_id") or "job"
+        spec_path = os.path.join(out_dir, "%s.job.json" % job_id)
+        result_path = os.path.join(out_dir, "%s.result.json" % job_id)
+        stop_file = os.path.join(out_dir, "%s.stop" % job_id)
+        for stale in (result_path, result_path + ".error", stop_file):
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+        with open(spec_path, "w", encoding="utf-8") as fh:
+            json.dump({"sequence": sequence, "ss": ss,
+                       "params": {k: v for k, v in call_kwargs.items() if k != "verbose"},
+                       "output_dir": out_dir, "result_path": result_path,
+                       "stop_file": stop_file}, fh)
+        runner = os.path.join(ROOT, "tools", "run_pipeline_job.py")
+        proc = subprocess.Popen([sys.executable, "-u", runner, spec_path],
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                cwd=ROOT, bufsize=1, universal_newlines=True,
+                                encoding="utf-8", errors="replace")
+        _stop_state["child_pid"] = proc.pid
+        _emit_log("info", "pipeline child pid=%d" % proc.pid)
+        _predict_state["child_pid"] = proc.pid
+        sink = _TeeWriter(mirror, "info")      # raises _StopRequested when a stop has been requested
+        try:
+            for line in proc.stdout:
+                sink.write(line)
+        except _StopRequested:
+            raise
+        finally:
+            try:
+                proc.wait(timeout=30)
+            except Exception:
+                pass
+        if _stop_requested.is_set():
+            raise _StopRequested("child process stopped on request")
+        if proc.returncode != 0:
+            reason = ""
+            try:
+                with open(result_path + ".error", encoding="utf-8") as fh:
+                    reason = fh.read().strip()
+            except OSError:
+                pass
+            raise RuntimeError("pipeline child exited with %s%s"
+                               % (proc.returncode, (": " + reason) if reason else ""))
+        with open(result_path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def _handle_stop(self):
+        """POST /api/stop {"job_id": "..."} -- stop the running prediction, without restarting this
+        process.
+
+        LOCAL CALLERS ONLY. The server binds 127.0.0.1 and the public side is an ssh reverse tunnel
+        whose far end is blocked upstream, but a stop button is destructive, so the check is repeated
+        here: anything that is not a loopback peer gets 403. That also protects the case where someone
+        starts the server with --host 0.0.0.0 on purpose.
+
+        THE JOB ID IS A GUARD, NOT A LOOKUP: it has to be the id of the job that is running for the
+        request to act, so a stale browser tab cannot kill a fresh run. A request that names nothing
+        running -- or names a different job -- answers 200 with "stopped": null.
+
+        The response is sent only after the run has actually left its level (up to STOP_WAIT_SECONDS),
+        so the caller's very next /api/health poll reports job_status: idle. If it has not left yet the
+        answer says so ("stopped": null with "requested": <id>), rather than claiming a stop that has
+        not happened.
+        """
+        peer = (self.client_address or ("",))[0]
+        if peer not in ("127.0.0.1", "::1", "localhost"):
+            self._send_json({"error": "local callers only", "peer": peer}, 403)
+            return
+
+        body = self._read_body()
+        try:
+            opts = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            opts = {}
+        if not isinstance(opts, dict):
+            opts = {}
+        wanted = str(opts.get("job_id") or "").strip()
+
+        running = _predict_state.get("job_id") if _predict_state.get("status") == "running" else None
+        if running:
+            (_PROCESS_STDERR or sys.stderr).write(
+                "[stop] request for %s; worker thread %s; live threads: %s\n"
+                % (running, _stop_state.get("thread_ident"),
+                   [(t.ident, t.name) for t in threading.enumerate()]))
+            _emit_log("info", "stop check: worker thread %s of %s live thread(s)"
+                      % (_stop_state.get("thread_ident"), len(threading.enumerate())))
+        if not running:
+            self._send_json({"ok": True, "stopped": None, "reason": "no job is running"})
+            return
+        if wanted and wanted != running:
+            self._send_json({"ok": True, "stopped": None, "running": running,
+                             "reason": "the named job is not the one running"})
+            return
+
+        _stop_state.update({"job_id": running, "requested_at": time.time(), "killed": []})
+        _stop_requested.set()
+        _emit_log("warn", "stop requested for job %s" % running)
+
+        # 1. COOPERATIVE, AND THIS IS THE PATH THAT KEEPS THE CHECKPOINT CONSISTENT. The pipeline child
+        #    watches for this file at every print and leaves at the level boundary it has reached, the
+        #    way the in-process tee used to.
+        stop_file = os.path.join(ROOT, "output_web", "%s.stop" % running)
+        try:
+            with open(stop_file, "w", encoding="utf-8") as fh:
+                fh.write("stop requested at %s\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+        except OSError as exc:
+            _emit_log("warn", "could not write %s: %s" % (stop_file, exc))
+        grace_until = time.time() + 3.0
+        while _predict_state.get("status") == "running" and time.time() < grace_until:
+            if _stop_done.wait(0.25):
+                break
+
+        # 2. HARD, IF IT DID NOT. A level that never prints -- or a child that ignores the file -- gets its
+        #    process tree taken. This is the mechanism the in-thread version could not have, and the
+        #    measurement that forced it is in _run_pipeline_child.
+        if _predict_state.get("status") == "running":
+            _stop_state["killed"] = _kill_children("(stop request)")
+            _stop_state["hard_stop"] = True
+
+        # 3. LAST RESORT: a stage that runs entirely in this process and registered no child still gets the
+        #    thread injection. It is a no-op when nothing is left to stop.
+        deadline = time.time() + STOP_WAIT_SECONDS
+        while _predict_state.get("status") == "running" and time.time() < deadline:
+            if _stop_done.wait(0.25):
+                break
+            if time.time() >= grace_until + 1.0:
+                _inject_stop_into(_stop_state.get("thread_ident"))
+                time.sleep(0.5)
+        left = _predict_state.get("status") != "running"
+        if left:
+            # The request did its job; the file was a signal, not a record. The log line above is the
+            # record, and a stale .stop in output_web would only confuse the next reader of that
+            # directory.
+            try:
+                os.remove(stop_file)
+            except OSError:
+                pass
+        self._send_json({"ok": True, "stopped": running if left else None,
+                         "requested": running, "status": _predict_state.get("status"),
+                         "hard_stop": bool(_stop_state.get("hard_stop")),
+                         "killed_children": _stop_state.get("killed") or []})
 
     def _handle_log(self):
         """GET /api/log — the current job's log file.
@@ -3373,6 +3701,7 @@ def main():
         pass
     print(f"  GET  /api/schema   — tunable parameters, defaults and bounds")
     print(f"  POST /api/predict  — run pipeline")
+    print(f"  POST /api/stop     — stop the running job without restarting (loopback callers only)")
     print(f"  GET  /api/sse/{{jid}} — SSE streaming")
     print(f"  POST /api/feedback — save feedback")
     try:
