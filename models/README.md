@@ -69,8 +69,13 @@ These are references for preparing the bundle, not hard-coded runtime paths:
 | DivideFold | `C:\Users\颜子壹\DivideFold-main` |
 | isRNAcirc | `C:\baidunetdiskdownload\torusfold-hybrid\_isrnacirc_ascii` |
 
-RNAbpFlow is not present in the checked paths.  Fetch Zenodo record `18305861`
-and keep `checkpoint/RNA3DB.ckpt` under `RNAbpFlow/checkpoint/`.
+The development machine records RNAbpFlow at
+`C:\baidunetdiskdownload\TorusFold-tools\RNAbpFlow`.  On this account that
+directory cannot currently be enumerated (Windows returns `Access is denied`),
+so grant read access to the account or copy the checkout to
+`C:\torusfold-models\RNAbpFlow`.  Keep its `checkpoint/RNA3DB.ckpt` under
+`RNAbpFlow/checkpoint/`.  If the checkpoint has to be fetched again, it is
+Zenodo record `18305861`.
 
 ## Archive checksums
 
