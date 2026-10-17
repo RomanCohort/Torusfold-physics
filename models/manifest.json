@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "model_root_env": "TORUSFOLD_MODELS",
+  "assets": [
+    {
+      "id": "rhofold",
+      "title": "RhoFold+ checkout and checkpoint",
+      "path": "RhoFold",
+      "required": true,
+      "required_files": [
+        "rhofold/__init__.py",
+        "pretrained/rhofold_pretrained_params.pt"
+      ],
+      "min_bytes": {
+        "pretrained/rhofold_pretrained_params.pt": 500000000
+      },
+      "sha256": {
+        "pretrained/rhofold_pretrained_params.pt": "3adb621978dfcd7ea0dc0edeb520d249f423d61530df85ff58a1fad2f33e5608"
+      },
+      "upstream": "https://github.com/wangwenjie/rhofold-plus",
+      "archive_name": "RhoFold.tar.zst"
+    },
+    {
+      "id": "rnabpflow",
+      "title": "RNAbpFlow checkout and checkpoint",
+      "path": "RNAbpFlow",
+      "required": true,
+      "required_files": [
+        "inference.py",
+        "configs/inference.yaml",
+        "checkpoint/RNA3DB.ckpt"
+      ],
+      "min_bytes": {
+        "checkpoint/RNA3DB.ckpt": 150000000
+      },
+      "upstream": "https://github.com/Bhattacharya-Lab/RNAbpFlow",
+      "archive_name": "RNAbpFlow.tar.zst"
+    },
+    {
+      "id": "trrna2",
+      "title": "trRosettaRNA2 package and weights",
+      "path": "trRNA2",
+      "required": true,
+      "required_files": [
+        "__init__.py",
+        "models/params/config/model_1.json",
+        "models/params/models/model_1.pth.tar",
+        "models/params/config_ss/model_1_finetune.json",
+        "models/params/models_ss/model_1_finetune.pth.tar",
+        "models/params/models_ss/model_2_finetune.pth.tar",
+        "models/params/models_ss/model_3_finetune.pth.tar"
+      ],
+      "min_bytes": {
+        "models/params/models/model_1.pth.tar": 35000000,
+        "models/params/models_ss/model_1_finetune.pth.tar": 20000000,
+        "models/params/models_ss/model_2_finetune.pth.tar": 20000000,
+        "models/params/models_ss/model_3_finetune.pth.tar": 20000000
+      },
+      "sha256": {
+        "models/params/models/model_1.pth.tar": "09e039f3e1383366438f159d27c663a253bd110412cece7da6232d6b31b01d3b",
+        "models/params/models_ss/model_1_finetune.pth.tar": "23defcc04f02613c07cf9ca4653e9367845480e249a4c90e32a61cfa82bb6ec8",
+        "models/params/models_ss/model_2_finetune.pth.tar": "79ee6324fcf377950d63643a538b1ecd8f5b768f27f40ac63f83060ad66c25a2",
+        "models/params/models_ss/model_3_finetune.pth.tar": "6ee709e30ff32f7b90791628b8bde7aa8bc877c2e7878b9f3bcb0e66b4af4eb3"
+      },
+      "archive_name": "trRNA2.tar.zst"
+    },
+    {
+      "id": "structrfm",
+      "title": "structRFM HuggingFace checkpoint",
+      "path": "structRFM",
+      "required": false,
+      "required_files": [
+        "config.json",
+        "tokenizer.json",
+        "model.safetensors"
+      ],
+      "min_bytes": {
+        "model.safetensors": 300000000
+      },
+      "sha256": {
+        "model.safetensors": "f6fb2c0770e5d4f5b19bdc899572d36b0d0873776b720c973ca508de6b56adfb"
+      },
+      "upstream": "https://huggingface.co/heqin-zhu/structRFM",
+      "archive_name": "structRFM.tar.zst"
+    },
+    {
+      "id": "dividefold",
+      "title": "DivideFold checkout and Keras model",
+      "path": "DivideFold",
+      "required": false,
+      "required_files": [
+        "data/models/divide_model.keras"
+      ],
+      "min_bytes": {
+        "data/models/divide_model.keras": 1000000
+      },
+      "sha256": {
+        "data/models/divide_model.keras": "149bcb11c828c6db7cfe97ee332bb0d924ba855d252aa3ed823223fc4cb46150"
+      },
+      "archive_name": "DivideFold.tar.zst"
+    },
+    {
+      "id": "isrnacirc",
+      "title": "isRNAcirc Windows CG-to-all-atom binaries",
+      "path": "isRNAcirc",
+      "required": false,
+      "platform": "windows",
+      "required_files": [
+        "bin/CG_to_allatom.exe",
+        "Data/data/IsRNA2/AA_baseA.dat",
+        "Data/data/IsRNA2/AA_baseG.dat",
+        "Data/data/IsRNA2/AA_baseC.dat",
+        "Data/data/IsRNA2/AA_baseU.dat",
+        "Data/data/IsRNA2/AA_backbone.dat"
+      ],
+      "sha256": {
+        "bin/CG_to_allatom.exe": "f5addf74c910a7629442a5ad7f49778704d14d21132e94d7fc42ed1db109102f",
+        "Data/data/IsRNA2/AA_baseA.dat": "23b322d282cc17d2270a07f18ab10ea1223631b87bb919934219b17cd5b0bb68",
+        "Data/data/IsRNA2/AA_baseG.dat": "582cf0f64f1693707b43e9a0b6ecc2ad5f418576c87feab62562656cac6ac3f4",
+        "Data/data/IsRNA2/AA_baseC.dat": "4c57fe9f01cf15132661b1a7b09e548011265e94999aea4ce7866a0149f212ec",
+        "Data/data/IsRNA2/AA_baseU.dat": "ae78561d09e6f06696a73108ec2bcea5c622a38e895c7b151ec3d06468cd81cb",
+        "Data/data/IsRNA2/AA_backbone.dat": "4edee2af62182fe321df83bcc424d5d563c1d29baab9492ca0310500dd512574"
+      },
+      "archive_name": "isRNAcirc.zip"
+    }
+  ]
+}

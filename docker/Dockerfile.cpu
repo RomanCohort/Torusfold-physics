@@ -1,0 +1,57 @@
+# CPU/Web development and CI image.
+#
+# The Windows-only isRNAcirc binary and the ROCm host GPU are intentionally
+# outside this image.  Mount the model bundle at /models instead of baking
+# weights into a layer.
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_NO_INPUT=1 \
+    TORUSFOLD_MODELS=/models
+
+WORKDIR /app
+
+# ViennaRNA and OpenMM have manylinux wheels.  Keep build tools out of the
+# final layer unless a future package needs them.
+RUN python -m pip install --no-cache-dir \
+        numpy==2.4.3 \
+        scipy==1.17.1 \
+        openmm==8.5.2 \
+        ViennaRNA==2.7.2 \
+        pytest==9.1.1 \
+        gemmi==0.7.5 \
+        transformers==5.9.0 \
+        scikit-learn==1.9.0 \
+        joblib==1.5.3 \
+        matplotlib==3.11.1 \
+        einops \
+        dm-tree \
+        ml_collections \
+        biopython
+
+RUN python -m pip install --no-cache-dir \
+        torch==2.13.0+cpu \
+        --index-url https://download.pytorch.org/whl/cpu
+
+COPY pyproject.toml README.md ./
+COPY src ./src
+COPY tools ./tools
+COPY scripts ./scripts
+COPY tests ./tests
+COPY serve.py run_2013nt.py ./
+COPY artifacts ./artifacts
+COPY data ./data
+COPY docs ./docs
+
+RUN python -m pip install --no-cache-dir -e . --no-deps
+
+RUN mkdir -p /app/output_web /models
+
+EXPOSE 8877
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8877/api/health', timeout=3)"
+
+CMD ["python", "-u", "serve.py", "8877"]

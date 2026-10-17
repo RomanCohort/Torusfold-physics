@@ -1,0 +1,30 @@
+services:
+  torusfold:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.cpu
+    image: torusfold:cpu
+    ports:
+      - "127.0.0.1:${TORUSFOLD_PORT:-8877}:8877"
+    environment:
+      TORUSFOLD_PYTHON: /usr/local/bin/python
+      TORUSFOLD_MODELS: /models
+      RHOFOLD_ROOT: /models/RhoFold
+      RNABPFLOW_ROOT: /models/RNAbpFlow
+      RNABPFLOW_PYTHON: /usr/local/bin/python
+      TRRNA2_ROOT: /models/trRNA2
+      TRRNA2_MODEL_DIR: /models/trRNA2/models/params
+      TRRNA2_RUNNER: /app/tools/trrna2_runner.py
+      TRRNA2_PYTHON: /usr/local/bin/python
+      TRRNA2_DEVICE: cpu
+      TF_STRUCTRFM_MODEL: /models/structRFM
+      TF_DIVIDEFOLD_ROOT: /models/DivideFold
+      TF_DIVIDEFOLD_PYTHON: /usr/local/bin/python
+    volumes:
+      - "${TORUSFOLD_MODELS_HOST:-./models}:/models:ro"
+      - "./output_web:/app/output_web"
+      - "./data:/app/data"
+      - "./artifacts:/app/artifacts:ro"
+    mem_limit: ${TORUSFOLD_MEMORY:-48g}
+    shm_size: 2g
+    restart: unless-stopped

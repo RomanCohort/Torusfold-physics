@@ -22,6 +22,34 @@ Quick map:
 | structRFM | multi-task DL heads checkpoint | `multitask_heads` | optional |
 | Infernal/cmsearch | Rfam MSA for chunk prediction | pseudo-MSA/real-MSA | optional |
 
+## Model bundle layout
+
+The external tools and checkpoints can be distributed as one bundle, for
+example through the team's cloud drive.  Extract it to a local disk and set
+`TORUSFOLD_MODELS` to the bundle root.  The expected layout and required files
+are in [`models/manifest.json`](../models/manifest.json):
+
+```
+torusfold-models/
+  RhoFold/
+  RNAbpFlow/
+  trRNA2/
+  structRFM/
+  DivideFold/
+  isrnacirc/          # Windows only
+```
+
+Check it before starting a run:
+
+```bash
+python tools/check_model_assets.py --root "C:/torusfold-models"
+```
+
+The checker reports missing files and undersized downloads.  Add per-file
+SHA-256 values to the manifest and run with `--sha256` when the bundle is
+shared between machines.  Cloud-drive folders must be synced to local storage;
+they cannot be used as Docker bind mounts.
+
 ## Core Python dependencies
 
 ```bash
@@ -81,18 +109,22 @@ export RHOFOLD_ROOT=/path/to/RhoFold         # package importable + pretrained/ 
 
 ### trRosettaRNA2 — `TRRNA2_RUNNER`
 
-`trrna2_wrapper.py` runs a small *runner script* (in a CPU-only environment) via
-subprocess. Point the runner at your trRosettaRNA2 install:
+`trrna2_wrapper.py` runs a *runner script* via subprocess.  The repository now
+ships a portable runner at [`tools/trrna2_runner.py`](../tools/trrna2_runner.py);
+it reads the checkout and weights from environment variables:
 
 ```bash
-export TRRNA2_RUNNER=/path/to/trrna2_runner.py
+export TRRNA2_ROOT=/path/to/trRNA2
+export TRRNA2_MODEL_DIR=/path/to/trRNA2/models/params
+export TRRNA2_RUNNER=$PWD/tools/trrna2_runner.py
 ```
 
 > **Upstream:** trRosettaRNA2 is actively maintained with many versions —
 > consult the original paper for the canonical release: Li S, et al.
 > *trRosettaRNA: automated prediction of RNA 3D structure with transformer
 > network.* Nat. Commun. 2021;12:5934. Provide a runner script that invokes
-> the matching trRosettaRNA2 install.
+> the matching trRosettaRNA2 install.  `TRRNA2_ROOT` must be the package
+> directory itself (the directory named `trRNA2`, containing `__init__.py`).
 
 ## DivideFold (optional Level-0 SS evidence)
 

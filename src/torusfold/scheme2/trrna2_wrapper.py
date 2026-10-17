@@ -2,9 +2,10 @@
 """trrna2_wrapper.py — trRosettaRNA2 inference via subprocess.
 
 trRNA2 needs a dedicated Python environment (CPU-only, to avoid ROCm MIOpen
-crashes); it is invoked through the _trrna2_runner.py subprocess.
+crashes); it is invoked through the portable tools/trrna2_runner.py subprocess.
 """
 import os
+import json
 import subprocess
 import sys
 import tempfile
@@ -13,7 +14,7 @@ from typing import Optional
 
 
 _RUNNER = os.environ.get("TRRNA2_RUNNER", "")
-_TRRNA2_PYTHON = sys.executable  # use the current interpreter; the runner forces CPU internally
+_TRRNA2_PYTHON = os.environ.get("TRRNA2_PYTHON") or sys.executable
 
 
 @dataclass
@@ -70,8 +71,12 @@ def trrna2_predict_chunk(
             "--out", out_base,
             "--num-recycles", str(num_recycles),
         ]
+        env = os.environ.copy()
+        # trRNA2 has been observed to hit ROCm/MIOpen instability.  Keep the
+        # subprocess on CPU unless the caller explicitly asks for another route.
+        env.setdefault("TRRNA2_DEVICE", "cpu")
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=None,
+            cmd, capture_output=True, text=True, timeout=None, env=env,
         )
 
         if result.returncode != 0:
@@ -94,9 +99,18 @@ def trrna2_predict_chunk(
         if os.path.exists(dist_path):
             dist = np.load(dist_path)
 
-        # Confidence from distance matrix quality
+        # Confidence from the runner's mean pLDDT when available.  The old
+        # distance-density heuristic is kept as a fallback for third-party
+        # runners that only produce the two arrays.
         confidence = 0.5
-        if dist is not None:
+        meta_path = out_base + "_meta.json"
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as handle:
+                    confidence = float(json.load(handle).get("plddt_mean", confidence))
+            except (OSError, ValueError, TypeError):
+                confidence = 0.5
+        elif dist is not None:
             # Simple confidence: how many strong distances
             strong = np.sum(dist < 15.0) / (dist.shape[0] * dist.shape[1])
             confidence = min(0.9, max(0.1, strong))

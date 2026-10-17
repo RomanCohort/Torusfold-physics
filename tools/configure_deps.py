@@ -121,15 +121,18 @@ TOOLS = [
     {
         "key": "trrna2",
         "title": "trRosettaRNA2 (ensemble member)",
-        "env": ["TRRNA2_RUNNER"],
+        "env": ["TRRNA2_ROOT", "TRRNA2_MODEL_DIR"],
         "probe": None,
+        "require": [
+            "__init__.py",
+            os.path.join("models", "params", "config", "model_1.json"),
+            os.path.join("models", "params", "models", "model_1.pth.tar"),
+        ],
         "levels": "Level 1 segmented 3D prediction",
         "required": False,
-        "note": "A runner SCRIPT, not a directory: the wrapper executes it directly.",
+        "note": "The checkout is a top-level `trRNA2` package. The portable "
+                "runner lives at tools/trrna2_runner.py; no machine path is needed.",
         "hints": ["trRosettaRNA2", "trrna2", "trRosettaRNA", "trRNA2"],
-        # The search finds the checkout directory, but the wrapper runs this file,
-        # so the value written to the environment has to be the file itself.
-        "script_names": ["_trrna2_runner.py", "trrna2_runner.py", "run_trrna2.py"],
     },
     {
         "key": "structrfm",
@@ -1134,8 +1137,10 @@ def env_for(result: Dict) -> Dict[str, str]:
             env["TF_DIVIDEFOLD_ROOT"] = root
             env["TF_DIVIDEFOLD_PYTHON"] = chosen
         elif key == "trrna2":
-            # The wrapper runs this path, so it must be the script, not the folder.
-            env["TRRNA2_RUNNER"] = t.get("script") or root
+            env["TRRNA2_ROOT"] = root
+            env["TRRNA2_MODEL_DIR"] = os.path.join(root, "models", "params")
+            env["TRRNA2_PYTHON"] = chosen
+            env["TRRNA2_RUNNER"] = os.path.join(REPO, "tools", "trrna2_runner.py")
         elif key == "structrfm":
             env["TF_STRUCTRFM_MODEL"] = root
     return env
@@ -1440,6 +1445,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     roots = list(args.roots or [])
     if not roots:
+        bundle_root = os.environ.get("TORUSFOLD_MODELS", "").strip()
+        if bundle_root and os.path.isdir(bundle_root):
+            roots.append(bundle_root)
         roots.append(os.path.dirname(REPO))
         roots.append(REPO)
         if args.drives:
@@ -1500,6 +1508,14 @@ def _check_wrappers() -> int:
         ("RNAbpFlow checkpoint",
          lambda: os.path.join(os.environ.get("RNABPFLOW_ROOT", ""),
                               "checkpoint", "RNA3DB.ckpt")),
+        ("trRNA2 runner",
+         lambda: os.environ.get("TRRNA2_RUNNER", "") or "(unset)"),
+        ("trRNA2 3D checkpoint",
+         lambda: os.path.join(os.environ.get("TRRNA2_MODEL_DIR", ""),
+                              "models", "model_1.pth.tar")),
+        ("structRFM checkpoint",
+         lambda: os.path.join(os.environ.get("TF_STRUCTRFM_MODEL", ""),
+                              "model.safetensors")),
     ]
     for label, fn in checks:
         try:

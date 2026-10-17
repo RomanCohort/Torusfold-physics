@@ -162,6 +162,26 @@ python serve.py            # default port 8877
 # open http://127.0.0.1:8877  (SSE log stream + Predict API + 3Dmol viewer)
 ```
 
+**Containerised CPU/Web path.** The Linux CPU image is the reproducible
+development and CI layer; it intentionally excludes the Windows-only
+`CG_to_allatom.exe` and the host ROCm GPU. Put external checkouts and weights
+under one directory (see `models/README.md`), then:
+
+```bash
+cp .env.docker.example .env.docker
+# edit TORUSFOLD_MODELS_HOST to the extracted model bundle
+docker compose --env-file .env.docker up --build
+```
+
+The service is published on `127.0.0.1` only. Validate the bundle before a run:
+
+```bash
+python tools/check_model_assets.py --root "C:/torusfold-models"
+```
+
+Deployment limits, WSL memory and the GPU/Windows split are documented in
+[`docs/DOCKER.md`](docs/DOCKER.md).
+
 Pre-built interactive demo of the 2013 nt prediction:
 `docs/circrna_3d_viewer.html`.
 
@@ -191,8 +211,12 @@ variables (no hard-coded machine paths in this repository):
 
 | Variable | Purpose |
 |---|---|
+| `TORUSFOLD_MODELS` | root of the extracted external-tool bundle (`models/manifest.json`) |
 | `RNABPFLOW_ROOT` | RNAbpFlow checkout dir (`checkpoint/RNA3DB.ckpt`, `inference.py`; the team's `inference_rocm.py` is used instead when present) |
 | `RNABPFLOW_PYTHON` | Python used to launch RNAbpFlow (default: current interpreter; must be the GPU one) |
+| `TRRNA2_ROOT` | trRosettaRNA2 checkout dir; must be named `trRNA2` and contain `__init__.py` |
+| `TRRNA2_MODEL_DIR` | params dir containing `config/`, `models/`, `config_ss/`, `models_ss/` |
+| `TRRNA2_PYTHON` | Python used to launch trRosettaRNA2 (default: current interpreter) |
 | `TRRNA2_RUNNER` | path to the trRosettaRNA2 runner script |
 | `RHOFOLD_ROOT` | RhoFold+ checkout dir (`pretrained/rhofold_pretrained_params.pt`) |
 | `ISRNACIRC_BIN_DIR` | dir containing `CG_to_allatom.exe` + DLLs (Windows, ASCII path) |
@@ -224,7 +248,9 @@ variables (no hard-coded machine paths in this repository):
 ## Data and large files
 
 This repository holds **source code only**. Model weights, datasets and heavy
-predictor checkouts are *not* committed:
+predictor checkouts are *not* committed. Their expected directory layout and
+required files are recorded in `models/manifest.json`; `tools/check_model_assets.py`
+validates a cloud-drive or shared-disk copy before use:
 
 - RNAbpFlow (~1.3 GB checkpoints) and the TriRNASP statistical potential are
   third-party tools installed separately.

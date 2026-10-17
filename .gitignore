@@ -15,6 +15,7 @@ develop-eggs/
 # must never be committed: the paths are personal and the file would break
 # everyone else's checkout by pinning it to one layout.
 .env.local
+.env.docker
 activate_deps.bat
 activate_deps.sh
 
