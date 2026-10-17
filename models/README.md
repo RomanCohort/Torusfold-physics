@@ -70,12 +70,11 @@ These are references for preparing the bundle, not hard-coded runtime paths:
 | isRNAcirc | `C:\baidunetdiskdownload\torusfold-hybrid\_isrnacirc_ascii` |
 
 The development machine records RNAbpFlow at
-`C:\baidunetdiskdownload\TorusFold-tools\RNAbpFlow`.  On this account that
-directory cannot currently be enumerated (Windows returns `Access is denied`),
-so grant read access to the account or copy the checkout to
-`C:\torusfold-models\RNAbpFlow`.  Keep its `checkpoint/RNA3DB.ckpt` under
-`RNAbpFlow/checkpoint/`.  If the checkpoint has to be fetched again, it is
-Zenodo record `18305861`.
+`C:\baidunetdiskdownload\TorusFold-tools\RNAbpFlow`.  Its ACL blocks ordinary
+enumeration on this account, so an elevated copy was made to
+`C:\torusfold-models\RNAbpFlow`.  The checkpoint is
+`RNAbpFlow/checkpoint/RNA3DB.ckpt` (203,025,869 bytes).  If it has to be
+fetched again, it is Zenodo record `18305861`.
 
 ## Archive checksums
 
